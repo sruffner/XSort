@@ -1,0 +1,6 @@
+**/XSort.egg-info/**
+.DS_Store
+venv/**
+**/__pycache__/**
+dist/*.gz
+dist/*.whl
