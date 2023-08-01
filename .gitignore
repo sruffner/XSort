@@ -1,8 +1,8 @@
 **/XSort.egg-info/**
 .DS_Store
+.idea/**
 venv/**
 **/__pycache__/**
 dist/*.gz
 dist/*.whl
 src/Xsort.egg-info/**
-
