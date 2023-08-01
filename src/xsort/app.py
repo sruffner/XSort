@@ -1,9 +1,9 @@
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QCloseEvent, QAction
+from PySide6.QtCore import Qt, QStandardPaths, QSettings, QByteArray
+from PySide6.QtGui import QColor, QCloseEvent, QAction, QScreen
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QMessageBox, QDockWidget
 
 # TODO: Python path hack. I cannot figure out how to organize program structure so I can run app.py from PyCharm IDE
@@ -91,9 +91,18 @@ class XSortMainWindow(QMainWindow):
         self.statusBar().showMessage("Ready")
 
     def install_docked_views(self):
+        """
+        Helper method installs each of the dockable views in a dock widget. By default, all views are initially docked
+        along the right edge, but the user can dock to the right or bottom edge of the main window. The bottom right
+        corner is reserved for the right docking area. Nesting is permitted.
+            This method must be called prior to restoring the main window's state from user settings. Each dock widget
+        is assigned a unique name '<title>-DOCK', where <title> is the title of the view it contains, so that its
+        state can be saved to and restored from user settings.
+        """
         for v in [self._similarity_view, self._templates_view, self._statistics_view, self._pca_view,
                   self._channels_view, self._umap_view]:
             dock = QDockWidget(v.title, self)
+            dock.setObjectName(f"{v.title}-DOCK")
             dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
             dock.setWidget(v)
             self.addDockWidget(Qt.RightDockWidgetArea, dock)
@@ -137,6 +146,13 @@ class XSortMainWindow(QMainWindow):
         Helper method preseerves GUI layout settings in user preferences storage on host system. This method should
         be called prior to application exit, but before the GUI is destroyed.
         """
+        # TODO: Avoiding native settings format so I can examine INI file during development
+        #  settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)
+        settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
+                             f".{APP_NAME}.ini")
+        settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
+        settings.setValue('geometry', self.saveGeometry())
+        settings.setValue('window_state', self.saveState(version=0))   # increment version as needed
 
     def _restore_layout_from_settings(self) -> None:
         """
@@ -144,7 +160,21 @@ class XSortMainWindow(QMainWindow):
         normally. This must not be called until after the main window and all views have been realized (but not
         shown). If the user preferences storage is not found on host, the GUI will come up in a default layout.
         """
-        pass
+        # TODO: Avoiding native settings format so I can examine INI file during development
+        #  settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)
+        settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
+                             f".{APP_NAME}.ini")
+        settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
+
+        geometry = settings.value("geometry", QByteArray())
+        if geometry and isinstance(geometry, QByteArray) and not geometry.isEmpty():
+            self.restoreGeometry(geometry)
+        else:
+            self.setGeometry(200, 200, 800, 600)
+
+        window_state = settings.value("window_state", QByteArray())
+        if window_state and isinstance(window_state, QByteArray) and not window_state.isEmpty():
+            self.restoreState(window_state)
 
 
 if __name__ == "__main__":
