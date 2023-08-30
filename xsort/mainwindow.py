@@ -5,9 +5,8 @@ from PySide6.QtCore import Qt, QStandardPaths, QSettings, QByteArray, QTimer
 from PySide6.QtGui import QCloseEvent, QAction, QShowEvent
 from PySide6.QtWidgets import QApplication, QMainWindow, QMenu, QMessageBox, QDockWidget, QFileDialog
 
-from xsort.analysis import Analyzer
-from xsort.baseview import BaseView, NeuronsView
 from xsort.constants import APP_NAME
+from xsort.views.manager import ViewManager
 
 
 class XSortMainWindow(QMainWindow):
@@ -19,21 +18,12 @@ class XSortMainWindow(QMainWindow):
         super().__init__()
         self._app = app
         """ The application instance. """
-        self._analyzer = Analyzer()
-        """ The data file analyzer. """
+        self._view_manager = ViewManager()
+        """ The model-view controller. """
         self._starting_up = True
         """ Flag set at startup so that all views will be updated to reflect contents of current working directory. """
 
-        # views -- all dockable and closable except the "Neurons" view, which serves as the central widget
-        self._neurons_view = NeuronsView(0, self._analyzer)
-        self._similarity_view = BaseView(1, "Similarity", self._analyzer)
-        self._templates_view = BaseView(2, "Templates", self._analyzer)
-        self._statistics_view = BaseView(3, "Statistics", self._analyzer)
-        self._pca_view = BaseView(4, "PCA", self._analyzer)
-        self._channels_view = BaseView(5, "Channels", self._analyzer)
-        self._umap_view = BaseView(6, "UMAP", self._analyzer)
-
-        self.setCentralWidget(self._neurons_view)
+        self.setCentralWidget(self._view_manager.central_view.view_container)
 
         # actions
         self._open_action: Optional[QAction] = None
@@ -55,8 +45,7 @@ class XSortMainWindow(QMainWindow):
         self.setMinimumSize(800, 600)
         self._restore_layout_from_settings()
         self._restore_workstate_from_settings()
-        title = f"{APP_NAME} ({str(self._analyzer.working_directory)})" if self._analyzer.has_files else APP_NAME
-        self.setWindowTitle(title)
+        self.setWindowTitle(self._view_manager.main_window_title)
 
     def create_actions(self):
         self._open_action = QAction('&Open', self, shortcut="Ctrl+O", statusTip="Select working directory",
@@ -99,12 +88,11 @@ class XSortMainWindow(QMainWindow):
         is assigned a unique name '<title>-DOCK', where <title> is the title of the view it contains, so that its
         state can be saved to and restored from user settings.
         """
-        for v in [self._similarity_view, self._templates_view, self._statistics_view, self._pca_view,
-                  self._channels_view, self._umap_view]:
+        for v in self._view_manager.dockable_views:
             dock = QDockWidget(v.title, self)
             dock.setObjectName(f"{v.title}-DOCK")
             dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
-            dock.setWidget(v)
+            dock.setWidget(v.view_container)
             self.addDockWidget(Qt.RightDockWidgetArea, dock)
             self._view_menu.addAction(dock.toggleViewAction())
 
@@ -121,17 +109,9 @@ class XSortMainWindow(QMainWindow):
         [QWidget override] When the main window is shown at startup, force user to select a working directory if one
         was not already restored from user preferences during initializations.
         """
-        if self._starting_up and not self._analyzer.has_files:
+        if self._starting_up and not self._view_manager.data_analyzer.is_valid_working_directory:
             QTimer.singleShot(10, self._select_working_directory_at_startup)
         self._starting_up = False
-
-    def open(self) -> None:
-        """
-        Handler for the File|Open action. Raises a modal dialog by which the user can choose a different working
-        directory for the application. A valid working directory must exist AND contain the data files XSort expects
-        (Omniplex PL2, spike sorter output).
-        """
-        self.select_working_directory(starting_up=False)
 
     def _select_working_directory_at_startup(self) -> None:
         self.select_working_directory(starting_up=True)
@@ -148,12 +128,12 @@ class XSortMainWindow(QMainWindow):
         directory before the application can continue. In this scenario, an explanatory message dialog notifies the
         user and offers the option to quit the application if no valid working directory exists.
         """
-        curr_dir = self._analyzer.working_directory
-        if starting_up and self._analyzer.has_files:
+        curr_dir = self._view_manager.data_analyzer.working_directory
+        if starting_up and self._view_manager.data_analyzer.is_valid_working_directory:
             return
         ok = False
         msg_btns = QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Abort
-        if self._analyzer.has_files:
+        if self._view_manager.data_analyzer.is_valid_working_directory:
             msg_btns |= QMessageBox.StandardButton.Cancel
         err_msg: Optional[str] = \
             ("You must specify an existing directory that contains the source data files (Omniplex recording, spike "
@@ -173,15 +153,14 @@ class XSortMainWindow(QMainWindow):
                 parent_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation))
             work_dir = QFileDialog.getExistingDirectory(self, "Select working directory for XSort",
                                                         str(parent_path.absolute()))
-            if work_dir == "" and self._analyzer.has_files:
+            if work_dir == "" and self._view_manager.data_analyzer.is_valid_working_directory:
                 # user cancelled and current working directory is valid
                 ok = True
             else:
-                err_msg = self._analyzer.change_working_directory(work_dir)
+                err_msg = self._view_manager.data_analyzer.change_working_directory(work_dir)
                 ok = (err_msg is None)
 
-        title = f"{APP_NAME} ({str(self._analyzer.working_directory)})" if self._analyzer.has_files else APP_NAME
-        self.setWindowTitle(title)
+        self.setWindowTitle(self._view_manager.main_window_title)
 
     def quit(self) -> None:
         """
@@ -250,7 +229,7 @@ class XSortMainWindow(QMainWindow):
         settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
                              f".{APP_NAME}.ini")
         settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
-        settings.setValue('working_dir', str(self._analyzer.working_directory))
+        settings.setValue('working_dir', str(self._view_manager.data_analyzer.working_directory))
 
     def _restore_workstate_from_settings(self) -> None:
         """
@@ -267,4 +246,4 @@ class XSortMainWindow(QMainWindow):
 
         str_path: Optional[str] = settings.value("working_dir")
         if isinstance(str_path, str):
-            self._analyzer.change_working_directory(str_path)
+            self._view_manager.data_analyzer.change_working_directory(str_path)

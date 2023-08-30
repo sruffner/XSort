@@ -3,10 +3,9 @@ from pathlib import Path
 from typing import Union, Optional, Dict, Any, List
 
 import numpy as np
-from PySide6.QtCore import QObject, Signal, QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QObject, Signal
 
-import PL2
+from xsort.data import PL2
 
 
 class Neuron:
@@ -130,52 +129,6 @@ class Neuron:
         return self._templates.get(channel)
 
 
-class NeuronTableModel(QAbstractTableModel):
-    """ TODO: UNDER DEV """
-
-    _header_labels: List[str] = ['UID', 'Channel', '#Spikes', 'Rate (Hz)', 'SNR', 'Amp(\u00b5V)', '%ISI<1']
-
-    def __init__(self, neurons: List[Neuron]):
-        QAbstractTableModel.__init__(self)
-        self._data: List[List[str]] = list()
-        self.load_table_data(neurons)
-
-    def load_table_data(self, neurons: List[Neuron]):
-        self._data.clear()
-        for u in neurons:
-            row = [u.label, '' if u.primary_channel is None else u.primary_channel, str(u.num_spikes),
-                   f"{u.mean_firing_rate_hz:.2f}", f"{u.snr:.2f}" if isinstance(u.snr, float) else "",
-                   f"{u.amplitude:.1f}" if isinstance(u.amplitude, float) else "",
-                   f"{100.0 * u.fraction_of_isi_violations:.2f}"]
-            self._data.append(row)
-
-    def rowCount(self, parent=QModelIndex()) -> int:
-        return len(self._data)
-
-    def columnCount(self, parent=QModelIndex()) -> int:
-        return len(self._header_labels)
-
-    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole) -> Any:
-        if role != Qt.DisplayRole:
-            return None
-        if (orientation == Qt.Horizontal) and (0 <= section < self.columnCount()):
-            return self._header_labels[section]
-        else:
-            return None
-
-    def data(self, index, role: int = Qt.DisplayRole) -> Any:
-        r = index.row()
-        c = index.column()
-        if (0 <= r < self.rowCount()) and (0 <= c <= self.columnCount()):
-            if role == Qt.DisplayRole:
-                return self._data[r][c]
-            elif role == Qt.BackgroundRole:
-                return QColor(Qt.white)
-            elif role == Qt.TextAlignmentRole:
-                return Qt.AlignRight
-        return None
-
-
 class Analyzer(QObject):
     """
     TODO: UNDER DEV
@@ -210,18 +163,17 @@ class Analyzer(QObject):
         return self._working_directory
 
     @property
-    def has_files(self) -> bool:
+    def is_valid_working_directory(self) -> bool:
         """ True if analyzer's working directory is set and contains the data files XSort requires. """
         return isinstance(self._working_directory, Path)
 
     @property
-    def neuron_table_model(self) -> QAbstractTableModel:
+    def neurons(self) -> List[Neuron]:
         """
-        A table model of the defined neural units, showing key metrics -- for display in the Neurons View. If the
-        analyzer's working directory is undefined or otherwise invalid, the model will be empty.
-        :return: Table model listing the currently defined neural units.
+        A **shallow** copy of the current list of neurons. If the working directory is undefined or otherwise invalid,
+        this will be an empty list.
         """
-        return NeuronTableModel(self._neurons)
+        return self._neurons.copy()
 
     def change_working_directory(self, p: Union[str, Path]) -> Optional[str]:
         """

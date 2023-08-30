@@ -8,7 +8,7 @@ from PySide6.QtWidgets import QApplication
 p = Path(__file__).parent
 sys.path.append(str(p.absolute()))
 
-from mainwindow import XSortMainWindow
+from xsort.mainwindow import XSortMainWindow
 
 if __name__ == "__main__":
     main_app = QApplication(sys.argv)
