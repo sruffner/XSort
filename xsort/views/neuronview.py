@@ -65,7 +65,7 @@ class NeuronView(BaseView):
         self._model = NeuronTableModel()
 
         self._table_view.setModel(self._model)
-        hdr = self._table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table_view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self._table_view.verticalHeader().setVisible(False)
         size = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
