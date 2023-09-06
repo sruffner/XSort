@@ -18,7 +18,7 @@ class XSortMainWindow(QMainWindow):
         super().__init__()
         self._app = app
         """ The application instance. """
-        self._view_manager = ViewManager()
+        self._view_manager = ViewManager(self)
         """ The model-view controller. """
         self._starting_up = True
         """ Flag set at startup so that all views will be updated to reflect contents of current working directory. """

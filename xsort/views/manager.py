@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import List
 
 from PySide6.QtCore import Slot
+from PySide6.QtWidgets import QMainWindow
 
 from xsort.data.analyzer import Analyzer
 from xsort.constants import APP_NAME
@@ -16,7 +17,9 @@ from xsort.views.umapview import UMAPView
 
 
 class ViewManager:
-    def __init__(self):
+    def __init__(self, main_window: QMainWindow):
+        self._main_window = main_window
+        """ Reference to the main application window -- to update standard UIlike status bar and window title."""
         self.data_analyzer = Analyzer()
         """
         The master data model. It encapsulates the notion of XSort's 'current working directory, mediates access to 
@@ -36,6 +39,7 @@ class ViewManager:
 
         # connect to Analyzer signals
         self.data_analyzer.working_directory_changed.connect(self.on_working_directory_changed)
+        self.data_analyzer.background_task_updated.connect(self.on_background_task_updated)
 
     @property
     def central_view(self) -> BaseView:
@@ -66,3 +70,7 @@ class ViewManager:
         """ Handler updates all views when the current working directory has changed. """
         for v in self._all_views:
             v.on_working_directory_changed()
+
+    @Slot()
+    def on_background_task_updated(self, msg: str) -> None:
+        self._main_window.statusBar().showMessage(msg if isinstance(msg, str) and (len(msg) > 0) else "Ready")

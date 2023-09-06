@@ -3,9 +3,10 @@ from pathlib import Path
 from typing import Union, Optional, Dict, Any, List
 
 import numpy as np
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot, QThreadPool
 
 from xsort.data import PL2
+from xsort.data.tasks import Task, TaskType
 
 
 class Neuron:
@@ -59,6 +60,10 @@ class Neuron:
         """
         return self._label
 
+    def is_purkinje(self) -> bool:
+        """ True if this neural unit represents the simple or complex spike train of a Purkinje cell. """
+        return (self._label.find('c') > 0) or (self._label.find('s') > 0)
+
     @property
     def mean_firing_rate_hz(self) -> float:
         """ This unit's mean firing rate in Hz. """
@@ -70,6 +75,14 @@ class Neuron:
     def num_spikes(self) -> int:
         """ Total number of spikes recorded for this unit. """
         return len(self._spike_times)
+
+    def compare_spike_times(self, n: "Neuron") -> bool:
+        """
+        Compare the spike train of this neural unit with the unit specified
+        :param n: A neural unit.
+        :return: True if this unit's spike train is identical to the specified unit.
+        """
+        return np.array_equal(self._spike_times, n._spike_times, equal_nan=True)
 
     @property
     def fraction_of_isi_violations(self) -> float:
@@ -136,6 +149,11 @@ class Analyzer(QObject):
 
     working_directory_changed: Signal = Signal()
     """ Signals that working directory has changed. All views should refresh accordingly. """
+    background_task_updated: Signal = Signal(str)
+    """ 
+    Signals a status update from a IO/analysis job running in the background. Arg (str): status message. If message is 
+    empty, then background task has finished. 
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -157,6 +175,8 @@ class Analyzer(QObject):
         List of defined neural units. When a valid working directory is set, this will contain information on the neural
         units identified in the original spiker sorter results file located in that directory.
         """
+        self._thread_pool = QThreadPool()
+        """ Managed thread pool for running slow background tasks. """
     @property
     def working_directory(self) -> Optional[Path]:
         """ The analyzer's current working directory. """
@@ -234,6 +254,7 @@ class Analyzer(QObject):
 
         # load neural units (spike train timestamps) from the spike sorter results file (PKL)
         neurons: List[Neuron] = list()
+        purkinje_neurons: List[Neuron] = list()  # sublist of Purkinje complex-spike neurons
         try:
             with open(pkl_file, 'rb') as f:
                 res = pickle.load(f)
@@ -244,22 +265,25 @@ class Analyzer(QObject):
                     if u['type__'] == 'PurkinjeCell':
                         neurons.append(Neuron(i + 1, u['spike_indices__'], u['sampling_rate__'], 's'))
                         neurons.append(Neuron(i + 1, u['cs_spike_indices__'], u['sampling_rate__'], 'c'))
+                        purkinje_neurons.append(neurons[-1])
                     else:
                         neurons.append(Neuron(i + 1, u['spike_indices__'], u['sampling_rate__']))
-                    # TODO: TESTING
-                    if u['type__'] == 'PurkinjeCell':
-                        print(f"Unit {neurons[-2].label}: #spikes={neurons[-2].num_spikes}, "
-                              f"%badISI = {neurons[-2].fraction_of_isi_violations:.1f}, "
-                              f"firing rate (Hz) = {neurons[-2].mean_firing_rate_hz:.2f}")
-                        print(f"Unit {neurons[-1].label}: #spikes={neurons[-1].num_spikes}, "
-                              f"%badISI = {neurons[-1].fraction_of_isi_violations:.1f}, "
-                              f"firing rate (Hz) = {neurons[-1].mean_firing_rate_hz:.2f}")
-                    else:
-                        print(f"Unit {neurons[-1].label}: #spikes={neurons[-1].num_spikes}, "
-                              f"%badISI = {neurons[-1].fraction_of_isi_violations:.1f}, "
-                              f"firing rate (Hz) = {neurons[-1].mean_firing_rate_hz:.2f}")
         except Exception as e:
             return f"Unable to read spike sorter results from PKL file: {str(e)}"
+
+        # the spike sorter algorithm generating the PKL file copies the 'cs_spike_indices__' of a 'PurkinjeCell' type
+        # into the 'spike_indices__' of a separate 'Neuron' type. Above, we split the simple and complex spike trains of
+        # the sorter's 'PurkinjeCell' into two neural units. We need to remove the 'Neuron' records that duplicate any
+        # 'PurkinjeCell' complex spike trains...
+        removal_list: List[int] = list()
+        for purkinje in purkinje_neurons:
+            n: Neuron
+            for i, n in enumerate(neurons):
+                if (not n.is_purkinje()) and purkinje.compare_spike_times(n):
+                    removal_list.append(i)
+                    break
+        for idx in sorted(removal_list, reverse=True):
+            neurons.pop(idx)
 
         # success
         self._working_directory = _p
@@ -269,9 +293,21 @@ class Analyzer(QObject):
         self._pkl_file = pkl_file
         self._neurons = neurons
 
-        # TODO: Spawn background task to update everything!
-
         # signal views
         self.working_directory_changed.emit()
 
+        # TODO: Spawn background task to update everything!
+        task = Task(TaskType.DUMMY, self._working_directory)
+        task.signals.progress.connect(self.on_task_progress)
+        task.signals.finished.connect(self.on_task_done)
+        self._thread_pool.start(task)
+
         return None
+
+    @Slot(str, int)
+    def on_task_progress(self, desc: str, pct: int) -> None:
+        self.background_task_updated.emit(f"{desc} - {pct}%")
+
+    @Slot(bool, object)
+    def on_task_done(self, ok: bool, result: object) -> None:
+        self.background_task_updated.emit("")
