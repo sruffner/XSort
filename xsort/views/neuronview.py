@@ -4,7 +4,8 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QTableView, QHeaderView, QHBoxLayout, QSizePolicy
 
-from xsort.data.analyzer import Analyzer, Neuron
+from xsort.data.analyzer import Analyzer
+from xsort.data.neuron import Neuron
 from xsort.views.baseview import BaseView
 
 
@@ -25,7 +26,7 @@ class NeuronTableModel(QAbstractTableModel):
             row = [u.label, '' if u.primary_channel is None else u.primary_channel, str(u.num_spikes),
                    f"{u.mean_firing_rate_hz:.2f}", f"{u.snr:.2f}" if isinstance(u.snr, float) else "",
                    f"{u.amplitude:.1f}" if isinstance(u.amplitude, float) else "",
-                   f"{100.0 * u.fraction_of_isi_violations:.2f}"]
+                   f"{(100.0 * u.fraction_of_isi_violations):.2f}"]
             self._data.append(row)
 
     def rowCount(self, parent=QModelIndex()) -> int:

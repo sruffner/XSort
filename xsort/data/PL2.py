@@ -208,6 +208,34 @@ def load_analog_channel_block(fp: IO, channel: int, block: int, info: Dict[str, 
     return np.array(_read(fp, "<{:d}h".format(num_items)), dtype=np.int16)
 
 
+def load_analog_channel_block_faster(fp: IO, channel: int, block: int, info: Dict[str, Any]) -> np.ndarray:
+    """
+    A faster version of **load_analog_channel_block()**. Unlike that method, it does NO sanity checks (so no **slow**
+    if statements). It assumes that the file information is complete and accurate and uses that to seek directly to
+    the start of the byte sequence for the specified channel block and read it in. It also uses **numpy.frombuffer** to
+    unpack the block of bytes into a Numpy array of 16-bit integer samples.
+
+        Previous testing has indicated that the most time-consuming operation when loading analog data from the PL2 file
+    is not reading the bytes, but unpacking them into 16-bit samples (x10 slower than reading the bytes) and then
+    storing the tuple of samples in a Numpy array (x3 slower than the unpacking). The **numpy.frombuffer** method
+    performs the unpacking and Numpy array creation MUCH more efficiently.
+
+        Testing has indicated this method is on the order of >100x faster than **load_analog_channel_block()**.
+
+    :param fp: The PL2 file object. The file must be open and is NOT closed on return.
+    :param channel: The analog channel index (zero-based).
+    :param block: The block index (zero-based).
+    :param info: Dictionary containing "table of contents" information needed to locate channel data -- as retrieved by
+        load_file_information().
+    :return: A Numpy array of the analog channel data samples for the block specified (raw ADC samples; int16).
+    :exception: A generic Exception if table of contents info is missing or incorrect, or an IO exception.
+    """
+    ofs = info["analog_channels"][channel]["block_offsets"][block] + struct.calcsize("<2B3HQ")
+    num_items = info["analog_channels"][channel]["block_num_items"][block]
+    fp.seek(ofs)
+    return np.frombuffer(fp.read(struct.calcsize("<{:d}h".format(num_items))), dtype='<h')
+
+
 def load_event_channel(fp: IO, channel: int, info: Dict[str, Any] = None,
                        scale: bool = False) -> Optional[Dict[str, np.ndarray]]:
     """
