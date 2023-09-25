@@ -5,7 +5,7 @@ from PySide6.QtCore import Slot, QStandardPaths, QSettings, QCoreApplication, QB
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QFileDialog, QMenu, QDockWidget
 
-from xsort.data.analyzer import Analyzer
+from xsort.data.analyzer import Analyzer, DataType
 from xsort.constants import APP_NAME
 from xsort.views.baseview import BaseView
 from xsort.views.channelview import ChannelView
@@ -30,6 +30,9 @@ class ViewManager:
         The master data model. It encapsulates the notion of XSort's 'current working directory, mediates access to 
         data stored in the various files within that directory, performs analyses triggered by view actions, and so on.
         """
+        self._focus_neuron: str = ""
+        """ Label identifying the neural unit with the current display focus. Empty string if undefined. """
+
         self._neuron_view = NeuronView(self.data_analyzer)
         self._similarity_view = SimilarityView(self.data_analyzer)
         self._templates_view = TemplateView(self.data_analyzer)
@@ -53,9 +56,13 @@ class ViewManager:
 
         self._construct_ui()
 
+        # connect to signals from views
+        self._neuron_view.selected_neuron_changed.connect(self.change_focus_neuron)
+
         # connect to Analyzer signals
         self.data_analyzer.working_directory_changed.connect(self.on_working_directory_changed)
-        self.data_analyzer.background_task_updated.connect(self.on_background_task_updated)
+        self.data_analyzer.progress_updated.connect(self.on_background_task_updated)
+        self.data_analyzer.data_ready.connect(self.on_data_ready)
 
         self._main_window.setMinimumSize(800, 600)
         self._restore_layout_from_settings()
@@ -138,11 +145,49 @@ class ViewManager:
         """ Handler updates all views when the current working directory has changed. """
         for v in self._all_views:
             v.on_working_directory_changed()
+        self._focus_neuron = ""
+        if len(self.data_analyzer.neurons) > 0:
+            self.change_focus_neuron(self.data_analyzer.neurons[0].label)
 
-    @Slot()
+    @Slot(str)
     def on_background_task_updated(self, msg: str) -> None:
-        """ Handler for progress updates from running background tasks. """
+        """
+        Handler for progress updates from background tasks run by :class:`Analyzer`. The progress message is displayed
+        in the application window's status bar. If the message is empty, the status bar will ready "Ready".
+
+        :param msg: The progress message.
+        """
         self._main_window.statusBar().showMessage(msg if isinstance(msg, str) and (len(msg) > 0) else "Ready")
+
+    @Slot(DataType, str)
+    def on_data_ready(self, dt: DataType, uid: str) -> None:
+        """
+        Handler updates relevant views when the data model signals that some data is ready to be accessed.
+        :param dt: The type of data object retrieved or prepared for access.
+        :param uid: Object identifier -- the unique label of a neural unit, or the integer index (in string form) of
+            the analog channel source for a channel trace segment.
+        """
+        if dt == DataType.NEURON:
+            for v in self._all_views:
+                v.on_neuron_metrics_updated(uid)
+        elif dt == DataType.CHANNELTRACE:
+            for v in self._all_views:
+                v.on_channel_trace_segment_updated(int(uid))
+
+    @Slot(str)
+    def change_focus_neuron(self, unit_label: str) -> None:
+        """
+        Change the identity of the neural unit that has the display focus. No action is taken if the specified unit
+        already has the focus; otherwise, all views are notified of the change.
+
+        :param unit_label: Unique label identifying the neural unit that now has the display focus.
+        """
+        if ((unit_label == self._focus_neuron) or
+                ((len(unit_label) > 0) and not (unit_label in [n.label for n in self.data_analyzer.neurons]))):
+            return
+        self._focus_neuron = unit_label
+        for v in self._all_views:
+            v.on_focus_neuron_changed(self._focus_neuron)
 
     def select_working_directory(self, starting_up: bool = False) -> None:
         """

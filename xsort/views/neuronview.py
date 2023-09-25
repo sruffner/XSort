@@ -1,6 +1,6 @@
-from typing import List, Any
+from typing import List, Any, Optional
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QItemSelection, Slot
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QTableView, QHeaderView, QHBoxLayout, QSizePolicy
 
@@ -55,10 +55,19 @@ class NeuronTableModel(QAbstractTableModel):
                 return Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         return None
 
+    def unit_label_for_row(self, row: int) -> Optional[str]:
+        """
+        The unit label for the specified row in the table.
+        :param row: Row index
+        :return: Corresponding neural unit label, or None if row index is invalid.
+        """
+        return self._data[row][0] if (0 <= row < self.rowCount()) else None
+
 
 class NeuronView(BaseView):
     """ TODO: UNDER DEV """
 
+    # noinspection PyUnresolvedReferences
     def __init__(self, data_manager: Analyzer) -> None:
         super().__init__('Neurons', None, data_manager)
         self._table_view = QTableView()
@@ -66,6 +75,8 @@ class NeuronView(BaseView):
         self._model = NeuronTableModel()
 
         self._table_view.setModel(self._model)
+        self._table_view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
+        self._table_view.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self._table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table_view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self._table_view.verticalHeader().setVisible(False)
@@ -73,10 +84,30 @@ class NeuronView(BaseView):
         size.setHorizontalStretch(1)
         self._table_view.setSizePolicy(size)
 
+        self._table_view.selectionModel().selectionChanged.connect(self.on_selection_changed)
         main_layout = QHBoxLayout()
         main_layout.addWidget(self._table_view)
         self.view_container.setLayout(main_layout)
 
     def on_working_directory_changed(self) -> None:
+        self._reload_neuron_table_contents()
+
+    def on_neuron_metrics_updated(self, unit_label: str) -> None:
+        self._reload_neuron_table_contents()
+
+    def on_focus_neuron_changed(self, unit_label: str) -> None:
+        for row in range(self._model.rowCount()):
+            if unit_label == self._model.unit_label_for_row(row):
+                self._table_view.selectRow(row)
+                break
+
+    def _reload_neuron_table_contents(self) -> None:
+        """ Reloads the entire neuron table from scratch. """
         self._model.load_table_data(self.data_manager.neurons)
         self._model.layoutChanged.emit()
+
+    @Slot(QItemSelection, QItemSelection)
+    def on_selection_changed(self, selected: QItemSelection, _: QItemSelection) -> None:
+        if isinstance(selected, QItemSelection):
+            unit_selected = self._model.unit_label_for_row(selected.first().bottom())
+            self.selected_neuron_changed.emit(unit_selected)
