@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Slot, QStandardPaths, QSettings, QCoreApplication, QByteArray, Qt
+from PySide6.QtCore import Slot, QStandardPaths, QSettings, QCoreApplication, QByteArray, Qt, QObject
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QFileDialog, QMenu, QDockWidget
 
@@ -17,12 +17,13 @@ from xsort.views.templateview import TemplateView
 from xsort.views.umapview import UMAPView
 
 
-class ViewManager:
+class ViewManager(QObject):
     """
     TODO: UNDER DEV -- This is essentially the view + controller for XSort. It builds the UI in the main application
         window and responds to signals from the Analyzer, which serves as the master data model.
     """
     def __init__(self, main_window: QMainWindow):
+        super().__init__(None)
         self._main_window = main_window
         """ Reference to the main application window -- to update standard UIlike status bar and window title."""
         self.data_analyzer = Analyzer()
@@ -30,8 +31,6 @@ class ViewManager:
         The master data model. It encapsulates the notion of XSort's 'current working directory, mediates access to 
         data stored in the various files within that directory, performs analyses triggered by view actions, and so on.
         """
-        self._focus_neuron: str = ""
-        """ Label identifying the neural unit with the current display focus. Empty string if undefined. """
 
         self._neuron_view = NeuronView(self.data_analyzer)
         self._similarity_view = SimilarityView(self.data_analyzer)
@@ -56,13 +55,11 @@ class ViewManager:
 
         self._construct_ui()
 
-        # connect to signals from views
-        self._neuron_view.selected_neuron_changed.connect(self.change_focus_neuron)
-
         # connect to Analyzer signals
         self.data_analyzer.working_directory_changed.connect(self.on_working_directory_changed)
         self.data_analyzer.progress_updated.connect(self.on_background_task_updated)
         self.data_analyzer.data_ready.connect(self.on_data_ready)
+        self.data_analyzer.focus_neurons_changed.connect(self.on_focus_neurons_changed)
 
         self._main_window.setMinimumSize(800, 600)
         self._restore_layout_from_settings()
@@ -145,9 +142,6 @@ class ViewManager:
         """ Handler updates all views when the current working directory has changed. """
         for v in self._all_views:
             v.on_working_directory_changed()
-        self._focus_neuron = ""
-        if len(self.data_analyzer.neurons) > 0:
-            self.change_focus_neuron(self.data_analyzer.neurons[0].label)
 
     @Slot(str)
     def on_background_task_updated(self, msg: str) -> None:
@@ -174,20 +168,13 @@ class ViewManager:
             for v in self._all_views:
                 v.on_channel_trace_segment_updated(int(uid))
 
-    @Slot(str)
-    def change_focus_neuron(self, unit_label: str) -> None:
+    @Slot()
+    def on_focus_neurons_changed(self) -> None:
         """
-        Change the identity of the neural unit that has the display focus. No action is taken if the specified unit
-        already has the focus; otherwise, all views are notified of the change.
-
-        :param unit_label: Unique label identifying the neural unit that now has the display focus.
+        Handler notifies all views when there's any change in the subset of neurons having the display focus.
         """
-        if ((unit_label == self._focus_neuron) or
-                ((len(unit_label) > 0) and not (unit_label in [n.label for n in self.data_analyzer.neurons]))):
-            return
-        self._focus_neuron = unit_label
         for v in self._all_views:
-            v.on_focus_neuron_changed(self._focus_neuron)
+            v.on_focus_neurons_changed()
 
     def select_working_directory(self, starting_up: bool = False) -> None:
         """

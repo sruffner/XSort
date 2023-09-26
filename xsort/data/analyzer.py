@@ -15,6 +15,12 @@ class DataType(Enum):
     CHANNELTRACE = 2
 
 
+MAX_NUM_FOCUS_NEURONS: int = 3
+""" The maximum number of neural units that can be selected simultaneously for display focus """
+FOCUS_NEURON_COLORS: List[str] = ['#0080FF', '#FF0000', '#FFFF00']
+""" Colors assigned to neurons selected for displahy focus, in selection order, in the format '#RRGGBB'. """
+
+
 class Analyzer(QObject):
     """
     The data model manager object for XSort.
@@ -32,7 +38,12 @@ class Analyzer(QObject):
     """ 
     Signals that some data that was retrieved or prepared in the background. Args: The data object type, and a 
     string identifier: the unit label for a neuron, or the integer index (as a string) of the analog channel source for
-    a channel trace segement.
+    a channel trace segment.
+    """
+    focus_neurons_changed: Signal = Signal()
+    """
+    Signals that the set of neural units currently selected for display/comparison purposes has changed in some way.
+    All views should be refreshed accordingly.
     """
 
     def __init__(self, parent=None):
@@ -63,8 +74,13 @@ class Analyzer(QObject):
         List of defined neural units. When a valid working directory is set, this will contain information on the neural
         units identified in the original spiker sorter results file located in that directory.
         """
+        self._focus_neurons: List[str] = list()
+        """ 
+        The labels of the neural units currently selected for display focus, in selection order.
+        """
         self._thread_pool = QThreadPool()
         """ Managed thread pool for running slow background tasks. """
+
     @property
     def working_directory(self) -> Optional[Path]:
         """ The analyzer's current working directory. None if no valid working directory has been set. """
@@ -172,6 +188,48 @@ class Analyzer(QObject):
         """
         return self._neurons.copy()
 
+    @property
+    def neurons_with_display_focus(self) -> List[Neuron]:
+        """
+        The sublist of neural units currently selected for display/comparions purposes, in display order.
+
+        :return: The list of neurons currently selected for display/comparison purposes. Could be empty. At most will
+            contain MAX_NUM_FOCUS_NEURONS entries.
+        """
+        return [u for u in self._neurons if (u.label in self._focus_neurons)]
+
+    def display_color_for_neuron(self, unit_label: str) -> Optional[str]:
+        """
+        Get the display color assigned to a neuron in the subset of neurons selected for display/comparison purposes.
+
+        :param unit_label: Label uniquely identifying a neural unit.
+        :return: None if unit label is invalid or if the corresponding neuron is NOT currently selected for display.
+            Otheriwse, the assigned color as a hexadecimal RGB string: '#RRGGBB'.
+        """
+        try:
+            return FOCUS_NEURON_COLORS[self._focus_neurons.index(unit_label)]
+        except ValueError:
+            return None
+
+    def update_neurons_with_display_focus(self, unit_label: str) -> None:
+        """
+        Update the list of neural units currently selected for display/comparison purposes. The specified unit is
+        removed from the selection list if it is already there; otherwise, it is appended to the end of the list unless
+        _MAX_NUM_FOCUS_NEURONS are already selected. **A signal is emitted whenever the neuron display list changes.**
+
+        :param unit_label: Unique label identifying the neural unit to be added or removed from the selection list. If
+            the label is invalid, or the current display list is full and does not contain the specified unit, no action
+            is taken.
+        """
+        if unit_label in self._focus_neurons:
+            self._focus_neurons.remove(unit_label)
+        elif ((len(self._focus_neurons) == MAX_NUM_FOCUS_NEURONS) or not
+                (unit_label in [n.label for n in self._neurons])):
+            return
+        else:
+            self._focus_neurons.append(unit_label)
+        self.focus_neurons_changed.emit()
+
     def change_working_directory(self, p: Union[str, Path]) -> Optional[str]:
         """
         Change the analyzer's current working directory. If the specified directory exists and contains the requisite
@@ -223,6 +281,9 @@ class Analyzer(QObject):
         self._channel_seg_start = 0
         self._pkl_file = pkl_file
         self._neurons = neurons
+        self._focus_neurons.clear()
+        if len(self._neurons) > 0:
+            self._focus_neurons.append(self._neurons[0].label)
 
         # signal views
         self.working_directory_changed.emit()

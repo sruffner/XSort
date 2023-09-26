@@ -1,6 +1,6 @@
 from typing import Optional
 
-from PySide6.QtCore import QSize, QObject, Signal
+from PySide6.QtCore import QSize, QObject
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QWidget
 
@@ -11,12 +11,6 @@ class BaseView(QObject):
     """
     A base class defining functionality common to all XSort view widgets as well as Qt-style signals that can be
     used for inter-view communications
-    """
-
-    selected_neuron_changed: Signal = Signal(str)
-    """ 
-    Signals a change in the neural unit selected within the NeuronView, which is considered the unit with the display 
-    focus across all XSort views. Arg (str): The label uniquely identifying the unit. If empty, no unit is selected.
     """
 
     def __init__(self, title: str, background: Optional[QColor], data_manager: Analyzer):
@@ -79,12 +73,9 @@ class BaseView(QObject):
         """
         pass
 
-    def on_focus_neuron_changed(self, unit_label: str) -> None:
+    def on_focus_neurons_changed(self) -> None:
         """
-        Refresh view contents after the user changes the display focus to a different neural unit. Default
+        Refresh view contents after a change in the list of neurons selected for display/comparison purposes. Default
         implementation takes no action.
-
-        :param unit_label: The unique label identifying the neural unit receiving the focus. Will be an empty string if
-            no unit has the display focus.
         """
         pass
