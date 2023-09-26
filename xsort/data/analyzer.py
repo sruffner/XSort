@@ -114,11 +114,55 @@ class Analyzer(QObject):
         Analog channel sampling rate in Hz -- same for all channels we care about. Will be 0 if current working
         directory is invalid.
         """
-        if (self._pl2_info is None) or len(self._channel_segments) == 0:
+        if (self._pl2_info is None) or (len(self._channel_segments) == 0):
             return 0
         else:
             idx = next(iter(self._channel_segments))
             return int(self._pl2_info['analog_channels'][idx]['samples_per_second'])
+
+    @property
+    def channel_recording_duration_seconds(self) -> float:
+        """
+        Duration of analog channel recording in seconds. This method reports the maximum observed recording duration
+        (total number of samples) across the channels we care about, but typically the duration is the same for all
+        channels. Will be 0 if current working directory is invalid.
+        """
+        rate = self.channel_samples_per_sec
+        if rate > 0:
+            dur = max([self._pl2_info['analog_channels'][idx]['num_values'] for idx in self._channel_segments.keys()])
+            return dur / rate
+        else:
+            return 0
+
+    @property
+    def channel_trace_seg_start(self) -> int:
+        """
+        The elapsed time in seconds at which the current analog channel trace excerpts begin, relaive to the start
+        of the Omniplex analog recording. All excerpts are one second in duration.
+        """
+        return self._channel_seg_start
+
+    def set_channel_trace_seg_start(self, t0: int) -> bool:
+        """
+        Set the elapsed time at which the current analog channel trace excerpts begin.
+        :param t0: The new start time in seconds. If this matches the current start time, no action is taken.
+        :return: True if trace segment start time was changed and a background task initiated to retrieve the trace
+            segments for all relevant analog channels. False if segment start value is unchanged, or specified start
+            time is invalid.
+        """
+        if (t0 == self._channel_seg_start) or (t0 < 0) or (t0 > self.channel_recording_duration_seconds):
+            return False
+
+        self._channel_seg_start = t0
+        for idx in self._channel_segments.keys():
+            self._channel_segments[idx] = None
+        task = Task(TaskType.GETCHANNELS, self._working_directory, start=t0, count=self.channel_samples_per_sec)
+        task.signals.progress.connect(self.on_task_progress)
+        task.signals.error.connect(self.on_task_failed)
+        task.signals.data_retrieved.connect(self.on_data_retrieved)
+        task.signals.finished.connect(self.on_task_done)
+        self._thread_pool.start(task)
+        return True
 
     @property
     def neurons(self) -> List[Neuron]:

@@ -28,6 +28,7 @@ class NeuronTableModel(QAbstractTableModel):
                    f"{u.amplitude:.1f}" if isinstance(u.amplitude, float) else "",
                    f"{(100.0 * u.fraction_of_isi_violations):.2f}"]
             self._data.append(row)
+        self.layoutChanged.emit()
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._data)
@@ -75,6 +76,7 @@ class NeuronView(BaseView):
         self._model = NeuronTableModel()
 
         self._table_view.setModel(self._model)
+        # self._table_view.setSortingEnabled(True)
         self._table_view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self._table_view.setSelectionMode(QTableView.SelectionMode.SingleSelection)
         self._table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -85,15 +87,16 @@ class NeuronView(BaseView):
         self._table_view.setSizePolicy(size)
 
         self._table_view.selectionModel().selectionChanged.connect(self.on_selection_changed)
+        self._table_view.clicked.connect(self.on_item_clicked)
         main_layout = QHBoxLayout()
         main_layout.addWidget(self._table_view)
         self.view_container.setLayout(main_layout)
 
     def on_working_directory_changed(self) -> None:
-        self._reload_neuron_table_contents()
+        self._model.load_table_data(self.data_manager.neurons)
 
     def on_neuron_metrics_updated(self, unit_label: str) -> None:
-        self._reload_neuron_table_contents()
+        self._model.load_table_data(self.data_manager.neurons)
 
     def on_focus_neuron_changed(self, unit_label: str) -> None:
         for row in range(self._model.rowCount()):
@@ -101,13 +104,15 @@ class NeuronView(BaseView):
                 self._table_view.selectRow(row)
                 break
 
-    def _reload_neuron_table_contents(self) -> None:
-        """ Reloads the entire neuron table from scratch. """
-        self._model.load_table_data(self.data_manager.neurons)
-        self._model.layoutChanged.emit()
-
     @Slot(QItemSelection, QItemSelection)
     def on_selection_changed(self, selected: QItemSelection, _: QItemSelection) -> None:
         if isinstance(selected, QItemSelection):
             unit_selected = self._model.unit_label_for_row(selected.first().bottom())
             self.selected_neuron_changed.emit(unit_selected)
+
+    # TODO: CONTINUE HERE -- Implement an event filter to handle left and right mouse clicks on the table view?
+    #  Left click appends the unit clicked to the list of selected units (up to 3 selected max), while right click
+    #  removes the unit from the selected list. Selection colors will be : blue, red, green
+    @Slot(QModelIndex)
+    def on_item_clicked(self, index: QModelIndex) -> None:
+        print(f"User clicke on unit {self._model.unit_label_for_row(index.row())}")
