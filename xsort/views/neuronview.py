@@ -120,12 +120,12 @@ class _NeuronTableModel(QAbstractTableModel):
 class NeuronView(BaseView):
     """ TODO: UNDER DEV """
 
-    # noinspection PyUnresolvedReferences
     def __init__(self, data_manager: Analyzer) -> None:
         super().__init__('Neurons', None, data_manager)
         self._table_view = QTableView()
         """ Table view displaying the neuron table (read-only). """
         self._model = _NeuronTableModel(data_manager)
+        """ Neuron table model (essentially wraps a table model around the data manager's neuron list). """
 
         self._table_view.setModel(self._model)
         self._table_view.setSortingEnabled(True)

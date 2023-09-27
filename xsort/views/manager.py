@@ -62,8 +62,7 @@ class ViewManager(QObject):
         self.data_analyzer.focus_neurons_changed.connect(self.on_focus_neurons_changed)
 
         self._main_window.setMinimumSize(800, 600)
-        self._restore_layout_from_settings()
-        self._restore_workstate_from_settings()
+        self._restore_from_settings()
         self._main_window.setWindowTitle(self.main_window_title)
 
     def _construct_ui(self) -> None:
@@ -240,28 +239,33 @@ class ViewManager(QObject):
 
     def _save_settings_and_exit(self) -> None:
         """ Save all user settings and exit the application without user prompt. """
-        self._save_layout_to_settings()
-        self._save_workstate_to_settings()
+        # TODO: Avoiding native settings format so I can examine INI file during development
+        #  settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)
+        settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
+                             f".{APP_NAME}.ini")
+        settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
+
+        # basic layout
+        settings.setValue('geometry', self._main_window.saveGeometry())
+        settings.setValue('window_state', self._main_window.saveState(version=0))  # increment version as needed
+
+        # any view-specific settings
+        for v in self._all_views:
+            v.save_settings(settings)
+
+        # current working directory
+        settings.setValue('working_dir', str(self.data_analyzer.working_directory))
+
         QCoreApplication.instance().exit(0)
 
-    def _save_layout_to_settings(self) -> None:
+    def _restore_from_settings(self) -> None:
         """
-        Helper method preseerves GUI layout settings in user preferences storage on host system. This method should
-        be called prior to application exit, but before the GUI is destroyed.
-        """
-        # TODO: Avoiding native settings format so I can examine INI file during development
-        #  settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)
-        settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
-                             f".{APP_NAME}.ini")
-        settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
-        settings.setValue('geometry', self._main_window.saveGeometry())
-        settings.setValue('window_state', self._main_window.saveState(version=0))   # increment version as needed
-
-    def _restore_layout_from_settings(self) -> None:
-        """
-        Helper method called at startup that restores the GUI layout in effect when the application last shutdown
-        normally. This must not be called until after the main window and all views have been realized (but not
-        shown). If the user preferences storage is not found on host, the GUI will come up in a default layout.
+        Helper method called at application startup to restore all user settings -- GUI layout, view-specific settings,
+        current working directory -- that were saved when the application last exited. This must not be called until
+        after the main window and all views have been realized (but not shown).
+            If the user preferences storage is not found or could not be read, application defaults are used for GUI
+        layout and any view-specific settings. If the working directory persisted in user preferences storage no longer
+        exists, the application will immediately ask the user to specify one.
         """
         # TODO: Avoiding native settings format so I can examine INI file during development
         #  settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)
@@ -269,6 +273,7 @@ class ViewManager(QObject):
                              f".{APP_NAME}.ini")
         settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
 
+        # basic layout
         geometry = settings.value("geometry", QByteArray())
         if geometry and isinstance(geometry, QByteArray) and not geometry.isEmpty():
             self._main_window.restoreGeometry(geometry)
@@ -279,31 +284,11 @@ class ViewManager(QObject):
         if window_state and isinstance(window_state, QByteArray) and not window_state.isEmpty():
             self._main_window.restoreState(window_state)
 
-    def _save_workstate_to_settings(self) -> None:
-        """
-        Helper method preseerves the current working directory and other work state information in user preferences
-        storage on host system. This method should be called prior to application exit.
-        """
-        # TODO: Avoiding native settings format so I can examine INI file during development
-        #  settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)
-        settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
-                             f".{APP_NAME}.ini")
-        settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
-        settings.setValue('working_dir', str(self.data_analyzer.working_directory))
+        # any view-specific settings
+        for v in self._all_views:
+            v.restore_settings(settings)
 
-    def _restore_workstate_from_settings(self) -> None:
-        """
-        Helper method called at startup that restores the current working directory and other work state information in
-        effect when the application last shutdown normally. If the user preferences storage is not found on host, or if
-        it lacks an existing working directory that contains the source files required by XSort, all work state
-        information is reset.
-        """
-        # TODO: Avoiding native settings format so I can examine INI file during development
-        #  settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)
-        settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
-                             f".{APP_NAME}.ini")
-        settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
-
+        # current working directory -- must restore this last as it will trigger a lot of stuff!
         str_path: Optional[str] = settings.value("working_dir")
         if isinstance(str_path, str):
             self.data_analyzer.change_working_directory(str_path)

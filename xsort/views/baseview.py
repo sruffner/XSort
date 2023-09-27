@@ -1,6 +1,6 @@
 from typing import Optional
 
-from PySide6.QtCore import QSize, QObject
+from PySide6.QtCore import QSize, QObject, QSettings
 from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QWidget
 
@@ -77,5 +77,22 @@ class BaseView(QObject):
         """
         Refresh view contents after a change in the list of neurons selected for display/comparison purposes. Default
         implementation takes no action.
+        """
+        pass
+
+    def save_settings(self, settings: QSettings) -> None:
+        """
+        Save any view-specific user preferences that should be restored the next time XSort is launched. This method
+        is called just prior to application exit, but before the GUI is destroye. Default implementation does nothing.
+        :param settings: The application settings object.
+        """
+        pass
+
+    def restore_settings(self, settings: QSettings) -> None:
+        """
+        Load any view-specific user preferences and refresh the view state accordingly. This method is called during
+        application startup, after the main window and all views have been realized but not shown. Default
+        implementation does nothing.
+        :param settings: The application settings object.
         """
         pass
