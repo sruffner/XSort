@@ -11,10 +11,17 @@ from xsort.views.baseview import BaseView
 
 class _NeuronTableModel(QAbstractTableModel):
     """
-    TODO: UNDER DEV - Helper class implements a table model for the list of neural units managed by Analyser.
+    Table model for the list of neural units exposed by the data manager object, :class:`Analyzer`. It is merely a
+    wrapper around that list, and supports sorting the table on any of its columns: the neuron label, its primary
+    channel, total # of spikes on the neuron, mean firing rate in Hz, SNR on primary channel, peak spike template
+    amplitude (typically on the primary channel), and the observed percentage of interspike intervals less than 1ms.
+        Each row in the table corresponds to one neuron. Any neuron that is currently in the neuron display focus list
+    are highlighted by setting the background color for that row to the RGB color assigned to the neuron's position
+    within that focus list.
     """
 
     _header_labels: List[str] = ['UID', 'Channel', '#Spikes', 'Rate (Hz)', 'SNR', 'Amp(\u00b5V)', '%ISI<1']
+    """ Column header labels. """
 
     def __init__(self, data_manager: Analyzer):
         """ Construct an initally empty neurons table model. """
@@ -118,7 +125,14 @@ class _NeuronTableModel(QAbstractTableModel):
 
 
 class NeuronView(BaseView):
-    """ TODO: UNDER DEV """
+    """
+    A tabular view of the list of neurons exposed by the data manager object, :class:`Analyzer`. Each row in the
+    table represents one neural unit, with the unit label and various numerical statistics shown in the columns. The
+    table may be sorted on any column, in ascending or descending order.
+        The user selects a neuron for the display focus by clicking on it, and removes the focus by clicking it again.
+    The display focus list may contain up to MAX_NUM_FOCUS_NEURONS, and a unique color is assigned to each slot in that
+    list. Most other views in XSort display data for neurons in the current display list, using the assigned colors.
+    """
 
     def __init__(self, data_manager: Analyzer) -> None:
         super().__init__('Neurons', None, data_manager)
