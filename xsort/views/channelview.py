@@ -2,7 +2,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PySide6.QtCore import Qt, Slot
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QSlider, QVBoxLayout, QLabel, QHBoxLayout, QFrame
 import pyqtgraph as pg
 
@@ -63,25 +63,42 @@ class ChannelView(BaseView):
         units having the same primary channel.
         """
         self._t0_slider = QSlider(orientation=Qt.Orientation.Horizontal)
-        """ Slider controls the elapsed start time for the channel trace segments (segment duration fixed at 1s). """
+        """ Slider controls the elapsed start time (in whole seconds) for the channel trace segments on display. """
         self._t0_readout = QLabel()
-        """ Readout displays current elapsed start time for the channel trace segments, in MM:SS format. """
+        """ 
+        Readout displays current elapsed recording time at the left side of the plot, in MM:SS:mmm format. It reflects
+        the current X-axis range of the plot, which changes as user scales/pans the plot.
+        """
+        self._t1_readout = QLabel()
+        """ 
+        Readout displays current elapsed recording time at the right side of the plot, in MM:SS:mmm format. It reflects
+        the current X-axis range of the plot, which changes as user scales/pans the plot.
+        """
 
         # one-time only configuration of the plot: disable the context menu, don't draw y-axis line; position a message
         # label centered over the plot; x-axis is hidden; use a scale bar instead. initially: plot is empty with no axes
         # and message label indicates that no channel data is available.
         self._plot_item.setMenuEnabled(enableMenu=False)
-        self._plot_item.getAxis('left').setPen(pg.mkPen(None))
-        self._plot_item.getAxis('left').setStyle(tickTextOffset=5)
+        self._plot_item.sigXRangeChanged.connect(self.on_x_range_changed)
+        left_axis: pg.AxisItem = self._plot_item.getAxis('left')
+        left_axis.setPen(pg.mkPen(None))
+        font: QFont = left_axis.label.font()
+        font.setBold(True)
+        left_axis.setStyle(tickFont=font, tickTextOffset=8)
+        left_axis.setTextPen(pg.mkPen('w'))
+
         self._plot_item.hideAxis('bottom')
+
         self._message_label.setParentItem(self._plot_item)
         self._message_label.anchor(itemPos=(0.5, 0.5), parentPos=(0.5, 0.5))
-        scale_bar = pg.ScaleBar(size=0.1, suffix='s')
+        scale_bar = pg.ScaleBar(size=0.05, suffix='s')
         scale_bar.setParentItem(self._plot_item.getViewBox())
-        scale_bar.anchor(itemPos=(1, 1), parentPos=(1, 1), offset=(-20, -10))
+        scale_bar.anchor(itemPos=(1, 1), parentPos=(1, 1), offset=(-10, -20))
 
         self._t0_readout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
         self._t0_readout.setFrameStyle(QFrame.Shadow.Sunken | QFrame.Shape.Panel)
+        self._t1_readout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+        self._t1_readout.setFrameStyle(QFrame.Shadow.Sunken | QFrame.Shape.Panel)
         self._t0_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
         self._t0_slider.valueChanged.connect(self.on_t0_slider_value_changed)
         self._t0_slider.sliderReleased.connect(self.on_t0_slider_released)
@@ -92,6 +109,7 @@ class ChannelView(BaseView):
         control_line = QHBoxLayout()
         control_line.addWidget(self._t0_readout)
         control_line.addWidget(self._t0_slider)
+        control_line.addWidget(self._t1_readout)
         main_layout.addLayout(control_line)
         self.view_container.setLayout(main_layout)
 
@@ -124,6 +142,10 @@ class ChannelView(BaseView):
                 offset += self._trace_offset
             self._plot_item.getAxis('left').setTicks([ticks])
 
+            self._plot_item.getViewBox().setLimits(
+                xMin=0, xMax=1, minXRange=0.1, maxXRange=1, yMin=-self._trace_offset, yMax=offset,
+                minYRange=2*self._trace_offset, maxYRange=max(self._trace_offset, offset+self._trace_offset))
+
             # initialize list of plot data items that render spike clips for neurons in display list. Configured so
             # that NaN introduces a gap in the trace, and configured with a semi-transparent version of the color
             # assigned to each slot in the display list.
@@ -134,7 +156,8 @@ class ChannelView(BaseView):
                 self._unit_spike_clips.append(
                     self._plot_item.plot(x=[], y=[], name=f"spike-clips-{k}", pen=pen, connect='finite'))
 
-        self._t0_readout.setText("00:00")
+        self._t0_readout.setText(ChannelView._digital_readout(0))
+        self._t1_readout.setText(ChannelView._digital_readout(1))
         dur = int(self.data_manager.channel_recording_duration_seconds)
         if dur == 0:
             self._t0_slider.setRange(0, 10)
@@ -171,7 +194,7 @@ class ChannelView(BaseView):
                 if seg is None:
                     pdi.setData(x=[0, 1], y=[offset, offset])
                 else:
-                    pdi.setData(x=np.linspace(start=seg.t0, stop=seg.t0+seg.duration, num=seg.length),
+                    pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
                                 y=offset + seg.trace_in_microvolts)
                 break
             else:
@@ -253,20 +276,20 @@ class ChannelView(BaseView):
                                      np.argwhere(u.spike_times > seg.t0 - 0.009))
         spk_times = [u.spike_times[k] for k in spk_indices]
         for t in spk_times:
-            clip_start, clip_end = max(seg.t0, t - 0.001), min(seg.t0 + 1, t + 0.009)
+            clip_start, clip_end = max(seg.t0, t - 0.001) - seg.t0, min(seg.t0 + 1, t + 0.009) - seg.t0
             ticks = int(self.data_manager.channel_samples_per_sec * (clip_end - clip_start))
-            clip_start_in_seg = int(self.data_manager.channel_samples_per_sec * (clip_start - seg.t0))
+            clip_start_ticks = int(self.data_manager.channel_samples_per_sec * clip_start)
             x = np.concatenate((x, np.linspace(clip_start, clip_end, num=ticks), np.array([clip_end])))
-            y = np.concatenate((y, offset + seg.trace_in_microvolts[clip_start_in_seg:clip_start_in_seg+ticks],
+            y = np.concatenate((y, offset + seg.trace_in_microvolts[clip_start_ticks:clip_start_ticks+ticks],
                                 np.array([np.NaN])))
         return x, y
 
     @Slot(int)
     def on_t0_slider_value_changed(self, value: int) -> None:
         """ Handler updates readout as slider position changes. """
-        minutes = int(value/60)
-        seconds = value % 60
-        self._t0_readout.setText(f"{minutes:02d}:{seconds:02d}")
+        rng = self._plot_item.getViewBox().viewRange()
+        self._t0_readout.setText(ChannelView._digital_readout(value + rng[0][0]))
+        self._t1_readout.setText(ChannelView._digital_readout(value + rng[0][1]))
 
     @Slot()
     def on_t0_slider_released(self) -> None:
@@ -281,7 +304,35 @@ class ChannelView(BaseView):
         if self.data_manager.set_channel_trace_seg_start(t0):
             offset = 0
             for k, pdi in self._trace_segments.items():
-                pdi.setData(x=[t0, t0+1], y=[offset, offset])
+                pdi.setData(x=[0, 1], y=[offset, offset])
                 offset += self._trace_offset
             for pdi in self._unit_spike_clips:
                 pdi.setData(x=[], y=[])
+        rng = self._plot_item.getViewBox().viewRange()
+        self._t0_readout.setText(ChannelView._digital_readout(t0+rng[0][0]))
+        self._t1_readout.setText(ChannelView._digital_readout(t0+rng[0][0]))
+
+    # noinspection PyUnusedLocal
+    @Slot(object, object)
+    def on_x_range_changed(self, src: object, rng: Tuple[float, float]) -> None:
+        """
+        Handler updates the labels reflecting the elapsed recording times at the start and end of the plot's X-axis.
+        These change as the user scales and pans the plot content.
+
+        :param src: The plot view box for which the X-axis range changed.
+        :param rng: The new X-axis range (xMin, xMax).
+        """
+        t0 = self.data_manager.channel_trace_seg_start
+        t1 = t0 + 1
+        if isinstance(rng, tuple) and len(rng) == 2 and isinstance(rng[0], float):
+            t0 = self.data_manager.channel_trace_seg_start + rng[0]
+            t1 = self.data_manager.channel_trace_seg_start + rng[1]
+        self._t0_readout.setText(ChannelView._digital_readout(t0))
+        self._t1_readout.setText(ChannelView._digital_readout(t1))
+
+    @staticmethod
+    def _digital_readout(t: float) -> str:
+        minutes = int(t / 60)
+        seconds = int(t - 60 * int(t/60))
+        msecs = int(1000 * (t - int(t)))
+        return f"{minutes:02d}:{seconds:02d}.{msecs:03d}"

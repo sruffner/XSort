@@ -153,7 +153,7 @@ class Analyzer(QObject):
     @property
     def channel_trace_seg_start(self) -> int:
         """
-        The elapsed time in seconds at which the current analog channel trace excerpts begin, relaive to the start
+        The elapsed time in seconds at which the current analog channel trace excerpts begin, relative to the start
         of the Omniplex analog recording. All excerpts are one second in duration.
         """
         return self._channel_seg_start
