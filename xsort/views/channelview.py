@@ -20,8 +20,13 @@ class ChannelView(BaseView):
     This view displays a 1-sec trace for each of the analog wideband and narrowband channels available from the Omniplex
     EPhys recording. For each neuron currently selected for display in XSort, the view superimposes -- on the trace for
     the neuron's 'primary channel' -- 10-ms clips indicating the occurrence of spikes on that neuron.
+
         A slider at the bottom of the view lets the user choose any 1-sec segment over the entire EPhys recording. The
-    companion readout reflects the segment start time in minutes and seconds.
+    companion readouts reflect the elapsed recording time -- in the format MM:SS.mmm (minutes, seconds, milliseconds) --
+    at the start and end of the currently visible portion of the traces. Using the mouse scroll wheel, the user can
+    zoom in on the plotted traces both horizontally in time and vertically in voltage. The plot's x- and y-axis range
+    limits are configured so the user can zoom in ony 100ms portion of the 1-second segment, and on any 2 adjacent
+    channel traces.
 
         Our strategy is to pre-create a dictionary of :class:`pyqtgraph.PlotDataItem` representing the channel trace
     segments (:class:`ChannelTraceSegment`), indexed by the analog source channel index. Similarly, we pre-create a

@@ -2,6 +2,8 @@ from typing import Optional, Dict, Tuple
 
 import numpy as np
 
+from xsort.data import stats
+
 
 class ChannelTraceSegment:
     """
@@ -257,3 +259,45 @@ class Neuron:
     def matching_spike_trains(self, n: "Neuron") -> bool:
         """ Does the specified neural unit have the same spike train as this unit? """
         return np.array_equal(self.spike_times, n.spike_times, equal_nan=True)
+
+    def isi_histogram(self, max_isi_ms: int = 100, normalize: bool = True) -> np.ndarray:
+        """
+        Generate the interspike interval histogram for this unit, given the maximum interval specified. See also
+        :func:`stats.generate_isi_histogram`.
+
+        :param max_isi_ms: The maximum interspike interval included in the histogram, in milliseconds. Default = 100.
+            Range-restricted to [20...500].
+        :param normalize: If True, histogram is normalized such that the largest bin value is unity. Else, histogram
+            reflects raw bin counts. Default = True.
+        :return: The ISI histogram.
+
+        """
+        max_isi_ms = max(20, min(max_isi_ms, 500))
+        out = stats.generate_isi_histogram(self.spike_times, max_isi_ms)
+        if normalize and max(out) > 0:
+            out = out * (1.0/max(out))
+        return out
+
+    def crosscorrelogram(self,
+                         other: Optional[np.ndarray] = None, span_ms: int = 100, normalize: bool = True) -> np.ndarray:
+        """
+        Generate the autocorrelogram (ACG) for this unit, or the cross-correlogram (CCG) with the specified spike train
+        from another neural unit. See also :func:`stats.generate_cross_correlogram`.
+
+        :param other: Array of spike times for a second neural unit, or None to compute autocorrelogram.
+        :param span_ms: Correlogram span in milliseconds. Default = 100. Range-restricted to [20..500].
+        :param normalize: If True, all bin counts are divided by the total # of spikes from this unit that were included
+            in the computation, providing a relative measure of the likelihood of a spike occurring in a given bin. Else
+            histogram reflects raw bin counts. Default = True.
+        :return: The ACG or CCG. Returns an empty array if either spike train is empty.
+        """
+        span_ms = max(20, min(span_ms, 500))
+        if other is None:
+            other = self.spike_times
+        try:
+            ccg, n = stats.generate_cross_correlogram(self.spike_times, other, span_ms)
+            if normalize and (n > 0):
+                ccg = ccg / n
+        except ValueError:
+            ccg = np.array([])
+        return ccg
