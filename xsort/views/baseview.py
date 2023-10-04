@@ -80,6 +80,13 @@ class BaseView(QObject):
         """
         pass
 
+    def on_focus_neurons_stats_updated(self) -> None:
+        """
+        Refresh view contents after some statistics are updated/recomputed for any or all of the neurons currently
+        selected for display/comparison purposes. Default implementation takes no action.
+        """
+        pass
+
     def save_settings(self, settings: QSettings) -> None:
         """
         Save any view-specific user preferences that should be restored the next time XSort is launched. This method

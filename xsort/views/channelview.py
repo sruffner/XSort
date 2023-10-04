@@ -6,7 +6,7 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QSlider, QVBoxLayout, QLabel, QHBoxLayout, QFrame
 import pyqtgraph as pg
 
-from xsort.data.analyzer import Analyzer, MAX_NUM_FOCUS_NEURONS, FOCUS_NEURON_COLORS
+from xsort.data.analyzer import Analyzer
 from xsort.data.neuron import Neuron, ChannelTraceSegment
 from xsort.views.baseview import BaseView
 
@@ -154,8 +154,8 @@ class ChannelView(BaseView):
             # initialize list of plot data items that render spike clips for neurons in display list. Configured so
             # that NaN introduces a gap in the trace, and configured with a semi-transparent version of the color
             # assigned to each slot in the display list.
-            for k in range(MAX_NUM_FOCUS_NEURONS):
-                color = QColor.fromString(FOCUS_NEURON_COLORS[k])
+            for k in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
+                color = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[k])
                 color.setAlpha(128)
                 pen = pg.mkPen(color, width=self.spike_clip_pen_width)
                 self._unit_spike_clips.append(

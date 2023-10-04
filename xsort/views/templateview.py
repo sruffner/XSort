@@ -6,7 +6,7 @@ from PySide6.QtGui import QFont, QColor, Qt
 from PySide6.QtWidgets import QHBoxLayout, QGraphicsTextItem, QSlider, QVBoxLayout, QLabel
 import pyqtgraph as pg
 
-from xsort.data.analyzer import Analyzer, MAX_NUM_FOCUS_NEURONS, FOCUS_NEURON_COLORS
+from xsort.data.analyzer import Analyzer
 from xsort.views.baseview import BaseView
 
 
@@ -121,9 +121,9 @@ class TemplateView(BaseView):
             self._message_label.setText("No template data available")
 
             pen_colors: List[QColor] = list()
-            for k in range(MAX_NUM_FOCUS_NEURONS):
+            for k in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
                 self._spike_templates.append(dict())
-                color = QColor.fromString(FOCUS_NEURON_COLORS[k])
+                color = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[k])
                 pen_colors.append(color)
 
             t_span_ms = self._tspan_slider.sliderPosition()
@@ -132,7 +132,7 @@ class TemplateView(BaseView):
             for idx in self.data_manager.channel_indices:
                 x = col * (t_span_ms * self._H_OFFSET_REL)
                 y = row * self._V_OFFSET_UV
-                for k in range(MAX_NUM_FOCUS_NEURONS):
+                for k in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
                     pen = pg.mkPen(pen_colors[k], width=self.trace_pen_width)
                     self._spike_templates[k][idx] = self._plot_item.plot(x=[], y=[], pen=pen)
 

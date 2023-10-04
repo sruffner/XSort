@@ -137,10 +137,15 @@ class TaskType(Enum):
     Process required data sources in XSort working directory and build internal cache of analog channel data 
     streams and neural unit metrics. 
     """
-    GETCHANNELS = 2
+    GETCHANNELS = 2,
     """ Retrieve from internal cache all recorded analog channel traces for a specified time period [t0..t1]. """
-    GETUNIT = 3
+    GETUNIT = 3,
     """ Retrieve from internal cache the metrics/metadata for a single specified neural unit. """
+    COMPUTEHIST = 4
+    """ 
+    Compute any missing histograms for a list of units: the ISI and ACG for each unit in the list, and the CCG
+    for the each unit in the list vs the other units. The results are cached in the unit instances.
+    """
 
 
 class TaskSignals(QObject):
@@ -151,8 +156,8 @@ class TaskSignals(QObject):
     """ Signal emitted to deliver a data object to the receiver. Data type will depend on specific task. """
     error = Signal(str)
     """ Signal emitted when the worker task has failed for any reason. Argument is an error description. """
-    finished = Signal()
-    """ Signal emitted when the worker task has finished, succesfully or otherwise. No argument. """
+    finished = Signal(TaskType)
+    """ Signal emitted when the worker task has finished, succesfully or otherwise. Argument is the task type. """
 
 
 class Task(QRunnable):
@@ -166,7 +171,10 @@ class Task(QRunnable):
         :param kwargs: Dictionary of keywaord argyments, varying IAW task type. For the TaskType.GETUNIT task,
         kwargs['unit_label'] must be a str identifying the neural unit record to retrieve from internal cache. For the
         TaskType.GETCHANNELS task, kwargs['start'] >= 0 and kwargs['count'] > 0 must be integers defining the starting
-        index and size of the contigous channel trace segment to be extracted.
+        index and size of the contigous channel trace segment to be extracted. For the TaskType.COMPUTEHIST task,
+        kw_args['units'] is the list of :class:`Neuron` instances for which histograms are to be computed, while
+        kw_args['span'] is the histogram span to use for the computations.
+
         """
         super().__init__()
 
@@ -180,7 +188,10 @@ class Task(QRunnable):
         """ For the GETCHANNELS task, the index of the first analog sample to retrieve. """
         self._count: int = kwargs.get('count', 0)
         """ For the GETCHANNELS task, the number of analog samples to retrieve. """
-
+        self._units: List[Neuron] = kwargs.get('units', [])
+        """ For the COMPUTEHIST task only, a list of neural units for which histograms are to be computed. """
+        self._hist_span_ms: int = kwargs.get('span', 0)
+        """ For the COMPUTEHIST task only, the histogram span in milliseconds to use for the computations. """
         self.signals = TaskSignals()
         """ The signals emitted by this task. """
         self._info: Optional[Dict[str, Any]] = None
@@ -197,12 +208,14 @@ class Task(QRunnable):
             elif self._task_type == TaskType.GETUNIT:
                 unit = self._retrieve_neural_unit(self._unit_label)
                 self.signals.data_retrieved.emit(unit)
+            elif self._task_type == TaskType.COMPUTEHIST:
+                self._compute_histograms()
             else:
                 raise Exception("Unrecognized request")
         except Exception as e:
             self.signals.error.emit(str(e))
         finally:
-            self.signals.finished.emit()
+            self.signals.finished.emit(self._task_type)
 
     def _build_internal_cache(self) -> None:
         """
@@ -227,7 +240,7 @@ class Task(QRunnable):
             - If the corresponding cache file already exists, it loads the unit record and delivers it to any receivers
               via a dedicated signal.
             - If the file does not exist, the unit metrics are prepared and cached, and then the unit record is 
-              delivered. If the file exists but has the wrong wize or the read fails, the file is recreated.
+              delivered. If the file exists but has the wrong size or the read fails, the file is recreated.
         
         When processing a new working directory for the first time, this task takes many seconds or minutes to 
         complete. Regular progress updates are signaled roughly once per second. If an error occurs, an exception is
@@ -599,3 +612,43 @@ class Task(QRunnable):
 
         # update neural unit record in place
         unit.update_metrics(primary_channel_idx, best_snr, template_dict)
+
+    def _compute_histograms(self) -> None:
+        """
+        Compute the ISI histogram, autocorrelograms, and cross-correlograms for a list of neural units (the
+        TaskType.COMPUTEHIST task). The list of units are supplied in the task constructor, along with histogram span
+        to use for the computations.
+            The method computes the ISI and ACG for each unit in the list, plus the CCG of the first unit vs the other
+        units (if any) in the list. The results are cached in the unit instances. To minimize execution time, the
+        method checks if the histogram is already cached -- for the histogram span specified.
+        :raises Exception: If an error occurs. In most cases, the exception message may be used as a human-facing
+            error description.
+        """
+        if self._hist_span_ms == 0:
+            raise Exception("Unable to compute unit histograms - invalid histogram span.")
+        if len(self._units) == 0:
+            return
+
+        num_units = len(self._units)
+        num_hists = 2 * num_units + num_units * (num_units - 1)
+
+        self.signals.progress.emit(f"Computing histograms for {len(self._units)} units ...", 0)
+        t0 = time.time()
+        n = 0
+        for u in self._units:
+            u.update_cached_isi_if_necessary(self._hist_span_ms)
+            n += 1
+            u.update_cached_acg_if_necessary(self._hist_span_ms)
+            n += 1
+            if time.time() - t0 > 1:
+                pct = int(100 * n / num_hists)
+                self.signals.progress.emit(f"Computing histograms for {len(self._units)} units ...", pct)
+                t0 = time.time()
+            for u2 in self._units:
+                if u.label != u2.label:
+                    u.update_cached_ccg_if_necessary(other_unit=u2, span=self._hist_span_ms)
+                n += 1
+                if time.time() - t0 > 1:
+                    pct = int(100 * n / num_hists)
+                    self.signals.progress.emit(f"Computing histograms for {len(self._units)} units ...", pct)
+                    t0 = time.time()

@@ -15,17 +15,22 @@ class DataType(Enum):
     CHANNELTRACE = 2
 
 
-MAX_NUM_FOCUS_NEURONS: int = 3
-""" The maximum number of neural units that can be selected simultaneously for display focus """
-FOCUS_NEURON_COLORS: List[str] = ['#0080FF', '#FF0000', '#FFFF00']
-""" Colors assigned to neurons selected for displahy focus, in selection order, in the format '#RRGGBB'. """
-
-
 class Analyzer(QObject):
     """
     The data model manager object for XSort.
     TODO: UNDER DEV.  Note that is subclasses QObject so we can define signals!
     """
+
+    MAX_NUM_FOCUS_NEURONS: int = 3
+    """ The maximum number of neural units that can be selected simultaneously for display focus. """
+    FOCUS_NEURON_COLORS: List[str] = ['#0080FF', '#FF0000', '#FFFF00']
+    """ Colors assigned to neurons selected for display focus, in selection order, in the format '#RRGGBB'. """
+    MIN_TSPAN_MS: int = 20
+    """ The minimum allowed time span for neural unit ISI histograms and correlograms, in milliseconds. """
+    MAX_TSPAN_MS: int = 500
+    """ The maximum allowed time span for neural unit ISI histograms and correlograms, in milliseconds. """
+    DEF_TSPAN_MS: int = 100
+    """ The default time span for neural unit ISI histograms and correlograms, in milliseconds. """
 
     working_directory_changed: Signal = Signal()
     """ Signals that working directory has changed. All views should be reset and refreshed accordingly. """
@@ -44,6 +49,11 @@ class Analyzer(QObject):
     """
     Signals that the set of neural units currently selected for display/comparison purposes has changed in some way.
     All views should be refreshed accordingly.
+    """
+    focus_neuron_stats_updated: Signal = Signal()
+    """ 
+    Signals that some statistics have been recomputed for one or more neural units currently selected for 
+    display/comparison purposes. All views should be refreshed accordingly.
     """
 
     def __init__(self, parent=None):
@@ -75,8 +85,12 @@ class Analyzer(QObject):
         units identified in the original spiker sorter results file located in that directory.
         """
         self._focus_neurons: List[str] = list()
+        """ The labels of the neural units currently selected for display focus, in selection order. """
+        self._correlogram_span: int = self.DEF_TSPAN_MS
         """ 
-        The labels of the neural units currently selected for display focus, in selection order.
+        The time span currently used to compute ISI histograms and correlograms for units with the display focus,
+        in milliseconds. The correlograms take time to compute, so any time this changes, they must be recomputed on a
+        background task.
         """
         self._thread_pool = QThreadPool()
         """ Managed thread pool for running slow background tasks. """
@@ -191,7 +205,7 @@ class Analyzer(QObject):
     @property
     def neurons_with_display_focus(self) -> List[Neuron]:
         """
-        The sublist of neural units currently selected for display/comparions purposes, in display order.
+        The sublist of neural units currently selected for display/comparison purposes, in display order.
 
         :return: The list of neurons currently selected for display/comparison purposes. Could be empty. At most will
             contain MAX_NUM_FOCUS_NEURONS entries.
@@ -207,7 +221,7 @@ class Analyzer(QObject):
             Otheriwse, the assigned color as a hexadecimal RGB string: '#RRGGBB'.
         """
         try:
-            return FOCUS_NEURON_COLORS[self._focus_neurons.index(unit_label)]
+            return self.FOCUS_NEURON_COLORS[self._focus_neurons.index(unit_label)]
         except ValueError:
             return None
 
@@ -221,14 +235,53 @@ class Analyzer(QObject):
             the label is invalid, or the current display list is full and does not contain the specified unit, no action
             is taken.
         """
+        need_stats = False
         if unit_label in self._focus_neurons:
             self._focus_neurons.remove(unit_label)
-        elif ((len(self._focus_neurons) == MAX_NUM_FOCUS_NEURONS) or not
+        elif ((len(self._focus_neurons) == self.MAX_NUM_FOCUS_NEURONS) or not
                 (unit_label in [n.label for n in self._neurons])):
             return
         else:
             self._focus_neurons.append(unit_label)
+            for u in self.neurons_with_display_focus:
+                need_stats = (len(u.cached_isi) == 0) or (len(u.cached_acg) == 0)
+                if not need_stats:
+                    need_stats = (
+                        any([(u.label != lbl) and (len(u.get_cached_ccg(lbl)) == 0) for lbl in self._focus_neurons]))
+                if need_stats:
+                    break
         self.focus_neurons_changed.emit()
+        if need_stats:
+            self._launch_compute_histograms_task()
+
+    @property
+    def correlogram_span(self) -> int:
+        """
+        The timespan in ms over which auto- and cross-correlograms and ISI histograms are computed for neural units
+        with the display focus.
+        """
+        return self._correlogram_span
+
+    @correlogram_span.setter
+    def correlogram_span(self, span_ms: int) -> None:
+        if span_ms < self.MIN_TSPAN_MS or span_ms > self.MAX_TSPAN_MS:
+            raise ValueError(f"Correlogram span must lie in {self.MIN_TSPAN_MS} and {self.MAX_TSPAN_MS} ms.")
+        if span_ms != self._correlogram_span:
+            self._correlogram_span = span_ms
+            for u in self._neurons:
+                u.clear_cached_histograms()
+            self._launch_compute_histograms_task()
+
+    def _launch_compute_histograms_task(self) -> None:
+        focus_list = self.neurons_with_display_focus
+        if len(focus_list) == 0:
+            return
+        task = Task(TaskType.COMPUTEHIST, self._working_directory, units=focus_list, span=self.correlogram_span)
+        task.signals.progress.connect(self.on_task_progress)
+        task.signals.error.connect(self.on_task_failed)
+        task.signals.data_retrieved.connect(self.on_data_retrieved)
+        task.signals.finished.connect(self.on_task_done)
+        self._thread_pool.start(task)
 
     def change_working_directory(self, p: Union[str, Path]) -> Optional[str]:
         """
@@ -303,9 +356,13 @@ class Analyzer(QObject):
     def on_task_progress(self, desc: str, pct: int) -> None:
         self.progress_updated.emit(f"{desc} - {pct}%")
 
-    @Slot()
-    def on_task_done(self) -> None:
+    @Slot(TaskType)
+    def on_task_done(self, task_type: TaskType) -> None:
         self.progress_updated.emit("")
+        if task_type == TaskType.COMPUTEHIST:
+            self.focus_neuron_stats_updated.emit()
+        elif task_type == TaskType.BUILDCACHE:
+            self._launch_compute_histograms_task()
 
     @Slot(str)
     def on_task_failed(self, emsg: str) -> None:

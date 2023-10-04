@@ -60,6 +60,7 @@ class ViewManager(QObject):
         self.data_analyzer.progress_updated.connect(self.on_background_task_updated)
         self.data_analyzer.data_ready.connect(self.on_data_ready)
         self.data_analyzer.focus_neurons_changed.connect(self.on_focus_neurons_changed)
+        self.data_analyzer.focus_neuron_stats_updated.connect(self.on_focus_neurons_stats_updated)
 
         self._main_window.setMinimumSize(800, 600)
         self._restore_from_settings()
@@ -174,6 +175,14 @@ class ViewManager(QObject):
         """
         for v in self._all_views:
             v.on_focus_neurons_changed()
+
+    @Slot()
+    def on_focus_neurons_stats_updated(self) -> None:
+        """
+        Handler notifies all views when some statistics are updated for any or all neurons having the display focus.
+        """
+        for v in self._all_views:
+            v.on_focus_neurons_stats_updated()
 
     def select_working_directory(self, starting_up: bool = False) -> None:
         """

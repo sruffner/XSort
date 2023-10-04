@@ -67,6 +67,11 @@ class Neuron:
     """
     A container holding the spike train, computed metrics, and important metadata for a neural unit.
     TODO: UNDER DEV
+    I'm also using it as an in-memory cache for the unit's auto-correlogram and cross-correlograms with other units.
+    The correlograms take too long to compute in general, and so that computation is handled on a background task
+    launched by the Analyzer. Once the computation is done, the result is cached in the Neuron object for use. Whenever
+    the timespan used to compute the correlograms changes, the cached statistics must be cleared.
+
     """
     @staticmethod
     def omniplex_channel_id(is_wideband: bool, ch: int) -> str:
@@ -150,7 +155,21 @@ class Neuron:
         SNR for a given analog channel is estimated as the peak-to-peak amplitude of the mean spike waveform as measured
         on that channel, divided by the background noise level on the channel.
         """
-
+        self._cached_isi: Optional[np.ndarray] = None
+        """
+        The interspike interval histogram for this unit, or None if the ISI has not been computed. Must be recomputed
+        whenver the histogram span (max ISI value considered) changes.
+        """
+        self._cached_acg: Optional[np.ndarray] = None
+        """ 
+        The autocorrelogram for this unit, or None if the ACG has not yet been computed. Must be recomputed whenever
+        the correlogram span changes.
+        """
+        self._cached_ccgs: Dict[str, np.ndarray] = dict()
+        """ 
+        Cache of any cross-correlograms computed for this unit WRT another unit, keyed by the other unit's label. Will
+        be empty if no CCGs have been computed. Whenever, the correlogram span changes, the cache is invalidated.
+        """
     @property
     def label(self) -> str:
         """
@@ -260,44 +279,99 @@ class Neuron:
         """ Does the specified neural unit have the same spike train as this unit? """
         return np.array_equal(self.spike_times, n.spike_times, equal_nan=True)
 
-    def isi_histogram(self, max_isi_ms: int = 100, normalize: bool = True) -> np.ndarray:
+    @property
+    def cached_isi(self) -> np.ndarray:
         """
-        Generate the interspike interval histogram for this unit, given the maximum interval specified. See also
-        :func:`stats.generate_isi_histogram`.
+        The interspike interval histogram last computed for this unit, if available. The histogram is a 1D array of
+        normalized bin counts for ISIs between 0 and M (in milliseconds) inclusive, where M is the maximum ISI
+        considered. The histogram is normalized to unity (all bin counts divided by the maximum observed bin count).
+            Unit statistics like this are computed in the background as needed, then cached in the unit instance. As the
+        computation depends on the histogram span, the cached histogram is dropped and must be recomputed whenever that
+        span changes.
 
-        :param max_isi_ms: The maximum interspike interval included in the histogram, in milliseconds. Default = 100.
-            Range-restricted to [20...500].
-        :param normalize: If True, histogram is normalized such that the largest bin value is unity. Else, histogram
-            reflects raw bin counts. Default = True.
-        :return: The ISI histogram.
-
+        :return: A copy of the cached ISI histogram, or an empty array if not available.
         """
-        max_isi_ms = max(20, min(max_isi_ms, 500))
-        out = stats.generate_isi_histogram(self.spike_times, max_isi_ms)
-        if normalize and max(out) > 0:
-            out = out * (1.0/max(out))
-        return out
+        return np.array([]) if self._cached_isi is None else np.copy(self._cached_isi)
 
-    def crosscorrelogram(self,
-                         other: Optional[np.ndarray] = None, span_ms: int = 100, normalize: bool = True) -> np.ndarray:
+    @property
+    def cached_acg(self) -> np.ndarray:
         """
-        Generate the autocorrelogram (ACG) for this unit, or the cross-correlogram (CCG) with the specified spike train
-        from another neural unit. See also :func:`stats.generate_cross_correlogram`.
+        The autocorrelogram last computed for this unit's spike train, if available. The autocorrelogram is simply the
+        cross-correlogram of the unit's spike train with itself. See :func:`get_cached_ccg()` for information on
+        how CCGs are computed and normalized.
+            Unit statistics like this are computed in the background as needed, then cached in the unit instance. As the
+        computation depends on the correlogram span, the cached ACG is dropped and must be recomputed whenever that
+        span changes.
 
-        :param other: Array of spike times for a second neural unit, or None to compute autocorrelogram.
-        :param span_ms: Correlogram span in milliseconds. Default = 100. Range-restricted to [20..500].
-        :param normalize: If True, all bin counts are divided by the total # of spikes from this unit that were included
-            in the computation, providing a relative measure of the likelihood of a spike occurring in a given bin. Else
-            histogram reflects raw bin counts. Default = True.
-        :return: The ACG or CCG. Returns an empty array if either spike train is empty.
+        :return: A copy of the cached ACG, or an empty array if not available.
         """
-        span_ms = max(20, min(span_ms, 500))
-        if other is None:
-            other = self.spike_times
-        try:
-            ccg, n = stats.generate_cross_correlogram(self.spike_times, other, span_ms)
-            if normalize and (n > 0):
-                ccg = ccg / n
-        except ValueError:
-            ccg = np.array([])
-        return ccg
+        return np.array([]) if self._cached_acg is None else np.copy(self._cached_acg)
+
+    def get_cached_ccg(self, other_unit: str) -> np.ndarray:
+        """
+        Get the cross-correlogram last computed for this unit vs the unit specified, if avaiable. The correlogram is
+        essentially a histogram of how likely a spike occurs in the second neuron at some time before or after a spike
+        occurred in this neuron at t=0. The histogram has 2S+1 1-ms bins between -S and S, inclusive, where S is
+        the correlogram span. Each element contains contains the count of the second unit's spikes in the corresponding
+        time bin, divided by the totol number of spikes included in the analysis (spikes within S of the start or end
+        of the recording are excluded).
+            Unit statistics like this are computed in the background as needed, then cached in the unit instance. As the
+        computation depends on the correlogram span, any cached CCGs are deleted and must be recomputed whenever that
+        span changes.
+
+        :param other_unit: Label uniquely identifying the second unit.
+        :return: A copy of the cached CCG for this unit vs the unit specified, or an empty array if not available.
+        """
+        out = self._cached_ccgs.get(other_unit)
+        return np.array([]) if out is None else np.copy(out)
+
+    def clear_cached_histograms(self) -> None:
+        """
+        Clear the ISI, ACG and any CCGs currently cached in this neuron instance. These statistics are invalidated
+        whenever the histogram timespan is changed.
+            This method is intended only for use by the data manager object :class:`Analyzer`, which is responsible for
+        keeping all cached statistics like these up-to-date.
+        """
+        self._cached_isi = None
+        self._cached_acg = None
+        self._cached_ccgs.clear()
+
+    def update_cached_isi_if_necessary(self, max_isi_ms: int) -> None:
+        """
+        If the currently cached ISI is empty or was computed for a different maximum ISI, recompute it.
+
+        :param max_isi_ms: The max ISI to use for the histogram calculation, in msecs.
+        """
+        if (self._cached_isi is None) or (len(self._cached_isi) != (max_isi_ms + 1)):
+            out = stats.generate_isi_histogram(self.spike_times, max_isi_ms)
+            max_count = max(out)
+            if max_count > 0:
+                out = out * (1.0 / max_count)
+            self._cached_isi = out
+
+    def update_cached_acg_if_necessary(self, span: int) -> None:
+        """
+        If the currently cached autocorrelogram is empty or was computed for a different correlogram span, recompute it.
+        **As the computation can take a significant amount of time, only invoke this method on a background thread.**
+        :param span: The correlogram span in msecs.
+        """
+        if (self._cached_acg is None) or (len(self._cached_acg) != (2 * span + 1)):
+            out, n = stats.generate_cross_correlogram(self.spike_times, self.spike_times, span)
+            if n > 0:
+                out = out * (1.0 / n)
+            self._cached_acg = out
+
+    def update_cached_ccg_if_necessary(self, other_unit: 'Neuron', span: int) -> None:
+        """
+        If the currently cached cross-correlogram for this unit vs the specified unit is empty or was computed for a
+        different correlogram span, recompute it. **As the computation can take a significant amount of time, only
+        invoke this method on a background thread.**
+        :param other_unit: The other neural unit.
+        :param span: The correlogram span in msecs.
+        """
+        ccg = self._cached_ccgs.get(other_unit.label)
+        if (ccg is None) or (len(ccg) != (2 * span + 1)):
+            out, n = stats.generate_cross_correlogram(self.spike_times, other_unit.spike_times, span)
+            if n > 0:
+                out = out * (1.0 / n)
+            self._cached_ccgs[other_unit.label] = out
