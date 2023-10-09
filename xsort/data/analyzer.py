@@ -2,7 +2,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Union, Optional, Dict, Any, List
 
-from PySide6.QtCore import QObject, Signal, Slot, QThreadPool
+from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer
 
 from xsort.data import PL2
 from xsort.data.neuron import Neuron, ChannelTraceSegment
@@ -25,12 +25,6 @@ class Analyzer(QObject):
     """ The maximum number of neural units that can be selected simultaneously for display focus. """
     FOCUS_NEURON_COLORS: List[str] = ['#0080FF', '#FF0000', '#FFFF00']
     """ Colors assigned to neurons selected for display focus, in selection order, in the format '#RRGGBB'. """
-    MIN_TSPAN_MS: int = 20
-    """ The minimum allowed time span for neural unit ISI histograms and correlograms, in milliseconds. """
-    MAX_TSPAN_MS: int = 500
-    """ The maximum allowed time span for neural unit ISI histograms and correlograms, in milliseconds. """
-    DEF_TSPAN_MS: int = 100
-    """ The default time span for neural unit ISI histograms and correlograms, in milliseconds. """
 
     working_directory_changed: Signal = Signal()
     """ Signals that working directory has changed. All views should be reset and refreshed accordingly. """
@@ -86,12 +80,6 @@ class Analyzer(QObject):
         """
         self._focus_neurons: List[str] = list()
         """ The labels of the neural units currently selected for display focus, in selection order. """
-        self._correlogram_span: int = self.DEF_TSPAN_MS
-        """ 
-        The time span currently used to compute ISI histograms and correlograms for units with the display focus,
-        in milliseconds. The correlograms take time to compute, so any time this changes, they must be recomputed on a
-        background task.
-        """
         self._thread_pool = QThreadPool()
         """ Managed thread pool for running slow background tasks. """
 
@@ -186,7 +174,8 @@ class Analyzer(QObject):
         self._channel_seg_start = t0
         for idx in self._channel_segments.keys():
             self._channel_segments[idx] = None
-        task = Task(TaskType.GETCHANNELS, self._working_directory, start=t0, count=self.channel_samples_per_sec)
+        task = Task(TaskType.GETCHANNELS, self._working_directory, start=t0*self.channel_samples_per_sec,
+                    count=self.channel_samples_per_sec)
         task.signals.progress.connect(self.on_task_progress)
         task.signals.error.connect(self.on_task_failed)
         task.signals.data_retrieved.connect(self.on_data_retrieved)
@@ -207,10 +196,16 @@ class Analyzer(QObject):
         """
         The sublist of neural units currently selected for display/comparison purposes, in display order.
 
-        :return: The list of neurons currently selected for display/comparison purposes. Could be empty. At most will
-            contain MAX_NUM_FOCUS_NEURONS entries.
+        :return: The list of neurons currently selected for display/comparison purposes, **in selection order, as that
+            determines display color assigned to neuron**. Could be empty. At most will contain MAX_NUM_FOCUS_NEURONS
+            entries.
         """
-        return [u for u in self._neurons if (u.label in self._focus_neurons)]
+        out: List[Neuron] = list()
+        for uid in self._focus_neurons:
+            u = next((n for n in self._neurons if n.label == uid), None)
+            if u:
+                out.append(u)
+        return out
 
     def display_color_for_neuron(self, unit_label: str) -> Optional[str]:
         """
@@ -251,32 +246,18 @@ class Analyzer(QObject):
                 if need_stats:
                     break
         self.focus_neurons_changed.emit()
+
+        # changing the focus list will trigger refreshes across all views. We don't want to launch the CPU-intensive
+        # histogram computation task until AFTER those refreshes are done. Hence the delayed launch below.
         if need_stats:
-            self._launch_compute_histograms_task()
-
-    @property
-    def correlogram_span(self) -> int:
-        """
-        The timespan in ms over which auto- and cross-correlograms and ISI histograms are computed for neural units
-        with the display focus.
-        """
-        return self._correlogram_span
-
-    @correlogram_span.setter
-    def correlogram_span(self, span_ms: int) -> None:
-        if span_ms < self.MIN_TSPAN_MS or span_ms > self.MAX_TSPAN_MS:
-            raise ValueError(f"Correlogram span must lie in {self.MIN_TSPAN_MS} and {self.MAX_TSPAN_MS} ms.")
-        if span_ms != self._correlogram_span:
-            self._correlogram_span = span_ms
-            for u in self._neurons:
-                u.clear_cached_histograms()
-            self._launch_compute_histograms_task()
+            QTimer.singleShot(0, self._launch_compute_histograms_task)
+            # self._launch_compute_histograms_task()
 
     def _launch_compute_histograms_task(self) -> None:
         focus_list = self.neurons_with_display_focus
         if len(focus_list) == 0:
             return
-        task = Task(TaskType.COMPUTEHIST, self._working_directory, units=focus_list, span=self.correlogram_span)
+        task = Task(TaskType.COMPUTEHIST, self._working_directory, units=focus_list)
         task.signals.progress.connect(self.on_task_progress)
         task.signals.error.connect(self.on_task_failed)
         task.signals.data_retrieved.connect(self.on_data_retrieved)

@@ -82,7 +82,7 @@ class TemplateView(BaseView):
         self._tspan_slider.setRange(self._MIN_TSPAN_MS, self._MAX_TSPAN_MS)
         self._tspan_slider.setTickInterval(1)
         self._tspan_slider.setSliderPosition(self._MAX_TSPAN_MS)
-        self._tspan_slider.sliderReleased.connect(self.on_template_span_change)
+        self._tspan_slider.valueChanged.connect(self.on_template_span_change)
 
         min_label = QLabel(f"{self._MIN_TSPAN_MS} ms")
         min_label.setAlignment(Qt.AlignmentFlag.AlignRight)

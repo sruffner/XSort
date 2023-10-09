@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.0.5 (10/09/2023)
+- Initial implementation of `StatisticsView`, displaying ISI histograms and ACGs for all neural units in the current 
+display list, as well as the CCG of the first neuron in that list vs the others.
+- Fixed bug in assigning display colors to neural units in the display list.
+- Fixed bug in code that retrieved channel trace segments whenever user changed the segment start time using the 
+slider in the `ChannelView`.
+- Modified how changes in the slider position are handled in `TemplateView`, `ChannelView`, and `StatisticsView` since
+the `QSlider.sliderReleased` signal did not fire in RHEL.
+- Known issues: (1) Keyboard interface to slider operation does not work in Mac OS. (2) The background task which 
+generates ACGs and CCGS for neural units in the current display list is computationally intensive and causes noticeable
+display lags in the GUI under certain situations. May have to run these in a separate process, or compute once and 
+cache to file. File IO retrievals do not block the GUI like heavy-duty computations -- a Python GIL issue.
+
 ## v0.0.4 (10/02/2023)
 - User can select up to 3 neural units in the NeuronView for inclusion in the **_display list_**, which affects what is
 rendered in other views. A display color is assigned to each "slot" in the display list: blue, red, yellow. 
@@ -7,7 +20,7 @@ rendered in other views. A display color is assigned to each "slot" in the displ
 trace segment for that neuron's so-called primary channel (analog channel with the highest estimated SNR for that
 neuron). The clips are drawn by tracing over the trace segment in the clip interval using the display color assigned
 to the neuron (but translucent).
-- A slider in the ChannelView lets the user look at any 1-second segment within the Omniplex recording. Furthermore,
+- A slider in the `ChannelView` lets the user look at any 1-second segment within the Omniplex recording. Furthermore,
 the user can use the mouse wheel to zoom in/out and pan the view. Minimum time span (x-axis) is 100ms. Minimum voltage
 range is enough to show 2 adjacent channel traces (they're arranged in descending order from top to bottom).
 - Initial implementation of `TemplateView`. Displays per-channel spike templates computed for each of units in the 

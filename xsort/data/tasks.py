@@ -139,9 +139,7 @@ class TaskType(Enum):
     """
     GETCHANNELS = 2,
     """ Retrieve from internal cache all recorded analog channel traces for a specified time period [t0..t1]. """
-    GETUNIT = 3,
-    """ Retrieve from internal cache the metrics/metadata for a single specified neural unit. """
-    COMPUTEHIST = 4
+    COMPUTEHIST = 3
     """ 
     Compute any missing histograms for a list of units: the ISI and ACG for each unit in the list, and the CCG
     for the each unit in the list vs the other units. The results are cached in the unit instances.
@@ -172,8 +170,7 @@ class Task(QRunnable):
         kwargs['unit_label'] must be a str identifying the neural unit record to retrieve from internal cache. For the
         TaskType.GETCHANNELS task, kwargs['start'] >= 0 and kwargs['count'] > 0 must be integers defining the starting
         index and size of the contigous channel trace segment to be extracted. For the TaskType.COMPUTEHIST task,
-        kw_args['units'] is the list of :class:`Neuron` instances for which histograms are to be computed, while
-        kw_args['span'] is the histogram span to use for the computations.
+        kw_args['units'] is the list of :class:`Neuron` instances for which ISI/ACG/CCG histograms are to be computed.
 
         """
         super().__init__()
@@ -189,9 +186,11 @@ class Task(QRunnable):
         self._count: int = kwargs.get('count', 0)
         """ For the GETCHANNELS task, the number of analog samples to retrieve. """
         self._units: List[Neuron] = kwargs.get('units', [])
-        """ For the COMPUTEHIST task only, a list of neural units for which histograms are to be computed. """
-        self._hist_span_ms: int = kwargs.get('span', 0)
-        """ For the COMPUTEHIST task only, the histogram span in milliseconds to use for the computations. """
+        """ 
+        For the COMPUTEHIST task only, a list of neural units for which histograms are to be computed. **NOTE**:
+        These are the actual :class:`Neuron` objects living in the GUI, and they are upated in place. This should be
+        thread-safe because, once computed and cached, the histograms never change again.
+        """
         self.signals = TaskSignals()
         """ The signals emitted by this task. """
         self._info: Optional[Dict[str, Any]] = None
@@ -205,9 +204,6 @@ class Task(QRunnable):
                 self._build_internal_cache()
             elif self._task_type == TaskType.GETCHANNELS:
                 self._get_channel_traces(self._start, self._count)
-            elif self._task_type == TaskType.GETUNIT:
-                unit = self._retrieve_neural_unit(self._unit_label)
-                self.signals.data_retrieved.emit(unit)
             elif self._task_type == TaskType.COMPUTEHIST:
                 self._compute_histograms()
             else:
@@ -616,16 +612,16 @@ class Task(QRunnable):
     def _compute_histograms(self) -> None:
         """
         Compute the ISI histogram, autocorrelograms, and cross-correlograms for a list of neural units (the
-        TaskType.COMPUTEHIST task). The list of units are supplied in the task constructor, along with histogram span
-        to use for the computations.
-            The method computes the ISI and ACG for each unit in the list, plus the CCG of the first unit vs the other
-        units (if any) in the list. The results are cached in the unit instances. To minimize execution time, the
-        method checks if the histogram is already cached -- for the histogram span specified.
+        TaskType.COMPUTEHIST task). The list of units are supplied in the task constructor. The :class:`Neuron` object
+        has instance methods to compute the histograms and cache them internally, but these should only be invoked on
+        a background because they can take a significant amount of time. Only histograms that have not been cached
+        already are computed.
+            **IMPORTANT**: This is a time-consuming computation task that does not involve file IO -- unlike the other
+        tasks defined in this module. File IO operations release the Python Global Interpreter lock and thus won't
+        impact the main GUI thread. But heavy-compute tasks like this one will.
         :raises Exception: If an error occurs. In most cases, the exception message may be used as a human-facing
             error description.
         """
-        if self._hist_span_ms == 0:
-            raise Exception("Unable to compute unit histograms - invalid histogram span.")
         if len(self._units) == 0:
             return
 
@@ -636,9 +632,11 @@ class Task(QRunnable):
         t0 = time.time()
         n = 0
         for u in self._units:
-            u.update_cached_isi_if_necessary(self._hist_span_ms)
+            u.cache_isi_if_necessary()
+            time.sleep(0.2)
             n += 1
-            u.update_cached_acg_if_necessary(self._hist_span_ms)
+            u.cache_acg_if_necessary()
+            time.sleep(0.2)
             n += 1
             if time.time() - t0 > 1:
                 pct = int(100 * n / num_hists)
@@ -646,7 +644,8 @@ class Task(QRunnable):
                 t0 = time.time()
             for u2 in self._units:
                 if u.label != u2.label:
-                    u.update_cached_ccg_if_necessary(other_unit=u2, span=self._hist_span_ms)
+                    u.cache_ccg_if_necessary(other_unit=u2)
+                    time.sleep(0.2)
                 n += 1
                 if time.time() - t0 > 1:
                     pct = int(100 * n / num_hists)

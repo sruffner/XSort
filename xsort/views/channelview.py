@@ -105,8 +105,10 @@ class ChannelView(BaseView):
         self._t1_readout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self._t1_readout.setFrameStyle(QFrame.Shadow.Sunken | QFrame.Shape.Panel)
         self._t0_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._t0_slider.setTracking(False)
         self._t0_slider.valueChanged.connect(self.on_t0_slider_value_changed)
-        self._t0_slider.sliderReleased.connect(self.on_t0_slider_released)
+        self._t0_slider.sliderMoved.connect(self._on_t0_slider_moved)
+
         self._reset()
 
         main_layout = QVBoxLayout()
@@ -289,23 +291,27 @@ class ChannelView(BaseView):
                                 np.array([np.NaN])))
         return x, y
 
-    @Slot(int)
-    def on_t0_slider_value_changed(self, value: int) -> None:
-        """ Handler updates readout as slider position changes. """
-        rng = self._plot_item.getViewBox().viewRange()
-        self._t0_readout.setText(ChannelView._digital_readout(value + rng[0][0]))
-        self._t1_readout.setText(ChannelView._digital_readout(value + rng[0][1]))
+    def _on_t0_slider_moved(self, t0: int) -> None:
+        """
+        Handler updates the elapsed time readouts while the user is dragging the slider button. The trace segment start
+        time is not changed until the slider button is released -- see :func:`on_t0_slider_value_changed()`.
 
-    @Slot()
-    def on_t0_slider_released(self) -> None:
+        :param t0: The current slider position = the elapsed recording time in seconds.
+        """
+        rng = self._plot_item.getViewBox().viewRange()
+        self._t0_readout.setText(ChannelView._digital_readout(t0 + rng[0][0]))
+        self._t1_readout.setText(ChannelView._digital_readout(t0 + rng[0][1]))
+
+    @Slot(int)
+    def on_t0_slider_value_changed(self, t0: int) -> None:
         """
         Handler updates the entire view when the trace segment start time is updated. First, the data manager is
         informed of the change in the segment start time, which will trigger a background task to retrieve the
         channel trace segments for all analog source channels. It then "flat lines" all channel trace segment data
         items and empties all spike clip data items, since the new channel trace segments will not be immediately
         available.
+        :param t0: The new slider position = the elapsed recording time in seconds.
         """
-        t0 = self._t0_slider.sliderPosition()
         if self.data_manager.set_channel_trace_seg_start(t0):
             offset = 0
             for k, pdi in self._trace_segments.items():
@@ -315,7 +321,7 @@ class ChannelView(BaseView):
                 pdi.setData(x=[], y=[])
         rng = self._plot_item.getViewBox().viewRange()
         self._t0_readout.setText(ChannelView._digital_readout(t0+rng[0][0]))
-        self._t1_readout.setText(ChannelView._digital_readout(t0+rng[0][0]))
+        self._t1_readout.setText(ChannelView._digital_readout(t0+rng[0][1]))
 
     # noinspection PyUnusedLocal
     @Slot(object, object)
