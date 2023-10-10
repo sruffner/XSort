@@ -193,6 +193,19 @@ class Neuron:
             return len(self.spike_times) / (self.spike_times[-1] - self.spike_times[0])
         return 0
 
+    def firing_rate_histogram(self, bin_size: int, dur: float) -> np.ndarray:
+        """
+        Generate the histogram of firing rate in this unit over the duration of the electrophysiological recording.
+
+        :param bin_size: Histogram bin size in seconds.
+        :param dur: Recording duration in seconds.
+        :return: Normalized firing rate histogram for the specified bin size, such that 1 corresponds to the unit's
+            overall mean firing rate. The last partial bin, if any, is omitted.
+        """
+        out, _ = np.histogram(self.spike_times, bins=int(dur / bin_size), density=False)
+        out = out / (bin_size * self.mean_firing_rate_hz)
+        return out
+
     @property
     def num_spikes(self) -> int:
         """ Total number of spikes recorded for this unit. """

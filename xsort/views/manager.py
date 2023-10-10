@@ -9,10 +9,12 @@ from xsort.data.analyzer import Analyzer, DataType
 from xsort.constants import APP_NAME
 from xsort.views.baseview import BaseView
 from xsort.views.channelview import ChannelView
+from xsort.views.firingrateview import FiringRateView
+from xsort.views.isiview import ISIView
 from xsort.views.neuronview import NeuronView
 from xsort.views.pcaview import PCAView
 from xsort.views.similarityview import SimilarityView
-from xsort.views.statisticsview import StatisticsView
+from xsort.views.correlogramview import CorrelogramView
 from xsort.views.templateview import TemplateView
 from xsort.views.umapview import UMAPView
 
@@ -35,13 +37,15 @@ class ViewManager(QObject):
         self._neuron_view = NeuronView(self.data_analyzer)
         self._similarity_view = SimilarityView(self.data_analyzer)
         self._templates_view = TemplateView(self.data_analyzer)
-        self._statistics_view = StatisticsView(self.data_analyzer)
+        self._correlogram_view = CorrelogramView(self.data_analyzer)
+        self._isi_view = ISIView(self.data_analyzer)
+        self._firingrate_view = FiringRateView(self.data_analyzer)
         self._pca_view = PCAView(self.data_analyzer)
         self._channels_view = ChannelView(self.data_analyzer)
         self._umap_view = UMAPView(self.data_analyzer)
 
-        self._all_views = [self._neuron_view, self._similarity_view, self._templates_view, self._statistics_view,
-                           self._pca_view, self._channels_view, self._umap_view]
+        self._all_views = [self._neuron_view, self._similarity_view, self._templates_view, self._correlogram_view,
+                           self._isi_view, self._firingrate_view, self._pca_view, self._channels_view, self._umap_view]
         """ List of all managed views. """
 
         # actions and menus
@@ -123,8 +127,7 @@ class ViewManager(QObject):
         """
         List of dockable XSort views -- ie, all views other than the central view.
         """
-        return [self._similarity_view, self._templates_view, self._statistics_view, self._pca_view, self._channels_view,
-                self._umap_view]
+        return self._all_views[1:]
 
     @property
     def main_window_title(self) -> str:

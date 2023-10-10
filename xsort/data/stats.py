@@ -41,6 +41,9 @@ def generate_cross_correlogram(
     """
     Generate a cross correlogram for two series of spike times.
 
+        **NOTE**: If the two spike trains are identical, the result is an auto-correlogram. In this case, by convention,
+    the bin corresponding to a time delta of 0 is set to 0.
+
     Args:
         spike_times_1: Array of spike times for a neural unit, in seconds. Need not be in chronological order.
         spike_times_2: Array of spike times for a second neural unit, in seconds. Passing the same array into both
@@ -59,6 +62,8 @@ def generate_cross_correlogram(
     """
     if (len(spike_times_1) == 0) or (len(spike_times_2) == 0):
         raise ValueError("Empty spike times array")
+
+    is_acg = np.array_equal(spike_times_1, spike_times_2)
 
     # convert spike times to integer milliseconds
     spikes_ms_1 = np.ceil(spike_times_1 * 1000.0).astype(np.int64)
@@ -83,5 +88,9 @@ def generate_cross_correlogram(
         if (start >= 0) and (stop < train_len):
             counts += spike_train_2[start:stop]
             n = n + 1
+
+    # set t=0 bin to 0 for ACG
+    if is_acg:
+        counts[span_ms] = 0
 
     return counts, n
