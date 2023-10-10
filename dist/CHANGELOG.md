@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.0.6 (10/09/2023)
+- Initial implementation of `FiringRateView`, displaying firing rate over the course of the recording, normalized by
+dividing by the overall mean firing rate.
+- Split `StatisticsView` into 2 separate views, `ISIView` and `CorrelogramView`. The latter renders the ACGs and CCGs
+for the N neurons in the current display list as a NxN matrix of subplots, with the ACGs along the major diagonal.
+
 ## v0.0.5 (10/09/2023)
 - Initial implementation of `StatisticsView`, displaying ISI histograms and ACGs for all neural units in the current 
 display list, as well as the CCG of the first neuron in that list vs the others.
