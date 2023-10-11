@@ -163,8 +163,8 @@ class ChannelView(BaseView):
                 self._unit_spike_clips.append(
                     self._plot_item.plot(x=[], y=[], name=f"spike-clips-{k}", pen=pen, connect='finite'))
 
-        self._t0_readout.setText(ChannelView._digital_readout(0))
-        self._t1_readout.setText(ChannelView._digital_readout(1))
+        self._t0_readout.setText(ChannelView.digital_readout(0))
+        self._t1_readout.setText(ChannelView.digital_readout(1))
         dur = int(self.data_manager.channel_recording_duration_seconds)
         if dur == 0:
             self._t0_slider.setRange(0, 10)
@@ -299,8 +299,8 @@ class ChannelView(BaseView):
         :param t0: The current slider position = the elapsed recording time in seconds.
         """
         rng = self._plot_item.getViewBox().viewRange()
-        self._t0_readout.setText(ChannelView._digital_readout(t0 + rng[0][0]))
-        self._t1_readout.setText(ChannelView._digital_readout(t0 + rng[0][1]))
+        self._t0_readout.setText(ChannelView.digital_readout(t0 + rng[0][0]))
+        self._t1_readout.setText(ChannelView.digital_readout(t0 + rng[0][1]))
 
     @Slot(int)
     def on_t0_slider_value_changed(self, t0: int) -> None:
@@ -320,8 +320,8 @@ class ChannelView(BaseView):
             for pdi in self._unit_spike_clips:
                 pdi.setData(x=[], y=[])
         rng = self._plot_item.getViewBox().viewRange()
-        self._t0_readout.setText(ChannelView._digital_readout(t0+rng[0][0]))
-        self._t1_readout.setText(ChannelView._digital_readout(t0+rng[0][1]))
+        self._t0_readout.setText(ChannelView.digital_readout(t0 + rng[0][0]))
+        self._t1_readout.setText(ChannelView.digital_readout(t0 + rng[0][1]))
 
     # noinspection PyUnusedLocal
     @Slot(object, object)
@@ -338,12 +338,13 @@ class ChannelView(BaseView):
         if isinstance(rng, tuple) and len(rng) == 2 and isinstance(rng[0], float):
             t0 = self.data_manager.channel_trace_seg_start + rng[0]
             t1 = self.data_manager.channel_trace_seg_start + rng[1]
-        self._t0_readout.setText(ChannelView._digital_readout(t0))
-        self._t1_readout.setText(ChannelView._digital_readout(t1))
+        self._t0_readout.setText(ChannelView.digital_readout(t0))
+        self._t1_readout.setText(ChannelView.digital_readout(t1))
 
     @staticmethod
-    def _digital_readout(t: float) -> str:
+    def digital_readout(t: float, with_msecs: bool = True) -> str:
+        t = max(0, t)
         minutes = int(t / 60)
         seconds = int(t - 60 * int(t/60))
         msecs = int(1000 * (t - int(t)))
-        return f"{minutes:02d}:{seconds:02d}.{msecs:03d}"
+        return f"{minutes:02d}:{seconds:02d}.{msecs:03d}" if with_msecs else f"{minutes:02d}:{seconds:02d}"

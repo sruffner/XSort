@@ -4,6 +4,7 @@ from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QCloseEvent, QShowEvent
 from PySide6.QtWidgets import QApplication, QMainWindow
+import pyqtgraph as pg
 
 from xsort.views.manager import ViewManager
 
@@ -45,6 +46,7 @@ class XSortMainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
+    pg.setConfigOptions(antialias=True)
     main_app = QApplication(sys.argv)
     main_window = XSortMainWindow()
     main_window.show()
