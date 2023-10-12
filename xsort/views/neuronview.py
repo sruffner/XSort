@@ -64,7 +64,7 @@ class _NeuronTableModel(QAbstractTableModel):
             elif (role == Qt.BackgroundRole) or (role == Qt.ForegroundRole):
                 u = self._data_manager.neurons[self._sorted_indices[r]].label
                 color_str = self._data_manager.display_color_for_neuron(u)
-                bkg_color = QColor(Qt.white) if color_str is None else QColor.fromString(color_str)
+                bkg_color = None if color_str is None else QColor.fromString(color_str)
                 if role == Qt.BackgroundRole:
                     return bkg_color
                 else:

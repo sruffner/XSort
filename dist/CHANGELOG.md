@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.0.7 (10/11/2023)
+- Turned on antialiasing in the `pyqtgraph` library. Eventually, this may become a user setting, especially if it causes
+performance issues.
+- Enhancements to `FiringRateView`:
+  1) User can opt to display the firing rate histograms as raw bin counts or normalized.
+  2) The histograms are now rendered more accurately as "staircases".
+  3) Added a vertical-line "time cursor" that follow the mouse as it moves within the view. A label near the bottom 
+  shows the elapsed time in the format **MM:SS**.
+  4) A colored, labeled marker is drawn where the time cursor intersects each displayed histogram, and the label 
+  reflects the approximate Y-coordinate value for that histogram at the elapsed time of the recording.
+  5) Both X- and Y-axes are not really needed, so they are hidden.
+- Bug fix in `NeuronView`: On Mac OS, when the system switched automatically to a night time color scheme, could no 
+longer read the rows in the neural unit table because the background color was hard-coded to white -- and the night 
+time default foreground color is also white!
+
 ## v0.0.6 (10/09/2023)
 - Initial implementation of `FiringRateView`, displaying firing rate over the course of the recording, normalized by
 dividing by the overall mean firing rate.
