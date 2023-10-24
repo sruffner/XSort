@@ -13,6 +13,11 @@ version 3.11.4.
 - In a terminal console, navigate to the directory holding the wheel file you downloaded, and install 
 the package: `pip install xsort-x.y.z-py3-none-any.whl`.
 - To start the app: `python -m xsort.app`.
+- You may run into the following error when starting XSort: `qt.qpa.plugin: Could not load the Qt platform 
+plugin "xcb" in "" even though it was found. This application failed to start because no Qt platform plugin 
+could be initialized. Reinstalling the application may fix this problem. Available platform plugins are: 
+minimalegl, minimal, wayland-egl, vkkhrdisplay, offscreen, eglfs, vnc, linuxfb, xcb, wayland.` If so, try
+reinstalling XCB platform plugin with `sudo apt-get install '*libxcb*'`
 
 ## License
 `XSort` was created by [Scott Ruffner](mailto:sruffner@srscicomp.com). It is

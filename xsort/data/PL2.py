@@ -716,6 +716,12 @@ def _get_channel_offset(data: Dict[str, Any], data_subtype: int, channel_number:
      1. The notion of multiple channels per category does not apply to the start/stop data. For this category
         (source == 0), the method always returns 0.
      2. The method makes no assumption about how the channel records are stored within each of 3 channel lists.
+     3. [23oct2023] Prior to PL2 version 1.19, the data source or subtype for "AI" channels was PL2_ANALOG_TYPE_AI = 12;
+        for 1.19+, it is PL2_ANALOG_TYPE_AI2 = 13. But "Cineplex event" channel with source PL2_EVENT_TYPE_CINEPLEX = 12
+        was introduced in 1.19 -- the same source type as PL2_ANALOG_TYPE_AI. Initially I did not look for AI source 12
+        if the version was 1.19+, but this failed on at least one PL2 file -- so I may not be getting the software
+        version correctly. Instead, I simply look for all possible data source types for both analog channels and event
+        channels.
 
     Args:
         data: Dictionary holding PL2 file contents culled thus far.
@@ -728,13 +734,10 @@ def _get_channel_offset(data: Dict[str, Any], data_subtype: int, channel_number:
     Raises:
         RuntimeError: If channel data source is not recognized.
     """
-    major, minor, rev = _get_creator_software_version(data)
     spike_sources = [PL2_SPIKE_TYPE_SPK, PL2_SPIKE_TYPE_SPK_SPKC]
     analog_sources = [PL2_ANALOG_TYPE_WB, PL2_ANALOG_TYPE_FP, PL2_ANALOG_TYPE_SPKC,
-                      PL2_ANALOG_TYPE_AI if ((major < 1) or (major == 1 and minor < 19)) else PL2_ANALOG_TYPE_AI2]
-    event_sources = [PL2_EVENT_TYPE_KBD, PL2_EVENT_TYPE_SINGLE_BIT, PL2_EVENT_TYPE_STROBED]
-    if (major < 1) or (major == 1 and minor < 19):
-        event_sources.append(PL2_EVENT_TYPE_CINEPLEX)
+                      PL2_ANALOG_TYPE_AI, PL2_ANALOG_TYPE_AI2]
+    event_sources = [PL2_EVENT_TYPE_KBD, PL2_EVENT_TYPE_SINGLE_BIT, PL2_EVENT_TYPE_STROBED, PL2_EVENT_TYPE_CINEPLEX]
 
     channel_list: Optional[List[Dict]] = None
     if data_subtype == 0:
