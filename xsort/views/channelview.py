@@ -262,6 +262,25 @@ class ChannelView(BaseView):
                     x, y = self._prepare_clip_data(u, seg, offset)
             pdi.setData(x=x, y=y)
 
+    def on_channel_trace_segment_start_changed(self) -> None:
+        """
+        When the channel trace segment start time changes, "flat line" all channel trace segment data items and empty
+        all spike clip data items, since the new channel trace segments will not be immediately available. Also update
+        the digital readouts to reflect the new segment starting and ending times.
+        """
+        offset = 0
+        for k, pdi in self._trace_segments.items():
+            pdi.setData(x=[0, 1], y=[offset, offset])
+            offset += self._trace_offset
+        for pdi in self._unit_spike_clips:
+            pdi.setData(x=[], y=[])
+
+        t0 = self.data_manager.channel_trace_seg_start
+        self._t0_slider.setSliderPosition(t0)
+        rng = self._plot_item.getViewBox().viewRange()
+        self._t0_readout.setText(ChannelView.digital_readout(t0 + rng[0][0]))
+        self._t1_readout.setText(ChannelView.digital_readout(t0 + rng[0][1]))
+
     def _prepare_clip_data(self, u: Neuron, seg: ChannelTraceSegment, offset: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         Produce Numpy arrays (X, Y) defining a plot that traces over the specified analog trace segment for each 10-ms
@@ -305,32 +324,20 @@ class ChannelView(BaseView):
     @Slot(int)
     def on_t0_slider_value_changed(self, t0: int) -> None:
         """
-        Handler updates the entire view when the trace segment start time is updated. First, the data manager is
+        Handler called when the slider controlling teh channel trace segment start time is released. The data manager is
         informed of the change in the segment start time, which will trigger a background task to retrieve the
-        channel trace segments for all analog source channels. It then "flat lines" all channel trace segment data
-        items and empties all spike clip data items, since the new channel trace segments will not be immediately
-        available.
+        channel trace segments for all analog source channels.
         :param t0: The new slider position = the elapsed recording time in seconds.
         """
-        if self.data_manager.set_channel_trace_seg_start(t0):
-            offset = 0
-            for k, pdi in self._trace_segments.items():
-                pdi.setData(x=[0, 1], y=[offset, offset])
-                offset += self._trace_offset
-            for pdi in self._unit_spike_clips:
-                pdi.setData(x=[], y=[])
-        rng = self._plot_item.getViewBox().viewRange()
-        self._t0_readout.setText(ChannelView.digital_readout(t0 + rng[0][0]))
-        self._t1_readout.setText(ChannelView.digital_readout(t0 + rng[0][1]))
+        self.data_manager.set_channel_trace_seg_start(t0)
 
-    # noinspection PyUnusedLocal
     @Slot(object, object)
-    def on_x_range_changed(self, src: object, rng: Tuple[float, float]) -> None:
+    def on_x_range_changed(self, _src: object, rng: Tuple[float, float]) -> None:
         """
         Handler updates the labels reflecting the elapsed recording times at the start and end of the plot's X-axis.
         These change as the user scales and pans the plot content.
 
-        :param src: The plot view box for which the X-axis range changed.
+        :param _src: The plot view box for which the X-axis range changed. Unused.
         :param rng: The new X-axis range (xMin, xMax).
         """
         t0 = self.data_manager.channel_trace_seg_start
@@ -343,7 +350,7 @@ class ChannelView(BaseView):
 
     @staticmethod
     def digital_readout(t: float, with_msecs: bool = True) -> str:
-        t = max(0, t)
+        t = max(0.0, t)
         minutes = int(t / 60)
         seconds = int(t - 60 * int(t/60))
         msecs = int(1000 * (t - int(t)))

@@ -65,6 +65,7 @@ class ViewManager(QObject):
         self.data_analyzer.data_ready.connect(self.on_data_ready)
         self.data_analyzer.focus_neurons_changed.connect(self.on_focus_neurons_changed)
         self.data_analyzer.focus_neuron_stats_updated.connect(self.on_focus_neurons_stats_updated)
+        self.data_analyzer.channel_seg_start_changed.connect(self.on_channel_seg_start_changed)
 
         self._main_window.setMinimumSize(800, 600)
         self._restore_from_settings()
@@ -186,6 +187,15 @@ class ViewManager(QObject):
         """
         for v in self._all_views:
             v.on_focus_neurons_stats_updated()
+
+    @Slot()
+    def on_channel_seg_start_changed(self) -> None:
+        """
+        Handler notifices all views when there's a change in the elapsed start time at which all analog channel trace
+        segments begin.
+        """
+        for v in self._all_views:
+            v.on_channel_trace_segment_start_changed()
 
     def select_working_directory(self, starting_up: bool = False) -> None:
         """

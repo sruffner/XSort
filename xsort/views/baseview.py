@@ -87,6 +87,14 @@ class BaseView(QObject):
         """
         pass
 
+    def on_channel_trace_segment_start_changed(self) -> None:
+        """
+        Refresh view contents after a change in the elapsed starting time (relative to the beginning of the
+        electrophysiological recording) for all analog channel 1-second trace segments. Default implementation takes no
+        action.
+        """
+        pass
+
     def save_settings(self, settings: QSettings) -> None:
         """
         Save any view-specific user preferences that should be restored the next time XSort is launched. This method

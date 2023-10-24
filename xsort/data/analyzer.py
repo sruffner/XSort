@@ -18,7 +18,10 @@ class DataType(Enum):
 class Analyzer(QObject):
     """
     The data model manager object for XSort.
-    TODO: UNDER DEV.  Note that is subclasses QObject so we can define signals!
+    TODO: UNDER DEV.  Note that it subclasses QObject so we can define signals! ...Currently I'm using this object
+        for inter-view communication, which should be in ViewManager: the "focus neuron list" and the elapsed time
+        epoch currently displayed in the analog channel trace view. But putting these in ViewManager leads to circular
+        import issue bc manaager.py imports all the view classes, which would also have to import manager.py!
     """
 
     MAX_NUM_FOCUS_NEURONS: int = 3
@@ -49,6 +52,11 @@ class Analyzer(QObject):
     Signals that some statistics have been recomputed for one or more neural units currently selected for 
     display/comparison purposes. All views should be refreshed accordingly.
     """
+    channel_seg_start_changed: Signal = Signal()
+    """ 
+    Signals that the elapsed starting time (relative to that start of the electrophysiological recording) for all
+    analog channel trace segments has just changed.
+    """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -68,8 +76,8 @@ class Analyzer(QObject):
         """
         self._channel_seg_start: int = 0
         """ 
-        All one-second channel trace segments, once loaded, start at this sample index relative to the start of
-        the Omniplex recording.
+        Current elapsed time, in seconds relative to the start of the Omniplex recording, at which all one-second analog
+        channel trace segments begin (once they are loaded from internal cache).
         """
         self._pkl_file: Optional[Path] = None
         """ The original spike sorter results file (for now, must be a Python Pickle file). """
@@ -174,6 +182,9 @@ class Analyzer(QObject):
         self._channel_seg_start = t0
         for idx in self._channel_segments.keys():
             self._channel_segments[idx] = None
+
+        self.channel_seg_start_changed.emit()
+
         task = Task(TaskType.GETCHANNELS, self._working_directory, start=t0*self.channel_samples_per_sec,
                     count=self.channel_samples_per_sec)
         task.signals.progress.connect(self.on_task_progress)

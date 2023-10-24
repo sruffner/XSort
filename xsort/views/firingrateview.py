@@ -1,10 +1,12 @@
 from typing import List, Optional
 
 from PySide6.QtCore import Qt, Slot, QSettings, QEvent, QObject
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QComboBox, QHBoxLayout, QCheckBox
 import pyqtgraph as pg
 import numpy as np
+from pyqtgraph import Point
+from pyqtgraph.GraphicsScene.mouseEvents import MouseClickEvent
 
 from xsort.data.analyzer import Analyzer
 from xsort.data.neuron import Neuron
@@ -33,6 +35,8 @@ class FiringRateView(BaseView):
     """ Bin step size in seconds. """
     _PEN_WIDTH: int = 3
     """ Width of pen used to draw the firing rate histograms. """
+    _T0_MARKER_COLOR: str = '#00C000'
+    """ Color of the vertical line and label marking the current channel trace segment start time. """
 
     def __init__(self, data_manager: Analyzer) -> None:
         super().__init__('Firing Rate', None, data_manager)
@@ -51,12 +55,17 @@ class FiringRateView(BaseView):
         self._normalized_cb = QCheckBox("Normalized")
         """ If checked, firing rate histograms are normalized by dividing by the unit's overall mean firing rate. """
         self._vline = pg.InfiniteLine(pos=-1000, angle=90, movable=False, pen=None, label="pos",
-                                      labelOpts=dict(position=0.05))
+                                      labelOpts=dict(position=0.95))
         """ Vertical line follows mouse cursor when it is inside the plot view box. Initially placed outside box. """
         self._markers: List[pg.TargetItem] = list()
         """ 
         Labelled markers, one per histogram trace, displaying Y value where vertical line cursor intersects histogram.
         """
+        self._t0_line = pg.InfiniteLine(pos=0, angle=90, movable=False,
+                                        pen=pg.mkPen(color=self._T0_MARKER_COLOR,
+                                                     style=Qt.PenStyle.DashLine, width=self._PEN_WIDTH),
+                                        label='00:00', labelOpts=dict(position=0.02))
+        """ Vertical line marks the current elapsed time at which analog channel trace segments begin. """
 
         # one-time configuration
         self._plot_item.setMenuEnabled(enableMenu=False)
@@ -85,6 +94,18 @@ class FiringRateView(BaseView):
             self._markers.append(marker)
             self._plot_item.addItem(marker, ignoreBounds=True)
         self._plot_item.scene().sigMouseMoved.connect(self._on_mouse_moved)
+
+        # a second vertical line is always visible and indicates the start time for the analog channel trace segments
+        # provided by the data manager object (and displayed in another view). Clicking on this view will change the
+        # channel trace segments' start time.
+        self._t0_line.label.setColor(self._T0_MARKER_COLOR)
+        f: QFont = self._t0_line.label.textItem.font()
+        f.setBold(True)
+        self._t0_line.label.setFont(f)
+        self._plot_item.addItem(self._t0_line, ignoreBounds=True)
+
+        # need to detect mouse clicks so we can focus on the corresponding time in the recorded timeline
+        self._plot_item.scene().sigMouseClicked.connect(self._on_mouse_clicked)
 
         # need to detect when mouse enters/leaves plot widget so we can hide the vertical line cursor
         self._plot_widget.installEventFilter(self)
@@ -140,6 +161,15 @@ class FiringRateView(BaseView):
     def on_focus_neurons_changed(self) -> None:
         self._refresh()
 
+    def on_channel_trace_segment_start_changed(self) -> None:
+        """
+        When the channel trace segment start time changes, update the position of the vertical line that marks that
+        time in this view.
+        """
+        t0 = self.data_manager.channel_trace_seg_start
+        self._t0_line.setPos(t0)
+        self._t0_line.label.setFormat(ChannelView.digital_readout(t0, with_msecs=False))
+
     @Slot(str)
     def _on_bin_size_changed(self, _: str) -> None:
         """ Handler refreshes the plotted firing rate histograms whenever the user changes the bin size. """
@@ -173,6 +203,18 @@ class FiringRateView(BaseView):
                 else:
                     marker.setPos(loc.x(), y)
                     marker.label().setFormat(f"y={y:.2f}" if normalized else f"y={int(y)}")
+
+    def _on_mouse_clicked(self, evt: MouseClickEvent) -> None:
+        """
+        Whenever the mouse is clicked over the plot window, get the elapsed time in the recorded timeline under the
+        mouse cursor, and tell the data manager to make that the current elapsed time for the analog channel trace
+        segments.
+        :param evt: The mouse-clicked event.
+        """
+        loc = self._plot_item.getViewBox().mapSceneToView(evt.pos())
+        t0 = int(loc.x() + 0.5)
+        self.data_manager.set_channel_trace_seg_start(t0)
+        evt.accept()
 
     def _get_y_for_x(self, x: float, which: int) -> Optional[float]:
         """
