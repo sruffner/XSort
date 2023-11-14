@@ -8,7 +8,7 @@ import numpy as np
 from pyqtgraph import ViewBox
 
 from xsort.data.analyzer import Analyzer
-from xsort.data.neuron import Neuron
+from xsort.data.neuron import Neuron, DataType
 from xsort.views.baseview import BaseView
 
 
@@ -115,8 +115,9 @@ class ISIView(BaseView):
     def on_focus_neurons_changed(self) -> None:
         self._refresh()
 
-    def on_focus_neurons_stats_updated(self) -> None:
-        self._refresh()
+    def on_focus_neurons_stats_updated(self, data_type: DataType, unit_label: str) -> None:
+        if data_type == DataType.ISI:
+            self._refresh()
 
     @Slot()
     def _on_hist_span_changed(self):

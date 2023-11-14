@@ -5,6 +5,7 @@ from PySide6.QtGui import QPalette, QColor
 from PySide6.QtWidgets import QWidget
 
 from xsort.data.analyzer import Analyzer
+from xsort.data.neuron import DataType
 
 
 class BaseView(QObject):
@@ -80,10 +81,14 @@ class BaseView(QObject):
         """
         pass
 
-    def on_focus_neurons_stats_updated(self) -> None:
+    def on_focus_neurons_stats_updated(self, data_type: DataType, unit_label: str) -> None:
         """
-        Refresh view contents after some statistics are updated/recomputed for any or all of the neurons currently
-        selected for display/comparison purposes. Default implementation takes no action.
+        Refresh view contents after some statistic is computed for a specified neuron within the list of neurons
+        currently seelected for display/comparison purposes -- aka the "focus list". Default implementation takes no
+        action. Note that the statistic is cached in the :class:`Neuron` instance.
+
+        :param data_type: Indicates the type of statistic that was computed or recomputed.
+        :param unit_label: The unique label identifying the neural unit for which a computed statistic is available.
         """
         pass
 

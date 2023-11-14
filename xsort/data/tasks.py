@@ -13,7 +13,7 @@ import scipy
 from PySide6.QtCore import QObject, Slot, Signal, QRunnable
 
 from xsort.data import PL2, stats
-from xsort.data.neuron import Neuron, ChannelTraceSegment
+from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
 
 CHANNEL_CACHE_FILE_PREFIX: str = '.xs.ch.'
 """ Prefix for Omniplex analog channel data cache file -- followed by the Omniplex channel index. """
@@ -141,24 +141,28 @@ class TaskType(Enum):
     """
     GETCHANNELS = 2,
     """ Retrieve from internal cache all recorded analog channel traces for a specified time period [t0..t1]. """
-    COMPUTEHIST = 3,
-    """ 
-    Compute any missing histograms for a list of units: the ISI and ACG for each unit in the list, and the CCG
-    for the each unit in the list vs the other units. The results are cached in the unit instances.
+    COMPUTESTATS = 3
     """
-    COMPUTEPCA = 4
-    """
-    Perform principal component analysis for a list of up to 3 neural units. For each unit, returns a Nx2 Numpy array
-    representing the projection of the unit's N spikes onto the first 2 principal components.
+    Compute statistics for each neural unit in the current focus list. Currently, the following statistics are
+    computed: the ISI and ACG for each unit, the CCG for each units vs the other units in the list, and the PCA
+    projection of each unit's spike "clips" onto the two highest-variant principal components determined using a random
+    sampling of spike clips across all units in the focus list. All statistics are cached in the unit instances.
     """
 
 
 class TaskSignals(QObject):
     """ Defines the signals available from a running worker task thread. """
     progress = Signal(str, int)
-    """ Signal emitted to deliver a progress message and integer completion percentage. """
-    data_retrieved = Signal(object)
-    """ Signal emitted to deliver a data object to the receiver. Data type will depend on specific task. """
+    """ 
+    Signal emitted to deliver a progress message and integer completion percentage. Ignore completion percentage
+    if not in [0..100].
+    """
+    data_available = Signal(DataType, object)
+    """ 
+    Signal emitted to deliver a data object to the receiver. First argument indicates the type of data retrieved
+    (or computed), and the second argument is a container for the data. For the :class:`TaskType`.COMPUTESTATS task, 
+    the data object is actually the :class:`Neuron` instance in which the computed statistics are cached.
+    """
     error = Signal(str)
     """ Signal emitted when the worker task has failed for any reason. Argument is an error description. """
     finished = Signal(TaskType)
@@ -176,11 +180,9 @@ class Task(QRunnable):
         :param working_dir: The XSort working directory on which to operate.
         :param kwargs: Dictionary of keywaord argyments, varying IAW task type. For the TaskType.GETCHANNELS task,
             kwargs['start'] >= 0 and kwargs['count'] > 0 must be integers defining the starting index and size of the
-            contigous channel trace segment to be extracted. For the TaskType.COMPUTEHIST task, kw_args['units'] is the
-            list of :class:`Neuron` instances for which ISI/ACG/CCG histograms are to be computed. For the
-            TaskType.COMPUTEPCA task, kwargs['units'] is a list of up to 3 :class:`Neuron` instances on which to
-            perform the principal component analysis.
-
+            contigous channel trace segment to be extracted. For the TaskType.COMPUTESTATS task, kw_args['units'] is the
+            list of :class:`Neuron` instances in the current focus list. Various statistics are cached in these
+            instances as they are computed.
         """
         super().__init__()
 
@@ -196,11 +198,10 @@ class Task(QRunnable):
         """
         self._units: List[Neuron] = kwargs.get('units', [])
         """ 
-        For the COMPUTEHIST task, this is a list of neural units for which histograms are to be computed. **NOTE**:
-        These are the actual :class:`Neuron` objects living in the GUI, and they are updated in place. This should be
-        thread-safe because, once computed and cached, the histograms never change again.
-            For the COMPUTEPCA task, this is a list of 1-3 neural units for which the principal component analysis is
-        performed.
+        For the COMPUTESTATS task, this is the list of neural units that currently comprise the 'focus list' and for
+        which various statistics are to be computed. **NOTE: These are the actual :class:`Neuron` objects living in 
+        the GUI, and the task runner will cache the results of statistical analyses in these objects. Potentially
+        not thread-safe!**
         """
         self.signals = TaskSignals()
         """ The signals emitted by this task. """
@@ -215,10 +216,8 @@ class Task(QRunnable):
                 self._build_internal_cache()
             elif self._task_type == TaskType.GETCHANNELS:
                 self._get_channel_traces()
-            elif self._task_type == TaskType.COMPUTEHIST:
-                self._compute_histograms()
-            elif self._task_type == TaskType.COMPUTEPCA:
-                self._compute_pca_projection()
+            elif self._task_type == TaskType.COMPUTESTATS:
+                self._compute_statistics()
             else:
                 raise Exception("Unrecognized request")
         except Exception as e:
@@ -291,7 +290,7 @@ class Task(QRunnable):
                 channel_trace = self._retrieve_channel_trace(idx, 0, int(samples_per_sec), suppress=True)
                 if channel_trace is None:
                     channel_trace = self._cache_analog_channel(idx, src)
-                self.signals.data_retrieved.emit(channel_trace)
+                self.signals.data_available.emit(DataType.CHANNELTRACE, channel_trace)
 
         # PHASE 2: Build the neural unit metrics cache
         emsg, neurons = load_spike_sorter_results(sorter_file)
@@ -306,7 +305,7 @@ class Task(QRunnable):
             if updated_neuron is None:
                 self._cache_neural_unit(neuron)
                 updated_neuron = neuron
-            self.signals.data_retrieved.emit(updated_neuron)
+            self.signals.data_available.emit(DataType.NEURON, updated_neuron)
 
     def _get_channel_traces(self) -> None:
         """
@@ -342,7 +341,7 @@ class Task(QRunnable):
         # retrieve all the trace segments
         for idx in channel_list:
             segment = self._retrieve_channel_trace(idx, self._start, self._count)
-            self.signals.data_retrieved.emit(segment)
+            self.signals.data_available.emit(DataType.CHANNELTRACE, segment)
 
     def _retrieve_channel_trace(
             self, idx: int, start: int, count: int, suppress: bool = False) -> Optional[ChannelTraceSegment]:
@@ -617,17 +616,31 @@ class Task(QRunnable):
         # update neural unit record in place
         unit.update_metrics(primary_channel_idx, best_snr, template_dict)
 
-    def _compute_histograms(self) -> None:
+    def _compute_statistics(self) -> None:
         """
-        Compute the ISI histogram, autocorrelograms, and cross-correlograms for a list of neural units (the
-        TaskType.COMPUTEHIST task). The list of units are supplied in the task constructor. The :class:`Neuron` object
-        has instance methods to compute the histograms and cache them internally, but these should only be invoked on
-        a background because they can take a significant amount of time. Only histograms that have not been cached
-        already are computed.
-            **IMPORTANT**: This is a time-consuming computation task that does not involve file IO -- unlike the other
-        tasks defined in this module. File IO operations release the Python Global Interpreter lock and thus won't
-        impact the main GUI thread. But heavy-compute tasks like this one will. Hence we sleep regularly in this
-        method to release the GIL.
+        Compute all statistics for the list of neural units that currently comprise the focus list on the GUI:
+            - Each unit's interspike interval (ISI) histogram.
+            - Each unit's autocorrelogram (ACG).
+            - The cross-correlogram of each unit with each of the other unit's in the list.
+            - Perform principal component analysis on the spike clips across all units in the list and find calculate
+              the PCA projection of each unit's spike train.
+
+        The list of neural units are supplied in the task constructor and are actually references to the
+        :class:`Neuron` objects live on the main GUI thread. :class:`Neuron` instance methods compute the various
+        histograms and cache them internally, but these should only be invoked on a background thread because they can
+        take a significant amount of time to execute. Only histograms that have not been cached already are computed.
+            The principal component analysis can take quite a long time, depending on how many total spikes there are
+        across the units in the focus list. The projections are cached in the `Neuron` instances as they are computed,
+        but unlike the ISI/ACG/CCG, these only apply to the current focus list. Every time the focus list changes --
+        which the user can do at any time on the GUI side -- any previously computed projections are reset.
+
+            **IMPORTANT: Threading concerns.** The computation of ACG/CCGs is a time-consuming operation that does NOT
+        involve file IO. File IO operations release the Python Global Interpreter Lock (GIL) and thus won't impact the
+        main GUI thread. But heavy-compute tasks like the ACG/CCG will. Hence we sleep briefly after computing each
+        ACG or CCG to release the GIL. A similar concern applies to the computations in principal component analysis,
+        but some of the time-consuming computations are handled within a third-party library. If the GUI is blocked
+        too severely, we may have to offload the computations into a separate process.
+
         :raises Exception: If an error occurs. In most cases, the exception message may be used as a human-facing
             error description.
         """
@@ -641,10 +654,12 @@ class Task(QRunnable):
         t0 = time.time()
         n = 0
         for u in self._units:
-            u.cache_isi_if_necessary()
+            if u.cache_isi_if_necessary():
+                self.signals.data_available.emit(DataType.ISI, u)
             time.sleep(0.2)
             n += 1
-            u.cache_acg_if_necessary()
+            if u.cache_acg_if_necessary():
+                self.signals.data_available.emit(DataType.ACG, u)
             time.sleep(0.2)
             n += 1
             if time.time() - t0 > 1:
@@ -653,13 +668,16 @@ class Task(QRunnable):
                 t0 = time.time()
             for u2 in self._units:
                 if u.label != u2.label:
-                    u.cache_ccg_if_necessary(other_unit=u2)
+                    if u.cache_ccg_if_necessary(other_unit=u2):
+                        self.signals.data_available.emit(DataType.CCG, u)
                     time.sleep(0.2)
                     n += 1
                     if time.time() - t0 > 1:
                         pct = int(100 * n / num_hists)
                         self.signals.progress.emit(f"Computing histograms for {len(self._units)} units ...", pct)
                         t0 = time.time()
+
+        self._compute_pca_projection()
 
     NCLIPS_FOR_PCA: int = 1000
     """ 
@@ -681,8 +699,6 @@ class Task(QRunnable):
 
     def _compute_pca_projection(self) -> None:
         """
-        Handler for the :class:`TaskType`.COMPUTEPCA task.
-
         Perform principal component analysis on spike waveform clips across all recorded analog channels for up to 3
         neural units. PCA provides a mechanism for detecting whether distinct neural units actually represent
         incorrectly segregated populations of spikes recorded from the same unit.
@@ -721,7 +737,7 @@ class Task(QRunnable):
             raise Exception(f"PCA projection requires 1-3 units, not {len(self._units)}!")
 
         self.signals.progress.emit(f"Computing PCA projections for {len(self._units)} units: "
-                                   f"{','.join([u.label for u in self._units])} ...", 0)
+                                   f"{','.join([u.label for u in self._units])} ...", -1)
 
         # retrieve channel list from Omniplex file. All analog channel traces should be separately cached already.
         omniplex_file, _, emsg = get_required_data_files(self._working_dir)
@@ -743,7 +759,7 @@ class Task(QRunnable):
 
         # randomly select spike clips for each unit to be used in computing principal components -- unless there are
         # fewer than 1000 spikes across all units.
-        t0 = time.time()
+        time.sleep(0.2)
         n_total_spikes = sum([u.num_spikes for u in self._units])
         n_clips = min(Task.NCLIPS_FOR_PCA, n_total_spikes)
         clip_dur = int(Task.SPIKE_CLIP_DUR_SEC * samples_per_sec)
@@ -753,25 +769,26 @@ class Task(QRunnable):
             spike_indices = sorted(random.sample(range(u.num_spikes), n_select))
             clip_starts = [int((u.spike_times[i] - Task.PRE_SPIKE_SEC) * samples_per_sec) for i in spike_indices]
             unit_clips = np.empty((n_select, 0), dtype='<h')
-            self.signals.progress.emit(f"Retrieving {n_select} spike clips for unit {u.label} "
-                                       f"across {len(channel_list)} analog channels.", 0)
-            for ch_idx in channel_list:
+            for i, ch_idx in enumerate(channel_list):
                 clips = self._retrieve_channel_clips(ch_idx, clip_starts, clip_dur)
                 unit_clips = np.hstack((unit_clips, clips))
+                pct = int(100 * (i+1) / len(channel_list))
+                self.signals.progress.emit(f"Retrieving {n_select} spike clips for unit {u.label} "
+                                           f"across {len(channel_list)} analog channels.", pct)
             all_clips = np.vstack((all_clips, unit_clips))
 
         # the Lx2 matrix contains the first 2 principal components for sampled spike clips, where L = clip duration x
         # the number of analog channels on which the neural units were recorded.
-        self.signals.progress.emit(f"Computing principal components from spike clips...", 0)
+        self.signals.progress.emit(f"Computing principal components from spike clips...", -1)
         pc_matrix = stats.compute_principal_components(all_clips)
+        time.sleep(0.2)  # need to yield the GIL after this computation!
 
         # compute the projection of each unit's spikes onto the 2D space defined by the 2 principal components
         clips_in_chunk = np.zeros((Task.SPIKES_PER_BATCH, clip_dur * len(channel_list)), dtype='<h')
-        for u in self._units:
+        for i, u in enumerate(self._units):
             self.signals.progress.emit(f"Computing PCA projection for unit {u.label}...", 0)
 
             unit_prj = np.zeros((u.num_spikes, 2))
-
             n_spikes_so_far = 0
             while n_spikes_so_far < u.num_spikes:
                 n_spikes_in_chunk = min(Task.SPIKES_PER_BATCH, u.num_spikes - n_spikes_so_far)
@@ -782,10 +799,14 @@ class Task(QRunnable):
                     clips_in_chunk[0:n_spikes_in_chunk, k*clip_dur:(k+1)*clip_dur] = clips
                 unit_prj[n_spikes_so_far:n_spikes_so_far+n_spikes_in_chunk, :] = \
                     np.matmul(clips_in_chunk[0:n_spikes_in_chunk], pc_matrix)
+                time.sleep(0.2)
                 n_spikes_so_far += n_spikes_in_chunk
-            self.signals.data_retrieved.emit((u.label, unit_prj))
 
-        print(f"DEBUG: COMPUTEPCA task execution time: {time.time() - t0:.3f} seconds.")   # TODO: TESTING
+                pct = int(100 * n_spikes_so_far / u.num_spikes)
+                self.signals.progress.emit(f"Computing PCA projection for unit {u.label}...", pct)
+
+            u.set_cached_pca_projection(unit_prj)
+            self.signals.data_available.emit(DataType.PCA, u)
 
     def _retrieve_channel_clips(self, ch_idx: int, clip_starts: List[int], clip_dur: int) -> np.ndarray:
         """

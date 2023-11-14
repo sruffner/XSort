@@ -1,8 +1,19 @@
+from enum import Enum
 from typing import Optional, Dict, Tuple
 
 import numpy as np
 
 from xsort.data import stats
+
+
+class DataType(Enum):
+    """ The different types of data objects generated/retrieved by :class:`Analyzer` via background tasks. """
+    NEURON = 1,   # neural unit record
+    CHANNELTRACE = 2,   # analog channel traces for a 1-second segment of the analog recording
+    ISI = 3,   # ISI histogram for a neural unit in the focus list
+    ACG = 4,   # Autocorrelogram for a neural unit in the focus list
+    CCG = 5,   # Crosscorrelogram for a neual unit vs another unit in the focus list
+    PCA = 6    # PCA projection for a neural unit in the focus list
 
 
 class ChannelTraceSegment:
@@ -65,13 +76,18 @@ class ChannelTraceSegment:
 
 class Neuron:
     """
-    A container holding the spike train, computed metrics, and important metadata for a neural unit.
-    TODO: UNDER DEV
-    I'm also using it as an in-memory cache for the unit's auto-correlogram and cross-correlograms with other units.
-    The correlograms take too long to compute in general, and so that computation is handled on a background task
-    launched by the Analyzer. Once the computation is done, the result is cached in the Neuron object for use and
-    never has to be computed again (a fixed span of 200ms is considered enough to cover all use cases).
+    A container holding the spike train, computed metrics, important metadata, and cached statistics for a neural unit.
 
+        When initially constructed from the spike sorter results file in the XSort working directory, the only
+    available information about a neural unit is its label and spike train. Metadata and metrics are computed in the
+    background and stored, along with the spike train, in an internal cache file in the working directory. Additional
+    statistics -- the autocorrelogram, interspike interval histogram, cross correlograms with other units, and principal
+    component analysis results -- are computed at application runtime and cached in this object.
+        Principal component analysis is performed on the spike trains of the neural units in the current "focus list".
+    The result of PCA is a projection of each unit's spikes into a 2D space defined by the 2 principal components
+    exhibiting the most variance (aka, the most "information"), and it is this projection which is cached in this
+    object. Of course, each time the "focus list" changes, the analysis must be redone, so any previously cached
+    projection is reset.
     """
     FIXED_HIST_SPAN_MS: int = 200
     """ The (fixed) time span for all neural unit ISI histograms and correlograms, in milliseconds. """
@@ -173,6 +189,15 @@ class Neuron:
         Cache of any cross-correlograms computed for this unit WRT another unit, keyed by the other unit's label. Will
         be empty if no CCGs have been computed. CCGs are computed and cached here on a background thread when needed.
         """
+        self._cached_pca_projection: Optional[np.ndarray] = None
+        """ 
+        Cached projection of this unit's spike clips across all analog source channels onto a 2D plane defined by the
+        two highest-variance principal components determine for the spike clips of all units currently in the neural
+        unit focus list. Will be None if the focus list is empty, if this unit is not currently in the focus list,
+        or if the projection has not yet been computed. Principal component analysis occurs in the background and can
+        take many seconds to complete.
+        """
+
     @property
     def label(self) -> str:
         """
@@ -190,8 +215,8 @@ class Neuron:
     def mean_firing_rate_hz(self) -> float:
         """ This unit's mean firing rate in Hz. """
         if len(self.spike_times) > 2:
-            return len(self.spike_times) / (self.spike_times[-1] - self.spike_times[0])
-        return 0
+            return len(self.spike_times) / float(self.spike_times[-1] - self.spike_times[0])
+        return 0.0
 
     def firing_rate_histogram(self, bin_size: int, dur: float, normalized: bool = True) -> np.ndarray:
         """
@@ -233,7 +258,7 @@ class Neuron:
         The Omniplex analog channel with the largest estimated signal-to-noise ratio (SNR) for this neural unit. **Since
         SNR is estimated as the peak-to-peak amplitude of the mean spike waveform on a channel divided by the mean noise
         level on the channel, the primary channel is undefined until the unit's mean spike waveform has been computed
-        for all recorded Omniplex wideband or narrowband analog channels.
+        for all recorded Omniplex analog channels.
 
         :return: None if the mean spike waveforms have not yet been computed; else, returns the primary channel index.
         """
@@ -253,7 +278,7 @@ class Neuron:
     @property
     def amplitude(self) -> Optional[float]:
         """
-        THe peak-to-peak amplitude of the unit's mean spike waveform as measured on the primary channel -- ie, the
+        The peak-to-peak amplitude of the unit's mean spike waveform as measured on the primary channel -- ie, the
         analog channel exhibiting the best signal-to-noise ratio for this unit.
 
         :return: None if the per-channel mean spike waveforms have not yet been computed; otherwise, returns the
@@ -345,31 +370,40 @@ class Neuron:
         out = self._cached_ccgs.get(other_unit)
         return np.array([]) if out is None else np.copy(out)
 
-    def cache_isi_if_necessary(self) -> None:
-        """ Compute and cache the 200-ms ISI histogram for this unit if it has not already been computed. """
+    def cache_isi_if_necessary(self) -> bool:
+        """
+        Compute and cache the 200-ms ISI histogram for this unit if it has not already been computed.
+        :return: True if ISI was computed, False if it was already cached.
+        """
         if self._cached_isi is None:
             out = stats.generate_isi_histogram(self.spike_times, self.FIXED_HIST_SPAN_MS)
             max_count = max(out)
             if max_count > 0:
                 out = out * (1.0 / max_count)
             self._cached_isi = out
+            return True
+        return False
 
-    def cache_acg_if_necessary(self) -> None:
+    def cache_acg_if_necessary(self) -> bool:
         """
         Compute and cache the 200-ms autocorrelogram for this unit if it has not already been computed. **As the
         computation can take a significant amount of time, only invoke this method on a background thread.**
+        :return: True if ACG was computed, False if it was already cached.
         """
         if self._cached_acg is None:
             out, n = stats.generate_cross_correlogram(self.spike_times, self.spike_times, self.FIXED_HIST_SPAN_MS)
             if n > 0:
                 out = out * (1.0 / n)
             self._cached_acg = out
+            return True
+        return False
 
-    def cache_ccg_if_necessary(self, other_unit: 'Neuron') -> None:
+    def cache_ccg_if_necessary(self, other_unit: 'Neuron') -> bool:
         """
         If it is not already cached, compute and cache the 200-ms cross-correlogram for this unit vs the specified unit.
         **As the computation can take a significant amount of time, only invoke this method on a background thread.**
         :param other_unit: The other neural unit.
+        :return: True if the CCG was computed, False if it was already cached.
         """
         ccg = self._cached_ccgs.get(other_unit.label)
         if ccg is None:
@@ -377,3 +411,35 @@ class Neuron:
             if n > 0:
                 out = out * (1.0 / n)
             self._cached_ccgs[other_unit.label] = out
+            return True
+        return False
+
+    def cached_pca_projection(self) -> Optional[np.ndarray]:
+        """
+        Get the projection of this unit's spike "clips" onto the 2D space defined by the first two principal components
+        computed for the space of all spike clips across all recorded analog channels for all neural units currently in
+        the "focus list". Principal component analysis occurs in the background and typically takes many seconds to
+        complete, so the projection is not immediately available and is reset whenever the focus list changes.
+
+            In the context of PCA, a spike "clip" is the cancatentation of M 2-ms clips -- one for each recorded
+        Omniplex analog channel -- centered on the spike's time of occurrence. When comparing 2 units with N1 and N2
+        spikes, PCA reduces the dimension of the (N1+N2)*2M space of all spike clips to (N1 + N2) * 2, and then the
+        projections for the units are N1x2 and N2x2 arrays. Each row in these arrays can be interpreted as the
+        projection of the n-th spike into the 2D space defined by the first two principal components. Plotting these
+        projections as scatter plots provides a visual indication of whether or not the two units are truly distinct.
+
+        :return: An Nx2 array representing the PCA projection for this unit, as described. If this unit is NOT in the
+            current focus list or if the projection has not yet been computed, returns None.
+        """
+        return self._cached_pca_projection
+
+    def set_cached_pca_projection(self, prj: Optional[np.ndarray] = None) -> None:
+        """
+        Cache the current PCA projection for this neural unit, or clear a previously computed projection.
+            This method is intended only for cacheing the result of PC analysis in the background, or clearing a
+        a previously cached projection that is no longer valid because the neural unit focus list has changed.
+
+        :param prj: An Nx2 array representing the PCA projection for this unit's N spikes, or None to clear a
+            previously cached projection.
+        """
+        self._cached_pca_projection = prj

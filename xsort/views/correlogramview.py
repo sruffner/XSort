@@ -8,7 +8,7 @@ import numpy as np
 from pyqtgraph import ViewBox
 
 from xsort.data.analyzer import Analyzer
-from xsort.data.neuron import Neuron
+from xsort.data.neuron import Neuron, DataType
 from xsort.views.baseview import BaseView
 
 
@@ -126,22 +126,27 @@ class CorrelogramView(BaseView):
     def on_focus_neurons_changed(self) -> None:
         self._reset()
 
-    def on_focus_neurons_stats_updated(self) -> None:
+    def on_focus_neurons_stats_updated(self, data_type: DataType, unit_label: str) -> None:
         """
-        Whenever ACG/CCG stats are updated for neurons in the current display list, we need to update the plot data
-        items for all subplots currently installed in this view.
+        Whenever ACG/CCG stats are updated for a neural unit in the current display list, we need to update the
+        corresponding plot data items within the subplots currently installed in this view.
         """
+        if (data_type != DataType.ACG) and (data_type != DataType.CCG):
+            return
         displayed = self.data_manager.neurons_with_display_focus
         num_units = len(displayed)
         span_ms = Neuron.FIXED_HIST_SPAN_MS
+        unit: Neuron
         for i, unit in enumerate(displayed):
-            for j in range(num_units):
-                hist = displayed[i].cached_acg if i == j else displayed[i].get_cached_ccg(displayed[j].label)
-                plot_item = self._layout_widget.ci.getItem(row=i, col=j)
-                if isinstance(plot_item, pg.PlotItem):
-                    pdi = next(iter(plot_item.listDataItems()), None)
-                    if isinstance(pdi, pg.PlotDataItem):
-                        pdi.setData(x=np.linspace(start=-span_ms, stop=span_ms, num=len(hist)), y=hist)
+            if unit.label == unit_label:
+                for j in range(num_units):
+                    hist = unit.cached_acg if i == j else unit.get_cached_ccg(displayed[j].label)
+                    plot_item = self._layout_widget.ci.getItem(row=i, col=j)
+                    if isinstance(plot_item, pg.PlotItem):
+                        pdi = next(iter(plot_item.listDataItems()), None)
+                        if isinstance(pdi, pg.PlotDataItem):
+                            pdi.setData(x=np.linspace(start=-span_ms, stop=span_ms, num=len(hist)), y=hist)
+                break
 
     @Slot()
     def _on_hist_span_changed(self):

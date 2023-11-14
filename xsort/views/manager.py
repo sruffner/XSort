@@ -13,7 +13,6 @@ from xsort.views.firingrateview import FiringRateView
 from xsort.views.isiview import ISIView
 from xsort.views.neuronview import NeuronView
 from xsort.views.pcaview import PCAView
-from xsort.views.similarityview import SimilarityView
 from xsort.views.correlogramview import CorrelogramView
 from xsort.views.templateview import TemplateView
 from xsort.views.umapview import UMAPView
@@ -63,7 +62,6 @@ class ViewManager(QObject):
         self.data_analyzer.progress_updated.connect(self.on_background_task_updated)
         self.data_analyzer.data_ready.connect(self.on_data_ready)
         self.data_analyzer.focus_neurons_changed.connect(self.on_focus_neurons_changed)
-        self.data_analyzer.focus_neuron_stats_updated.connect(self.on_focus_neurons_stats_updated)
         self.data_analyzer.channel_seg_start_changed.connect(self.on_channel_seg_start_changed)
 
         self._main_window.setMinimumSize(800, 600)
@@ -170,6 +168,9 @@ class ViewManager(QObject):
         elif dt == DataType.CHANNELTRACE:
             for v in self._all_views:
                 v.on_channel_trace_segment_updated(int(uid))
+        else:
+            for v in self._all_views:
+                v.on_focus_neurons_stats_updated(dt, uid)
 
     @Slot()
     def on_focus_neurons_changed(self) -> None:
@@ -178,14 +179,6 @@ class ViewManager(QObject):
         """
         for v in self._all_views:
             v.on_focus_neurons_changed()
-
-    @Slot()
-    def on_focus_neurons_stats_updated(self) -> None:
-        """
-        Handler notifies all views when some statistics are updated for any or all neurons having the display focus.
-        """
-        for v in self._all_views:
-            v.on_focus_neurons_stats_updated()
 
     @Slot()
     def on_channel_seg_start_changed(self) -> None:
