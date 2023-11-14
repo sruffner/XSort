@@ -35,7 +35,6 @@ class ViewManager(QObject):
         """
 
         self._neuron_view = NeuronView(self.data_analyzer)
-        self._similarity_view = SimilarityView(self.data_analyzer)
         self._templates_view = TemplateView(self.data_analyzer)
         self._correlogram_view = CorrelogramView(self.data_analyzer)
         self._isi_view = ISIView(self.data_analyzer)
@@ -44,7 +43,7 @@ class ViewManager(QObject):
         self._channels_view = ChannelView(self.data_analyzer)
         self._umap_view = UMAPView(self.data_analyzer)
 
-        self._all_views = [self._neuron_view, self._similarity_view, self._templates_view, self._correlogram_view,
+        self._all_views = [self._neuron_view, self._templates_view, self._correlogram_view,
                            self._isi_view, self._firingrate_view, self._pca_view, self._channels_view, self._umap_view]
         """ List of all managed views. """
 

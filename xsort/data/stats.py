@@ -94,3 +94,29 @@ def generate_cross_correlogram(
         counts[span_ms] = 0
 
     return counts, n
+
+
+def compute_principal_components(samples: np.ndarray, num_cmpts: int = 2) -> np.ndarray:
+    """
+    Given N samples of M variables, compute the first P principal components of the data set.
+
+        Each column of the NxM matrix is interpreted as N samples of the "variable" represented by that column. The
+    matrix is "standardized" by subtracting the sample mean from each value and dividing by the sample variance. The MxM
+    covariance matrix is then computed, and then the eigenvalues and eigenvectors for that matrix. The eigenvectors
+    represent the principal components for the sample set, and the corresponding eigenvalues indicate the amount of
+    variance along each eigenvector. The method returns an M x P matrix, where the i-th column is the eigenvector with
+    the i-th largest variance (eigenvalue).
+
+    :param samples: An NxM matrix containing N samples of M variables.
+    :param num_cmpts: The number of principal components to be computed. Maximum of 10.
+    :return: An MXP matrix containing the first P principal components (in order of decreasing variance) of the
+        M variables. In this form, multiplying the original NxM matrix by this matrix "reduces the dimensionality" of
+        the data set from M to P.
+    """
+    num_cmpts = max(1, min(num_cmpts, 10))
+    num_cmpts = min(num_cmpts, min(samples.shape))
+    std_samples = (samples - np.mean(samples, axis=0)) / np.std(samples, axis=0)
+    covariance = np.cov(std_samples, rowvar=False)
+    res = np.linalg.eig(covariance)
+    desc_var_indices = np.flip(np.argsort(res.eigenvalues))
+    return res.eigenvectors[:, desc_var_indices[0:num_cmpts]]

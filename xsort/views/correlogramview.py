@@ -114,7 +114,6 @@ class CorrelogramView(BaseView):
                 vb.disableAutoRange(axis=ViewBox.XAxis)
                 vb.setXRange(min=-visible_span, max=visible_span, padding=0.05)
                 pi.hideButtons()
-                pi.hideAxis('left')
                 pi.hideAxis('bottom')
                 if (i == num_units - 1) and (j == num_units - 1):
                     self._scale_bar = pg.ScaleBar(size=20, suffix='ms')

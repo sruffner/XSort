@@ -1,7 +1,9 @@
 import math
 import pickle
+import random
 import struct
 import time
+import traceback
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Tuple, Optional, List, IO, Any
@@ -10,7 +12,7 @@ import numpy as np
 import scipy
 from PySide6.QtCore import QObject, Slot, Signal, QRunnable
 
-from xsort.data import PL2
+from xsort.data import PL2, stats
 from xsort.data.neuron import Neuron, ChannelTraceSegment
 
 CHANNEL_CACHE_FILE_PREFIX: str = '.xs.ch.'
@@ -139,10 +141,15 @@ class TaskType(Enum):
     """
     GETCHANNELS = 2,
     """ Retrieve from internal cache all recorded analog channel traces for a specified time period [t0..t1]. """
-    COMPUTEHIST = 3
+    COMPUTEHIST = 3,
     """ 
     Compute any missing histograms for a list of units: the ISI and ACG for each unit in the list, and the CCG
     for the each unit in the list vs the other units. The results are cached in the unit instances.
+    """
+    COMPUTEPCA = 4
+    """
+    Perform principal component analysis for a list of up to 3 neural units. For each unit, returns a Nx2 Numpy array
+    representing the projection of the unit's N spikes onto the first 2 principal components.
     """
 
 
@@ -163,14 +170,16 @@ class Task(QRunnable):
 
     def __init__(self, task_type: TaskType, working_dir: Path, **kwargs):
         """
-        Initialize, but do not start, a background task runnoble
+        Initialize, but do not start, a background task runnoble.
+
         :param task_type: Which type of background task to execute.
         :param working_dir: The XSort working directory on which to operate.
-        :param kwargs: Dictionary of keywaord argyments, varying IAW task type. For the TaskType.GETUNIT task,
-        kwargs['unit_label'] must be a str identifying the neural unit record to retrieve from internal cache. For the
-        TaskType.GETCHANNELS task, kwargs['start'] >= 0 and kwargs['count'] > 0 must be integers defining the starting
-        index and size of the contigous channel trace segment to be extracted. For the TaskType.COMPUTEHIST task,
-        kw_args['units'] is the list of :class:`Neuron` instances for which ISI/ACG/CCG histograms are to be computed.
+        :param kwargs: Dictionary of keywaord argyments, varying IAW task type. For the TaskType.GETCHANNELS task,
+            kwargs['start'] >= 0 and kwargs['count'] > 0 must be integers defining the starting index and size of the
+            contigous channel trace segment to be extracted. For the TaskType.COMPUTEHIST task, kw_args['units'] is the
+            list of :class:`Neuron` instances for which ISI/ACG/CCG histograms are to be computed. For the
+            TaskType.COMPUTEPCA task, kwargs['units'] is a list of up to 3 :class:`Neuron` instances on which to
+            perform the principal component analysis.
 
         """
         super().__init__()
@@ -179,17 +188,19 @@ class Task(QRunnable):
         """ The type of background task executed. """
         self._working_dir = working_dir
         """ The working directory in which required data files and internal XSort cache files are located. """
-        self._unit_label: str = kwargs.get('unit_label', '')
-        """ For the GETUNIT task only, identifies the neural unit record to retrieve from internal cache. """
         self._start: int = kwargs.get('start', -1)
         """ For the GETCHANNELS task, the index of the first analog sample to retrieve. """
         self._count: int = kwargs.get('count', 0)
-        """ For the GETCHANNELS task, the number of analog samples to retrieve. """
+        """ 
+        For the GETCHANNELS task, the number of analog samples to retrieve.
+        """
         self._units: List[Neuron] = kwargs.get('units', [])
         """ 
-        For the COMPUTEHIST task only, a list of neural units for which histograms are to be computed. **NOTE**:
-        These are the actual :class:`Neuron` objects living in the GUI, and they are upated in place. This should be
+        For the COMPUTEHIST task, this is a list of neural units for which histograms are to be computed. **NOTE**:
+        These are the actual :class:`Neuron` objects living in the GUI, and they are updated in place. This should be
         thread-safe because, once computed and cached, the histograms never change again.
+            For the COMPUTEPCA task, this is a list of 1-3 neural units for which the principal component analysis is
+        performed.
         """
         self.signals = TaskSignals()
         """ The signals emitted by this task. """
@@ -203,12 +214,15 @@ class Task(QRunnable):
             if self._task_type == TaskType.BUILDCACHE:
                 self._build_internal_cache()
             elif self._task_type == TaskType.GETCHANNELS:
-                self._get_channel_traces(self._start, self._count)
+                self._get_channel_traces()
             elif self._task_type == TaskType.COMPUTEHIST:
                 self._compute_histograms()
+            elif self._task_type == TaskType.COMPUTEPCA:
+                self._compute_pca_projection()
             else:
                 raise Exception("Unrecognized request")
         except Exception as e:
+            traceback.print_exception(e)   # TODO: TESTING
             self.signals.error.emit(str(e))
         finally:
             self.signals.finished.emit(self._task_type)
@@ -294,7 +308,7 @@ class Task(QRunnable):
                 updated_neuron = neuron
             self.signals.data_retrieved.emit(updated_neuron)
 
-    def _get_channel_traces(self, start: int, count: int) -> None:
+    def _get_channel_traces(self) -> None:
         """
         Retrieve the specified trace segment for each wideband or narrowband analog channel recorded in the Omniplex
         file in the working directory.
@@ -302,8 +316,6 @@ class Task(QRunnable):
         channel of interest. It reads the Omniplex PL2 file to prepare the list of relevant channel indices, then
         extracts the trace segment from each channel cache file and delivers it to any receivers via a task signal.
 
-        :param start: Offset to first sample in trace segment to retrieve.
-        :param count: Number of samples in segment.
         :raises Exception: If unable to read Omniplex file, if a channel cache file is missing, or if a file IO
             error occurs.
         """
@@ -329,7 +341,7 @@ class Task(QRunnable):
 
         # retrieve all the trace segments
         for idx in channel_list:
-            segment = self._retrieve_channel_trace(idx, start, count)
+            segment = self._retrieve_channel_trace(idx, self._start, self._count)
             self.signals.data_retrieved.emit(segment)
 
     def _retrieve_channel_trace(
@@ -505,10 +517,6 @@ class Task(QRunnable):
         """
         self.signals.progress.emit(f"Computing and cacheing statistics for unit {unit.label} ...", 0)
 
-        omniplex_file, _, emsg = get_required_data_files(self._working_dir)
-        if len(emsg) > 0:
-            raise Exception(emsg)
-
         # get indices of recorded analog channels in ascending order
         channel_list: List[int] = list()
         all_channels = self._info['analog_channels']
@@ -618,7 +626,8 @@ class Task(QRunnable):
         already are computed.
             **IMPORTANT**: This is a time-consuming computation task that does not involve file IO -- unlike the other
         tasks defined in this module. File IO operations release the Python Global Interpreter lock and thus won't
-        impact the main GUI thread. But heavy-compute tasks like this one will.
+        impact the main GUI thread. But heavy-compute tasks like this one will. Hence we sleep regularly in this
+        method to release the GIL.
         :raises Exception: If an error occurs. In most cases, the exception message may be used as a human-facing
             error description.
         """
@@ -646,8 +655,187 @@ class Task(QRunnable):
                 if u.label != u2.label:
                     u.cache_ccg_if_necessary(other_unit=u2)
                     time.sleep(0.2)
-                n += 1
-                if time.time() - t0 > 1:
-                    pct = int(100 * n / num_hists)
-                    self.signals.progress.emit(f"Computing histograms for {len(self._units)} units ...", pct)
-                    t0 = time.time()
+                    n += 1
+                    if time.time() - t0 > 1:
+                        pct = int(100 * n / num_hists)
+                        self.signals.progress.emit(f"Computing histograms for {len(self._units)} units ...", pct)
+                        t0 = time.time()
+
+    NCLIPS_FOR_PCA: int = 1000
+    """ 
+    Total number of spike multi-clips (concatenation of clips recorded on each Omniplex analog channel) to use
+    when computing principal components.
+    """
+
+    SPIKE_CLIP_DUR_SEC: float = 0.002
+    """ Spike clip duration in seconds for purposes of principal component analysis. """
+
+    PRE_SPIKE_SEC: float = 0.001
+    """ Pre-spike interval included in spike clip, in seconds, for purposes of principal component analysis. """
+
+    SAMPLES_PER_CHUNK: int = 65536
+    """ Number analog samples read in one go while extracting spike clips from an analog channel cache file. """
+
+    SPIKES_PER_BATCH: int = 20000
+    """ Batch size used when projecting all spike clips for a unit to 2D space defined by 2 principal components. """
+
+    def _compute_pca_projection(self) -> None:
+        """
+        Handler for the :class:`TaskType`.COMPUTEPCA task.
+
+        Perform principal component analysis on spike waveform clips across all recorded analog channels for up to 3
+        neural units. PCA provides a mechanism for detecting whether distinct neural units actually represent
+        incorrectly segregated populations of spikes recorded from the same unit.
+
+        Let N=N1+N2+N3 represent the total number of spikes recorded across all the units (we're assuming 3 units here).
+        Let the spike clip size be M analog samples long and the number of analog channels recorded be P. Then every
+        spike may be represented by an L=MxP vector, the concatenation of the clips for that spike across the P
+        channels. The goal of PCA analysis is to reduce this L-dimensional space down to 2, which can then be easily
+        visualized as a 2D scatter plot.
+
+        The first step is to compute the principal components for the N samples in L-dimensional space. We don't need
+        to include the entire NxL dataset in the analysis. Instead, we randomly choose min(1000, N) spikes -- as long as
+        the number chosen for each unit is in proportion to that unit's share of the total number of spikes N. Thus, for
+        unit 1 we randomly select K1=N1*K/N spikes, K2=N2*K/N for unit 2, and K3=N3*K/N for unit 3. The principal
+        component calculation on the (K1+K2+K3)-by-L matrix yields an Lx2 matrix in which the two columns represent the
+        first 2 principal components of the data with the greatest variance and therefore most information.
+
+        Then, to compute the PCA projection of unit 1 onto the 2D space defined by these two PCs, we form the N1xL
+        matrix representing ALL the spike clips for that unit, then multiply that by the Lx2 PCA matrix to yield the
+        N1x2 projection. Similarly for the other units.
+
+        Progress messages are delivered regularly as the computation proceeds, and the PCA projection for each specified
+        unit is delivered as a 2D Numpy array via the :class:`TaskSignals`.data_retrieved signal. You can think of each
+        row in the array as the (x,y) coordinates of each spike in the 2D space defined by the first 2 principal
+        components of the analysis.
+
+        All spike clips used in the analysis are 4ms in duration and start 1ms prior to the spike occurrence time.
+
+        :return: A list of Numpy 2D arrays, one per unit. Each array represents the principal compnoent projection of
+            ALL of that unit's spike clips onto the 2D space defined by the first 2 principal components as computed for
+            all of the units specified.
+        :raises Exception: If any required files are missing from the current working directory, such as the
+            analog channel data cache files, if an IO error or other unexpected failure occurs.
+        """
+        if not (0 < len(self._units) <= 3):
+            raise Exception(f"PCA projection requires 1-3 units, not {len(self._units)}!")
+
+        self.signals.progress.emit(f"Computing PCA projections for {len(self._units)} units: "
+                                   f"{','.join([u.label for u in self._units])} ...", 0)
+
+        # retrieve channel list from Omniplex file. All analog channel traces should be separately cached already.
+        omniplex_file, _, emsg = get_required_data_files(self._working_dir)
+        if len(emsg) > 0:
+            raise Exception(emsg)
+        with open(omniplex_file, 'rb', buffering=65536 * 2) as src:
+            self._info = PL2.load_file_information(src)
+
+        channel_list: List[int] = list()
+        all_channels = self._info['analog_channels']
+        for i in range(len(all_channels)):
+            if all_channels[i]['num_values'] > 0 and \
+                    (all_channels[i]['source'] in [PL2.PL2_ANALOG_TYPE_WB, PL2.PL2_ANALOG_TYPE_SPKC]):
+                channel_list.append(i)
+        if len(channel_list) == 0:
+            raise Exception("No recorded analog channels found in Omniplex file")
+
+        samples_per_sec: float = all_channels[channel_list[0]]['samples_per_second']
+
+        # randomly select spike clips for each unit to be used in computing principal components -- unless there are
+        # fewer than 1000 spikes across all units.
+        t0 = time.time()
+        n_total_spikes = sum([u.num_spikes for u in self._units])
+        n_clips = min(Task.NCLIPS_FOR_PCA, n_total_spikes)
+        clip_dur = int(Task.SPIKE_CLIP_DUR_SEC * samples_per_sec)
+        all_clips = np.empty((0, clip_dur*len(channel_list)), dtype='<h')
+        for u in self._units:
+            n_select = int(u.num_spikes * n_clips / n_total_spikes) if n_clips < n_total_spikes else u.num_spikes
+            spike_indices = sorted(random.sample(range(u.num_spikes), n_select))
+            clip_starts = [int((u.spike_times[i] - Task.PRE_SPIKE_SEC) * samples_per_sec) for i in spike_indices]
+            unit_clips = np.empty((n_select, 0), dtype='<h')
+            self.signals.progress.emit(f"Retrieving {n_select} spike clips for unit {u.label} "
+                                       f"across {len(channel_list)} analog channels.", 0)
+            for ch_idx in channel_list:
+                clips = self._retrieve_channel_clips(ch_idx, clip_starts, clip_dur)
+                unit_clips = np.hstack((unit_clips, clips))
+            all_clips = np.vstack((all_clips, unit_clips))
+
+        # the Lx2 matrix contains the first 2 principal components for sampled spike clips, where L = clip duration x
+        # the number of analog channels on which the neural units were recorded.
+        self.signals.progress.emit(f"Computing principal components from spike clips...", 0)
+        pc_matrix = stats.compute_principal_components(all_clips)
+
+        # compute the projection of each unit's spikes onto the 2D space defined by the 2 principal components
+        clips_in_chunk = np.zeros((Task.SPIKES_PER_BATCH, clip_dur * len(channel_list)), dtype='<h')
+        for u in self._units:
+            self.signals.progress.emit(f"Computing PCA projection for unit {u.label}...", 0)
+
+            unit_prj = np.zeros((u.num_spikes, 2))
+
+            n_spikes_so_far = 0
+            while n_spikes_so_far < u.num_spikes:
+                n_spikes_in_chunk = min(Task.SPIKES_PER_BATCH, u.num_spikes - n_spikes_so_far)
+                clip_starts = [int((u.spike_times[i+n_spikes_so_far] - Task.PRE_SPIKE_SEC) * samples_per_sec)
+                               for i in range(n_spikes_in_chunk)]
+                for k, ch_idx in enumerate(channel_list):
+                    clips = self._retrieve_channel_clips(ch_idx, clip_starts, clip_dur)
+                    clips_in_chunk[0:n_spikes_in_chunk, k*clip_dur:(k+1)*clip_dur] = clips
+                unit_prj[n_spikes_so_far:n_spikes_so_far+n_spikes_in_chunk, :] = \
+                    np.matmul(clips_in_chunk[0:n_spikes_in_chunk], pc_matrix)
+                n_spikes_so_far += n_spikes_in_chunk
+            self.signals.data_retrieved.emit((u.label, unit_prj))
+
+        print(f"DEBUG: COMPUTEPCA task execution time: {time.time() - t0:.3f} seconds.")   # TODO: TESTING
+
+    def _retrieve_channel_clips(self, ch_idx: int, clip_starts: List[int], clip_dur: int) -> np.ndarray:
+        """
+        Retrieve a series of short "clips" from a recorded Omniplex analog channel trace as stored in the corresponding
+        channel cache file in the working directory.
+
+        :param clip_starts: A Nx1 array containing the start index for each clip; MUST be in ascending order!
+        :param clip_dur: The duration of each clip in # of analog samples, M.
+        :return: An NxM Numpy array of 16-bit integers containing the clips, one per row.
+        """
+        cache_file = Path(self._working_dir, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
+        if not cache_file.is_file():
+            raise Exception(f"Channel cache file missing for analog channel {str(ch_idx)}")
+
+        # check file size
+        ch_dict = self._info['analog_channels'][ch_idx]
+        total_samples: int = ch_dict['num_values']
+        expected_size = struct.calcsize("<{:d}h".format(total_samples))
+        if cache_file.stat().st_size != expected_size:
+            raise Exception(f"Incorrect cache file size for analog channel {str(ch_idx)}: was "
+                            f"{cache_file.stat().st_size}, expected {expected_size}")
+
+        n_clips = len(clip_starts)
+        n_clips_so_far = 0
+        out = np.zeros((len(clip_starts), clip_dur), dtype='<h')
+        with (open(cache_file, 'rb') as fp):
+            # special case: check for a spike clip that starts before recording began or ends after. For these, the
+            # portion of the clip that wasn't sampled is set to zeros.
+            if clip_starts[0] < 0:
+                chunk = np.frombuffer(fp.read(struct.calcsize(f"<{clip_dur+clip_starts[0]}h")))
+                out[0, -clip_starts[0]:] = chunk
+                n_clips_so_far += 1
+            if (clip_starts[-1] + clip_dur) > total_samples:
+                fp.seek(struct.calcsize(f"<{clip_starts[-1]}h"))
+                chunk = np.frombuffer(fp.read(struct.calcsize(f"<{total_samples-clip_starts[-1]}")))
+                out[n_clips-1, 0:len(chunk)] = chunk
+                n_clips -= 1
+
+            while n_clips_so_far < n_clips:
+                chunk_start = clip_starts[n_clips_so_far]
+                fp.seek(struct.calcsize(f"<{chunk_start}h"))
+                n_chunk_samples = min(Task.SAMPLES_PER_CHUNK, total_samples - chunk_start)
+                chunk = np.frombuffer(fp.read(struct.calcsize(f"<{n_chunk_samples}h")), dtype='<h')
+                n_clips_in_chunk = 0
+                while (n_clips_so_far + n_clips_in_chunk < n_clips) and \
+                        (clip_starts[n_clips_so_far + n_clips_in_chunk] - chunk_start + clip_dur < n_chunk_samples):
+                    n_clips_in_chunk += 1
+                for k in range(n_clips_in_chunk):
+                    chunk_idx = clip_starts[n_clips_so_far + k] - chunk_start
+                    out[n_clips_so_far + k, :] = chunk[chunk_idx:chunk_idx+clip_dur]
+                n_clips_so_far += n_clips_in_chunk
+
+        return out

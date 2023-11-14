@@ -4,6 +4,8 @@ from typing import Union, Optional, Dict, Any, List
 
 from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer
 
+import numpy as np
+
 from xsort.data import PL2
 from xsort.data.neuron import Neuron, ChannelTraceSegment
 from xsort.data.tasks import Task, TaskType, get_required_data_files, load_spike_sorter_results
@@ -88,6 +90,17 @@ class Analyzer(QObject):
         """
         self._focus_neurons: List[str] = list()
         """ The labels of the neural units currently selected for display focus, in selection order. """
+        self._current_pca_projection: Dict[str, Optional[np.ndarray]] = dict()
+        """ 
+        Principal component analysis results for the neural units currently selected for display focus. The dictionary
+        is emptied every time the focus selection changes, and a background task is launched to perform the analysis
+        for the new selection. Each item in the dictionary is a Nx2 Numpy array keyed by the label of a unit in the
+        focus list, where N is the number of spikes recorded for that unit. The array can be thought of as the 
+        projection of the unit's N spikes in the MxP space of spike waveform clips (M spike clip duration, P 
+        different analog channels) onto the first 2 principal components found using a subset of spikes randomly 
+        sampled across all of the units in the focus list. Plotted in a 2D scatter plot, this offers a visual
+        representation to verify whether or not the selected units are truly distinct.
+        """
         self._thread_pool = QThreadPool()
         """ Managed thread pool for running slow background tasks. """
 
@@ -256,6 +269,12 @@ class Analyzer(QObject):
                         any([(u.label != lbl) and (len(u.get_cached_ccg(lbl)) == 0) for lbl in self._focus_neurons]))
                 if need_stats:
                     break
+
+            # reset the PCA projections, since the set of units being compared has changed!
+            self._current_pca_projection.clear()
+            for unit_label in self._focus_neurons:
+                self._current_pca_projection[unit_label] = None
+
         self.focus_neurons_changed.emit()
 
         # changing the focus list will trigger refreshes across all views. We don't want to launch the CPU-intensive
@@ -275,6 +294,48 @@ class Analyzer(QObject):
         task.signals.finished.connect(self.on_task_done)
         self._thread_pool.start(task)
 
+    def _launch_compute_pca_task(self) -> None:
+        focus_list = self.neurons_with_display_focus
+        if len(focus_list) == 0:
+            return
+        task = Task(TaskType.COMPUTEPCA, self._working_directory, units=focus_list)
+        task.signals.progress.connect(self.on_task_progress)
+        task.signals.error.connect(self.on_task_failed)
+        task.signals.data_retrieved.connect(self.on_data_retrieved)
+        task.signals.finished.connect(self.on_task_done)
+        self._thread_pool.start(task)
+
+    def pca_projection_for(self, unit_label: str) -> Optional[np.ndarray]:
+        """
+        Get the current PCA projection for a unit in the current display focus list.
+
+            The primary purpose of XSort is to evaluate the results of initial spike sorting of multi-electrode data
+        from the Omniplex MAP system. Principal component analysis (PCA) is one tool to use in that evaluation. In the
+        context of the neural units selected for display/comparison, PCA randomly selects N=1000 spikes from the units
+        (in proportion to each unit's share of the total number of spikes) and, for each such spike, prepares a row
+        vector of L=MxP analog samples, where M is the spike clip duration in #samples and P is the number of different
+        analog channels recorded. Each row vector is a 'spike multi-clip' -- the concatenation of the clip for that
+        spike on each of the P analog channels. PCA finds the eigenvectors for the NxL matrix with the largest 2
+        eigenvalues -- these are the first two "principal components" of the N samples of L-dimensional space containing
+        the most "information" about the data. The whole point is to reduce the number of data variables from L to 2.
+
+            To find the PCA projection for each unit in the display list, a KxL matrix is prepared containing the
+        spike multi-clips for all K spikes from that unit. Multiplying this by the Lx2 principal component matrix
+        yields the Kx2 matrix projection. Plotted in a 2D scatter plot, this offers a visual
+        representation to verify whether or not the selected units are truly distinct.
+
+        :param unit_label: Label uniquely identifying a neural unit.
+        :return: None if unit label is invalid, if the corresponding neuron is NOT currently selected for display, OR
+            if the principal component analysis is in progress in the background and the result is not yet available.
+            Otherwise, returns the projection as a Nx2 Numpy array, where N is the number of spikes recorded for that
+            unit and each row can be thought of as the (x,y)-coordinates locating each spike in the 2D space defined
+            by the first two principal components, as described above.
+        """
+        if unit_label in self._focus_neurons:
+            return self._current_pca_projection.get(unit_label, None)
+        else:
+            return None
+
     def change_working_directory(self, p: Union[str, Path]) -> Optional[str]:
         """
         Change the analyzer's current working directory. If the specified directory exists and contains the requisite
@@ -284,7 +345,7 @@ class Analyzer(QObject):
 
         :param p: The file system path for the candidate directory.
         :return: An error description if the cancdidate directory does not exist or does not contain the expected data
-        files; else None.
+            files; else None.
         """
         _p = Path(p) if isinstance(p, str) else p
         if not isinstance(_p, Path):
@@ -327,8 +388,6 @@ class Analyzer(QObject):
         self._pkl_file = pkl_file
         self._neurons = neurons
         self._focus_neurons.clear()
-        if len(self._neurons) > 0:
-            self._focus_neurons.append(self._neurons[0].label)
 
         # signal views
         self.working_directory_changed.emit()
@@ -353,8 +412,11 @@ class Analyzer(QObject):
         self.progress_updated.emit("")
         if task_type == TaskType.COMPUTEHIST:
             self.focus_neuron_stats_updated.emit()
+            self._launch_compute_pca_task()
         elif task_type == TaskType.BUILDCACHE:
             self._launch_compute_histograms_task()
+        elif task_type == TaskType.COMPUTEPCA:
+            pass
 
     @Slot(str)
     def on_task_failed(self, emsg: str) -> None:
@@ -389,3 +451,8 @@ class Analyzer(QObject):
             if seg.channel_index in self._channel_segments:
                 self._channel_segments[seg.channel_index] = seg
                 self.data_ready.emit(DataType.CHANNELTRACE, str(seg.channel_index))
+        elif isinstance(data, tuple):
+            if (len(data) == 2) and isinstance(data[0], str) and isinstance(data[1], np.ndarray) and \
+                    data[0] in self._current_pca_projection:
+                self._current_pca_projection[data[0]] = data[1]
+                self.focus_neuron_stats_updated.emit()
