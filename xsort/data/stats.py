@@ -119,4 +119,4 @@ def compute_principal_components(samples: np.ndarray, num_cmpts: int = 2) -> np.
     covariance = np.cov(std_samples, rowvar=False)
     res = np.linalg.eig(covariance)
     desc_var_indices = np.flip(np.argsort(res.eigenvalues))
-    return res.eigenvectors[:, desc_var_indices[0:num_cmpts]]
+    return np.real(res.eigenvectors[:, desc_var_indices[0:num_cmpts]])   # TODO: OK to discard imag part??

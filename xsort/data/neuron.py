@@ -414,7 +414,7 @@ class Neuron:
             return True
         return False
 
-    def cached_pca_projection(self) -> Optional[np.ndarray]:
+    def cached_pca_projection(self) -> np.ndarray:
         """
         Get the projection of this unit's spike "clips" onto the 2D space defined by the first two principal components
         computed for the space of all spike clips across all recorded analog channels for all neural units currently in
@@ -429,9 +429,9 @@ class Neuron:
         projections as scatter plots provides a visual indication of whether or not the two units are truly distinct.
 
         :return: An Nx2 array representing the PCA projection for this unit, as described. If this unit is NOT in the
-            current focus list or if the projection has not yet been computed, returns None.
+            current focus list or if the projection has not yet been computed, returns an empty array.
         """
-        return self._cached_pca_projection
+        return np.empty((0, 2)) if self._cached_pca_projection is None else self._cached_pca_projection
 
     def set_cached_pca_projection(self, prj: Optional[np.ndarray] = None) -> None:
         """
