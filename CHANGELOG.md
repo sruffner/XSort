@@ -1,6 +1,25 @@
 # Changelog
 
 ## v0.0.8 (11/15/2023)
+- Requires Python 3.9+ instead of 3.11+ (although still building on 3.11).
+- A dashed green line in `FiringRateView` indicates the elapsed time at which the channel trace segments start in
+the `ChannelView`. 
+- Clicking anywhere on the `FiringRateView` changes the segment start time to the time under the cursor; the 
+`ChannelView` updates accordingly.
+- Developed code to perform principal component analysis on the spike trains of the neural units currently comprising
+the **_focus list_**. PCA computations take a while -- particularly when the total number of spikes processed reaches
+100K or more.
+- Every time the user changes the focus list, a new background task is launched to compute statistics (ISI, ACG, CCG,
+PCA) for the units in the list. The ISI, ACG and CCG are only computed once and cached in-memory in the relevant
+`Neuron` objects. The PCA projections are redone each time the focus list changes.
+- Since the user may change the focus list rapidly and the statistics calculations are time-consuming, XSort will
+cancel a running task of a given type before launching a new one. This strategy also applies if the user opens a new
+working directory, then after a short while decides to switch again.
+- The results of the PCA analysis are now rendered in the `PCAView`. The view includes a pushbutton to toggle the
+display order of the scatter plots, and a combox box to set the downsampling factor in order to speed up rendering.
+- The `SimilarityView` was eliminated. Once we have a similarity metric defined, that will be included as a column in 
+the `NeuronView`.
+- Moved `README` and `CHANGELOG` from `$PROJECT_ROOT/dist` to `$PROJECT_ROOT/` so that Gitlab picks up the `README`.
 
 ## v0.0.7 (10/11/2023)
 - Turned on antialiasing in the `pyqtgraph` library. Eventually, this may become a user setting, especially if it causes
