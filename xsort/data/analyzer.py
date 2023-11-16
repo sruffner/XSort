@@ -79,6 +79,10 @@ class Analyzer(QObject):
         self._thread_pool = QThreadPool()
         """ Managed thread pool for running slow background tasks. """
 
+        self._background_tasks: Dict[TaskType, Optional[Task]] = {
+            TaskType.BUILDCACHE: None, TaskType.COMPUTESTATS: None, TaskType.GETCHANNELS: None
+        }
+
     @property
     def working_directory(self) -> Optional[Path]:
         """ The analyzer's current working directory. None if no valid working directory has been set. """
@@ -172,14 +176,7 @@ class Analyzer(QObject):
             self._channel_segments[idx] = None
 
         self.channel_seg_start_changed.emit()
-
-        task = Task(TaskType.GETCHANNELS, self._working_directory, start=t0*self.channel_samples_per_sec,
-                    count=self.channel_samples_per_sec)
-        task.signals.progress.connect(self.on_task_progress)
-        task.signals.error.connect(self.on_task_failed)
-        task.signals.data_available.connect(self.on_data_available)
-        task.signals.finished.connect(self.on_task_done)
-        self._thread_pool.start(task)
+        self._launch_background_task(TaskType.GETCHANNELS)
         return True
 
     @property
@@ -237,8 +234,9 @@ class Analyzer(QObject):
         else:
             self._focus_neurons.append(unit_label)
 
-        # TODO: If a COMPUTESTATS task is in progress, cancel it!
-        # the focus list changed, so we need to clear out any cached PCA projections
+        # the focus list changed, we need to cancel an ongoing task that is computing stats and clear out any cached
+        # PCA projections
+        self._cancel_background_task(TaskType.COMPUTESTATS)
         for u in self._neurons:
             u.set_cached_pca_projection(None)
 
@@ -248,17 +246,42 @@ class Analyzer(QObject):
         # task that computes statistics given the focus list until AFTER those refreshes are done. Hence the delayed
         # launch below.
         if len(self._focus_neurons) > 0:
-            QTimer.singleShot(0, self._launch_compute_statistics_task)
+            QTimer.singleShot(0, self._launch_compute_stats_task)
 
-    def _launch_compute_statistics_task(self) -> None:
-        focus_list = self.neurons_with_display_focus
-        if len(focus_list) == 0:
-            return
-        task = Task(TaskType.COMPUTESTATS, self._working_directory, units=focus_list)
+    def _launch_compute_stats_task(self) -> None:
+        self._launch_background_task(TaskType.COMPUTESTATS)
+
+    def _cancel_background_task(self, t: TaskType) -> None:
+        if not (self._background_tasks[t] is None):
+            self._background_tasks[t].cancel()
+            self._background_tasks[t] = None
+
+    def _launch_background_task(self, t: TaskType) -> None:
+        """
+        Helper method launches ones of the XSort background tasks. If a task of that type is already running (or was
+        running), it is cancelled before launching a new instance of that task. By design, only one instance of each
+        type of task should run at one time.
+        :param t: The type of task to launch
+        """
+        self._cancel_background_task(t)
+
+        if t == TaskType.BUILDCACHE:
+            task = Task(TaskType.BUILDCACHE, self._working_directory)
+        elif t == TaskType.COMPUTESTATS:
+            focus_list = self.neurons_with_display_focus
+            if len(focus_list) == 0:
+                return
+            task = Task(TaskType.COMPUTESTATS, self._working_directory, units=focus_list)
+        else:   # t == TaskType.GETCHANNELS
+            t0 = self._channel_seg_start
+            task = Task(TaskType.GETCHANNELS, self._working_directory, start=t0 * self.channel_samples_per_sec,
+                        count=self.channel_samples_per_sec)
+
         task.signals.progress.connect(self.on_task_progress)
         task.signals.error.connect(self.on_task_failed)
         task.signals.data_available.connect(self.on_data_available)
         task.signals.finished.connect(self.on_task_done)
+        self._background_tasks[t] = task
         self._thread_pool.start(task)
 
     def change_working_directory(self, p: Union[str, Path]) -> Optional[str]:
@@ -319,12 +342,7 @@ class Analyzer(QObject):
 
         # spawn task to build internal cache if necessary and/or retrieve the data we require: first second's worth
         # of each relevant analog channel trace, and metrics for all neural units
-        task = Task(TaskType.BUILDCACHE, self._working_directory)
-        task.signals.progress.connect(self.on_task_progress)
-        task.signals.error.connect(self.on_task_failed)
-        task.signals.data_available.connect(self.on_data_available)
-        task.signals.finished.connect(self.on_task_done)
-        self._thread_pool.start(task)
+        self._launch_background_task(TaskType.BUILDCACHE)
 
         return None
 
@@ -338,8 +356,7 @@ class Analyzer(QObject):
     @Slot(TaskType)
     def on_task_done(self, task_type: TaskType) -> None:
         self.progress_updated.emit("")
-        if task_type == TaskType.BUILDCACHE:
-            self._launch_compute_statistics_task()
+        self._cancel_background_task(task_type)
 
     @Slot(str)
     def on_task_failed(self, emsg: str) -> None:

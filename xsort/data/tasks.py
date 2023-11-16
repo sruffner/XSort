@@ -207,6 +207,8 @@ class Task(QRunnable):
         """ The signals emitted by this task. """
         self._info: Optional[Dict[str, Any]] = None
         """ Omniplex PL2 file information. """
+        self._cancelled = False
+        """ Flag set to cancel the task. """
 
     @Slot()
     def run(self):
@@ -221,10 +223,20 @@ class Task(QRunnable):
             else:
                 raise Exception("Unrecognized request")
         except Exception as e:
-            traceback.print_exception(e)   # TODO: TESTING
-            self.signals.error.emit(str(e))
+            if not self._cancelled:
+                traceback.print_exception(e)   # TODO: TESTING
+                self.signals.error.emit(str(e))
         finally:
             self.signals.finished.emit(self._task_type)
+
+    def cancel(self) -> None:
+        """
+        Cancel this task. **NOTE that the task will not stop until the run() method detects the cancellation**.
+        """
+        self._cancelled = True
+
+    def was_cancelled(self) -> bool:
+        return self._cancelled
 
     def _build_internal_cache(self) -> None:
         """
@@ -275,6 +287,9 @@ class Task(QRunnable):
                         (all_channels[i]['source'] in [PL2.PL2_ANALOG_TYPE_WB, PL2.PL2_ANALOG_TYPE_SPKC]):
                     channel_list.append(i)
 
+            if self._cancelled:
+                raise Exception("Operation cancelled")
+
             if len(channel_list) == 0:
                 raise Exception("No recorded analog channels found in Omniplex file")
 
@@ -290,12 +305,16 @@ class Task(QRunnable):
                 channel_trace = self._retrieve_channel_trace(idx, 0, int(samples_per_sec), suppress=True)
                 if channel_trace is None:
                     channel_trace = self._cache_analog_channel(idx, src)
+                if self._cancelled:
+                    raise Exception("Operation cancelled")
                 self.signals.data_available.emit(DataType.CHANNELTRACE, channel_trace)
 
         # PHASE 2: Build the neural unit metrics cache
         emsg, neurons = load_spike_sorter_results(sorter_file)
         if len(emsg) > 0:
             raise Exception(emsg)
+        if self._cancelled:
+            raise Exception("Operation cancelled")
         n_units = len(neurons)
         while len(neurons) > 0:
             self.signals.progress.emit("Caching/retrieving neural unit metrics",
@@ -305,6 +324,8 @@ class Task(QRunnable):
             if updated_neuron is None:
                 self._cache_neural_unit(neuron)
                 updated_neuron = neuron
+            if self._cancelled:
+                raise Exception("Operation cancelled")
             self.signals.data_available.emit(DataType.NEURON, updated_neuron)
 
     def _get_channel_traces(self) -> None:
@@ -335,12 +356,16 @@ class Task(QRunnable):
                         (all_channels[i]['source'] in [PL2.PL2_ANALOG_TYPE_WB, PL2.PL2_ANALOG_TYPE_SPKC]):
                     channel_list.append(i)
 
+        if self._cancelled:
+            raise Exception("Operation cancelled")
         if len(channel_list) == 0:
             raise Exception("No recorded analog channels found in Omniplex file")
 
         # retrieve all the trace segments
         for idx in channel_list:
             segment = self._retrieve_channel_trace(idx, self._start, self._count)
+            if self._cancelled:
+                raise Exception("Operation cancelled")
             self.signals.data_available.emit(DataType.CHANNELTRACE, segment)
 
     def _retrieve_channel_trace(
@@ -401,7 +426,7 @@ class Task(QRunnable):
         :param idx: Omniplex channel index.
         :param src: The Omniplex file object. The file must be open and is NOT closed on return.
         :returns: A data container holding the channel index and the first second's worth of samples recorded.
-        :raises: IO or other exception
+        :raises: IO or other exception. Raises a generic exception if task cancelled.
         """
         cache_file = Path(self._working_dir, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
         if cache_file.is_file():
@@ -438,12 +463,16 @@ class Task(QRunnable):
                 # then write that block to the cache file. NOTE that the blocks are 1D 16-bit signed integer arrays
                 dst.write(curr_block.tobytes())
 
-                # update progress roughly once per second
+                # update progress roughly once per second. Also check for cancellation
                 block_idx += 1
                 if (time.time() - t0) > 1:
                     self.signals.progress.emit(f"Cacheing data stream for analog channel {channel_label}...",
                                                int(100.0 * block_idx / num_blocks))
                     t0 = time.time()
+                if self._cancelled:
+                    dst.close()
+                    cache_file.unlink(missing_ok=True)
+                    raise Exception("Operation cancelled")
 
         return ChannelTraceSegment(idx, 0, samples_per_sec,
                                    channel_dict['coeff_to_convert_to_units'] * 1.0e6, first_second)
@@ -589,6 +618,8 @@ class Task(QRunnable):
                             f"Calculating metrics for unit {unit.label} on Omniplex channel {str(idx)} ... ",
                             int(100.0 * total_progress_frac))
                         t0 = time.time()
+                    if self._cancelled:
+                        raise Exception("Operation cancelled")
 
             # prepare mean spike waveform template and compute SNR for this channel. The unit's SNR is the highest
             # recorded per-channel SNR, and the "primary channel" is the one with the highest SNR.
@@ -602,6 +633,9 @@ class Task(QRunnable):
             template *= to_volts * 1.0e6
             template_dict[idx] = template
 
+            if self._cancelled:
+                raise Exception("Operation cancelled")
+
         # store metrics in cache file
         self.signals.progress.emit(f"Storing metrics for unit {unit.label} to internal cache...", 99)
         unit_cache_file.unlink(missing_ok=True)
@@ -609,6 +643,12 @@ class Task(QRunnable):
             dst.write(struct.pack('<f4I', best_snr, primary_channel_idx, unit.num_spikes,
                                   len(template_dict), samples_in_template))
             dst.write(unit.spike_times.tobytes())
+
+            if self._cancelled:
+                dst.close()
+                unit_cache_file.unlink(missing_ok=True)
+                raise Exception("Operation cancelled")
+
             for k, t in template_dict.items():
                 dst.write(struct.pack('<I', k))  # store source channel index before template!
                 dst.write(t.tobytes())
@@ -662,6 +702,8 @@ class Task(QRunnable):
                 self.signals.data_available.emit(DataType.ACG, u)
             time.sleep(0.2)
             n += 1
+            if self._cancelled:
+                raise Exception("Operation cancelled")
             if time.time() - t0 > 1:
                 pct = int(100 * n / num_hists)
                 self.signals.progress.emit(f"Computing histograms for {len(self._units)} units ...", pct)
@@ -670,6 +712,8 @@ class Task(QRunnable):
                 if u.label != u2.label:
                     if u.cache_ccg_if_necessary(other_unit=u2):
                         self.signals.data_available.emit(DataType.CCG, u)
+                    if self._cancelled:
+                        raise Exception("Operation cancelled")
                     time.sleep(0.2)
                     n += 1
                     if time.time() - t0 > 1:
@@ -746,6 +790,9 @@ class Task(QRunnable):
         with open(omniplex_file, 'rb', buffering=65536 * 2) as src:
             self._info = PL2.load_file_information(src)
 
+        if self._cancelled:
+            raise Exception("Operation cancelled")
+
         channel_list: List[int] = list()
         all_channels = self._info['analog_channels']
         for i in range(len(all_channels)):
@@ -775,12 +822,16 @@ class Task(QRunnable):
                 pct = int(100 * (i+1) / len(channel_list))
                 self.signals.progress.emit(f"Retrieving {n_select} spike clips for unit {u.label} "
                                            f"across {len(channel_list)} analog channels.", pct)
+                if self._cancelled:
+                    raise Exception("Operation cancelled")
             all_clips = np.vstack((all_clips, unit_clips))
 
         # the Lx2 matrix contains the first 2 principal components for sampled spike clips, where L = clip duration x
         # the number of analog channels on which the neural units were recorded.
         self.signals.progress.emit(f"Computing principal components from spike clips...", -1)
         pc_matrix = stats.compute_principal_components(all_clips)
+        if self._cancelled:
+            raise Exception("Operation cancelled")
         time.sleep(0.2)  # need to yield the GIL after this computation!
 
         # compute the projection of each unit's spikes onto the 2D space defined by the 2 principal components
@@ -797,16 +848,27 @@ class Task(QRunnable):
                 for k, ch_idx in enumerate(channel_list):
                     clips = self._retrieve_channel_clips(ch_idx, clip_starts, clip_dur)
                     clips_in_chunk[0:n_spikes_in_chunk, k*clip_dur:(k+1)*clip_dur] = clips
+                    if self._cancelled:
+                        raise Exception("Operation cancelled")
                 unit_prj[n_spikes_so_far:n_spikes_so_far+n_spikes_in_chunk, :] = \
                     np.matmul(clips_in_chunk[0:n_spikes_in_chunk], pc_matrix)
+                if self._cancelled:
+                    raise Exception("Operation cancelled")
                 time.sleep(0.2)
                 n_spikes_so_far += n_spikes_in_chunk
 
                 pct = int(100 * n_spikes_so_far / u.num_spikes)
                 self.signals.progress.emit(f"Computing PCA projection for unit {u.label}...", pct)
 
+                # cache the PCA projection so far and signal it is available so GUI can update
+                if n_spikes_so_far < u.num_spikes:
+                    u.set_cached_pca_projection(unit_prj[0:n_spikes_so_far, :])
+                    self.signals.data_available.emit(DataType.PCA, u)
+
             u.set_cached_pca_projection(unit_prj)
             self.signals.data_available.emit(DataType.PCA, u)
+            if self._cancelled:
+                raise Exception("Operation cancelled")
 
     def _retrieve_channel_clips(self, ch_idx: int, clip_starts: List[int], clip_dur: int) -> np.ndarray:
         """
@@ -846,6 +908,8 @@ class Task(QRunnable):
                 n_clips -= 1
 
             while n_clips_so_far < n_clips:
+                if self._cancelled:
+                    raise Exception("Operation cancelled")
                 chunk_start = clip_starts[n_clips_so_far]
                 fp.seek(struct.calcsize(f"<{chunk_start}h"))
                 n_chunk_samples = min(Task.SAMPLES_PER_CHUNK, total_samples - chunk_start)

@@ -1,5 +1,7 @@
 # Changelog
 
+## v0.0.8 (11/15/2023)
+
 ## v0.0.7 (10/11/2023)
 - Turned on antialiasing in the `pyqtgraph` library. Eventually, this may become a user setting, especially if it causes
 performance issues.

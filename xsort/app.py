@@ -46,7 +46,7 @@ class XSortMainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
-    pg.setConfigOptions(antialias=True)
+    pg.setConfigOptions(antialias=True)   # useOpenGL=True caused XSort to freeze on MacOS Ventura
     main_app = QApplication(sys.argv)
     main_window = XSortMainWindow()
     main_window.show()

@@ -31,8 +31,6 @@ class FiringRateView(BaseView):
     """ Choice list for firing rate histogram bin size, in seconds. """
     _DEF_BIN_SIZE: int = 60
     """ Default bin size for firing rate histograms in seconds. """
-    _BIN_SIZE_STEP: int = 20
-    """ Bin step size in seconds. """
     _PEN_WIDTH: int = 3
     """ Width of pen used to draw the firing rate histograms. """
     _T0_MARKER_COLOR: str = '#00C000'
