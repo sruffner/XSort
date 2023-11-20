@@ -192,10 +192,10 @@ class Neuron:
         self._cached_pca_projection: Optional[np.ndarray] = None
         """ 
         Cached projection of this unit's spike clips across all analog source channels onto a 2D plane defined by the
-        two highest-variance principal components determine for the spike clips of all units currently in the neural
-        unit focus list. Will be None if the focus list is empty, if this unit is not currently in the focus list,
-        or if the projection has not yet been computed. Principal component analysis occurs in the background and can
-        take many seconds to complete.
+        two highest-variance principal components calculated using the mean spike templates across all recorded analog
+        channels for all units currently in the neural unit focus list. Will be None if the focus list is empty, if this
+        unit is not currently in the focus list, or if the projection has not yet been computed. Principal component 
+        analysis occurs in the background and can take many seconds to complete.
         """
 
     @property
@@ -417,16 +417,19 @@ class Neuron:
     def cached_pca_projection(self) -> np.ndarray:
         """
         Get the projection of this unit's spike "clips" onto the 2D space defined by the first two principal components
-        computed for the space of all spike clips across all recorded analog channels for all neural units currently in
-        the "focus list". Principal component analysis occurs in the background and typically takes many seconds to
-        complete, so the projection is not immediately available and is reset whenever the focus list changes.
+        computed for the space of all mean spike template waveforms across all recorded analog channels for all neural
+        units currently in the "focus list". Principal component analysis occurs in the background and typically takes
+        many seconds to complete, so the projection is not immediately available and is reset whenever the focus list
+        changes.
 
             In the context of PCA, a spike "clip" is the cancatentation of M 2-ms clips -- one for each recorded
-        Omniplex analog channel -- centered on the spike's time of occurrence. When comparing 2 units with N1 and N2
-        spikes, PCA reduces the dimension of the (N1+N2)*2M space of all spike clips to (N1 + N2) * 2, and then the
-        projections for the units are N1x2 and N2x2 arrays. Each row in these arrays can be interpreted as the
-        projection of the n-th spike into the 2D space defined by the first two principal components. Plotting these
-        projections as scatter plots provides a visual indication of whether or not the two units are truly distinct.
+        Omniplex analog channel -- centered on the spike's time of occurrence. The principal components are computed
+        for a KxL matrix of mean spike template clips, where each row is the horizontal concatenation of the first 2ms
+        of the spike templates computed on each of the M analog channels for a given unit in the focus list. Here L =
+        M*P, where P is the number of analog samples in 2ms. PCA yields a Lx2 matrix containing the first 2 principal
+        components (eigenvectors with the two highest eigenvalues). This matrix is used to compute the projection of
+        ALL of a unit's spike clips (NxL) onto the 2D plane defined by these principal components (Nx2). Plotting these
+        projections as scatter plots provides a visual indication of whether or not the units are truly distinct.
 
         :return: An Nx2 array representing the PCA projection for this unit, as described. If this unit is NOT in the
             current focus list or if the projection has not yet been computed, returns an empty array.
@@ -437,7 +440,9 @@ class Neuron:
         """
         Cache the current PCA projection for this neural unit, or clear a previously computed projection.
             This method is intended only for cacheing the result of PC analysis in the background, or clearing a
-        a previously cached projection that is no longer valid because the neural unit focus list has changed.
+        a previously cached projection that is no longer valid because the neural unit focus list has changed. Note
+        that the background task may populate this array in chunks so that the GUI can be updated on the fly as the
+        computation proceeds -- useful when a unit a very long spike train.
 
         :param prj: An Nx2 array representing the PCA projection for this unit's N spikes, or None to clear a
             previously cached projection.

@@ -107,16 +107,18 @@ def compute_principal_components(samples: np.ndarray, num_cmpts: int = 2) -> np.
     variance along each eigenvector. The method returns an M x P matrix, where the i-th column is the eigenvector with
     the i-th largest variance (eigenvalue).
 
-    :param samples: An NxM matrix containing N samples of M variables.
+    :param samples: An NxM matrix containing N samples of M variables; N,M >= 2.
     :param num_cmpts: The number of principal components to be computed. Maximum of 10.
     :return: An MXP matrix containing the first P principal components (in order of decreasing variance) of the
         M variables. In this form, multiplying the original NxM matrix by this matrix "reduces the dimensionality" of
         the data set from M to P.
     """
+    if (len(samples.shape) != 2) or (samples.shape[0] < 2) or (samples.shape[1] < 2):
+        raise Exception("Input matrix must be NxM with N >= 2 and M >= 2.")
     num_cmpts = max(1, min(num_cmpts, 10))
     num_cmpts = min(num_cmpts, min(samples.shape))
     std_samples = (samples - np.mean(samples, axis=0)) / np.std(samples, axis=0)
     covariance = np.cov(std_samples, rowvar=False)
     res = np.linalg.eig(covariance)
     desc_var_indices = np.flip(np.argsort(res.eigenvalues))
-    return np.real(res.eigenvectors[:, desc_var_indices[0:num_cmpts]])   # TODO: OK to discard imag part??
+    return np.real(res.eigenvectors[:, desc_var_indices[0:num_cmpts]])

@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.0.9 (11/20/2023)
+- Modified approach to principal component analysis for the `PCAView`. Instead of using a random sampling of 1000
+spike multi-clips (horizontal concatenation of the 2ms spike clips recorded on P analog channels) across all units,
+we use the spike template waveform clips (first 2ms), resulting in a `Kx(MxP)` matrix where K is the number of units
+and M is the number of analog samples in 2ms. The PCA projections for each unit's spike trains are then computed
+as before. This achieves better separation of the unit projections in PCAView. Hoever, if only one unit is in the
+focus list, we revert to using the random sampling of individual clips to calculate principal components.
+
 ## v0.0.8 (11/15/2023)
 - Requires Python 3.9+ instead of 3.11+ (although still building on 3.11).
 - A dashed green line in `FiringRateView` indicates the elapsed time at which the channel trace segments start in

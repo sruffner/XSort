@@ -19,19 +19,21 @@ class PCAView(BaseView):
     This view is responsible for rendering the scatter plots.
         PCA is a time-consuming operation that is always performed on a background thread. It can take many seconds to
     complete, especially if the unit spike trains are very long. In the analysis approach, each spike is represented by
-    a 2-ms "centered" on the spike occurrence time. For each spike, one such clip is extracted from the M Omniplex
+    a 2-ms clip "centered" on the spike occurrence time. For each spike, one such clip is extracted from the M Omniplex
     analog channels recorded, and the clips are concatenated end-to-end, yielding a P=2M "multi-clip" for each spike.
     The goal of PCA is to reduce the dimension P to 2 -- so that each spike is represented by a single point in 2D
     space.
         If there are 3 units in the focus list, there are a total of (N1 + N2 + N3) multi-clips of length P samples. The
-    first step in PCA is to select a random sampling of 1000 multi-clips across the 3 units (in proportion to each
-    unit's contribution to the total number of clips), then find the eigenvalues/vectors for the resulting 1000xP
-    matrix. The eigenvectors associated with the two highest eigenvalues represent the two directions in P-space along
-    which there's the most variance in the dataset -- these are the two principal components which preserve the most
-    information in the original data. A Px2 matrix is formed from these two eigenvectors. In the second, longer step,
-    all N multi-clips for each units are concatenated to form a NxP matrix, which is multiplied by the Px2 principal
-    component matrix (this is done in smaller chunks to conserve memory) to generate the projection of that unit's
-    spikes onto the 2D plane defined by the two principal components.
+    first step in PCA is to form the 3xP matrix containing the first 2ms clip of each unit's spike waveform as computed
+    on each analog channel, then find the eigenvalues/vectors for the matrix. The eigenvectors associated with the two
+    highest eigenvalues represent the two directions in P-space along which there's the most variance in the dataset --
+    these are the two principal components which preserve the most information in the original data. A Px2 matrix is
+    formed from these two eigenvectors. (Initially, we selected a random sampling of 1000 multi-clips across the 3 units
+    -- in proportion to each unit's contribution to the total number of clips, resulting in a 1000xP matrix. But the
+    results were unsatisfactory because many of the clips were mostly noise.) In the second, longer step, all N
+    multi-clips for each units are concatenated to form a NxP matrix, which is multiplied by the Px2 principal component
+    matrix (this is done in smaller chunks to conserve memory) to generate the projection of that unit's spikes onto the
+    2D plane defined by the two principal components.
         NOTE that it should be clear that, whenver the composition of the focus list changes, the principal component
     analysis must be redone.
 

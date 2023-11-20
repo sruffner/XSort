@@ -144,9 +144,9 @@ class TaskType(Enum):
     COMPUTESTATS = 3
     """
     Compute statistics for each neural unit in the current focus list. Currently, the following statistics are
-    computed: the ISI and ACG for each unit, the CCG for each units vs the other units in the list, and the PCA
-    projection of each unit's spike "clips" onto the two highest-variant principal components determined using a random
-    sampling of spike clips across all units in the focus list. All statistics are cached in the unit instances.
+    computed: the ISI and ACG for each unit, the CCG for each units vs the other units in the list, and the projection
+    of each unit's spikes onto a 2D plane defined by principal component analysis of the spike template waveforms. All 
+    statistics are cached in the unit instances.
     """
 
 
@@ -662,7 +662,7 @@ class Task(QRunnable):
             - Each unit's interspike interval (ISI) histogram.
             - Each unit's autocorrelogram (ACG).
             - The cross-correlogram of each unit with each of the other unit's in the list.
-            - Perform principal component analysis on the spike clips across all units in the list and find calculate
+            - Perform principal component analysis on the spike clips across all units in the list and calculate
               the PCA projection of each unit's spike train.
 
         The list of neural units are supplied in the task constructor and are actually references to the
@@ -723,17 +723,23 @@ class Task(QRunnable):
 
         self._compute_pca_projection()
 
-    NCLIPS_FOR_PCA: int = 1000
+    NCLIPS_FOR_PCA: int = 500
+    """
+    When only 1 unit is in the focus list, we select this many randomly selected spike multi-clips (horizontal concat
+    of spike clip on each of the recorded analog channels) to calculate principal components. When more than one unit
+    is selected, PC calculation uses the spike templates for all units.
+    """
+    SPIKE_CLIP_DUR_SEC: float = 0.002
     """ 
-    Total number of spike multi-clips (concatenation of clips recorded on each Omniplex analog channel) to use
-    when computing principal components.
+    Spike clip duration in seconds for purposes of principal component analysis. Cannot exceed 10ms, as that is
+    the fixed length of the mean spike template waveforms used to compute the PCs.
     """
 
-    SPIKE_CLIP_DUR_SEC: float = 0.002
-    """ Spike clip duration in seconds for purposes of principal component analysis. """
-
     PRE_SPIKE_SEC: float = 0.001
-    """ Pre-spike interval included in spike clip, in seconds, for purposes of principal component analysis. """
+    """ 
+    Pre-spike interval included in spike clip, in seconds, for purposes of principal component analysis. **Do NOT
+    change, as this is the pre-spike interval used to compute all mean spike template waveforms.**
+    """
 
     SAMPLES_PER_CHUNK: int = 65536
     """ Number analog samples read in one go while extracting spike clips from an analog channel cache file. """
@@ -753,32 +759,35 @@ class Task(QRunnable):
         channels. The goal of PCA analysis is to reduce this L-dimensional space down to 2, which can then be easily
         visualized as a 2D scatter plot.
 
-        The first step is to compute the principal components for the N samples in L-dimensional space. We don't need
-        to include the entire NxL dataset in the analysis. Instead, we randomly choose min(1000, N) spikes -- as long as
-        the number chosen for each unit is in proportion to that unit's share of the total number of spikes N. Thus, for
-        unit 1 we randomly select K1=N1*K/N spikes, K2=N2*K/N for unit 2, and K3=N3*K/N for unit 3. The principal
-        component calculation on the (K1+K2+K3)-by-L matrix yields an Lx2 matrix in which the two columns represent the
-        first 2 principal components of the data with the greatest variance and therefore most information.
+        The first step is to compute the principal components for the N samples in L-dimensional space. A great many of
+        these clips will be mostly noise -- since, for every spike, we include the clip from every analog channel, not
+        just the primary channel for a give unit. So, instead of using a random sampling of individual clips, we use the
+        mean spike template waveforms computed on each channel for each unit. The per-channel spike templates -- which
+        should be available already in the :class:`Neuron` instances -- are concatenated to form a KxL matrix, and the
+        principal component analysis yields an Lx2 matrix in which the two columns represent the first 2 principal
+        components of the data with the greatest variance and therefore most information. **However, if only 1 unit
+        is included in the analysis, we revert to using a random sampling of individual clips (because we need at
+        least two samples of the L=MxP space in order to compute compute covariance matrix).**
 
         Then, to compute the PCA projection of unit 1 onto the 2D space defined by these two PCs, we form the N1xL
-        matrix representing ALL the spike clips for that unit, then multiply that by the Lx2 PCA matrix to yield the
-        N1x2 projection. Similarly for the other units.
+        matrix representing ALL the individual spike clips for that unit, then multiply that by the Lx2 PCA matrix to
+        yield the N1x2 projection. Similarly for the other units.
 
         Progress messages are delivered regularly as the computation proceeds, and the PCA projection for each specified
         unit is delivered as a 2D Numpy array via the :class:`TaskSignals`.data_retrieved signal. You can think of each
         row in the array as the (x,y) coordinates of each spike in the 2D space defined by the first 2 principal
         components of the analysis.
 
-        All spike clips used in the analysis are 4ms in duration and start 1ms prior to the spike occurrence time.
+        All spike clips used in the analysis are 2ms in duration and start 1ms prior to the spike occurrence time.
 
-        :return: A list of Numpy 2D arrays, one per unit. Each array represents the principal compnoent projection of
-            ALL of that unit's spike clips onto the 2D space defined by the first 2 principal components as computed for
-            all of the units specified.
         :raises Exception: If any required files are missing from the current working directory, such as the
-            analog channel data cache files, if an IO error or other unexpected failure occurs.
+            analog channel data cache files, or if an IO error or other unexpected failure occurs.
         """
         if not (0 < len(self._units) <= 3):
             raise Exception(f"PCA projection requires 1-3 units, not {len(self._units)}!")
+        for u in self._units:
+            if u.primary_channel is None:
+                raise Exception(f"Mean spike templates missing for unit {u.label}; cannot do PC analaysis.")
 
         self.signals.progress.emit(f"Computing PCA projections for {len(self._units)} units: "
                                    f"{','.join([u.label for u in self._units])} ...", -1)
@@ -804,31 +813,40 @@ class Task(QRunnable):
 
         samples_per_sec: float = all_channels[channel_list[0]]['samples_per_second']
 
-        # randomly select spike clips for each unit to be used in computing principal components -- unless there are
-        # fewer than 1000 spikes across all units.
+        # phase 1: compute 2 highest-variance principal components
         time.sleep(0.2)
-        n_total_spikes = sum([u.num_spikes for u in self._units])
-        n_clips = min(Task.NCLIPS_FOR_PCA, n_total_spikes)
-        clip_dur = int(Task.SPIKE_CLIP_DUR_SEC * samples_per_sec)
-        all_clips = np.empty((0, clip_dur*len(channel_list)), dtype='<h')
-        for u in self._units:
-            n_select = int(u.num_spikes * n_clips / n_total_spikes) if n_clips < n_total_spikes else u.num_spikes
-            spike_indices = sorted(random.sample(range(u.num_spikes), n_select))
-            clip_starts = [int((u.spike_times[i] - Task.PRE_SPIKE_SEC) * samples_per_sec) for i in spike_indices]
-            unit_clips = np.empty((n_select, 0), dtype='<h')
+        all_clips: np.ndarray
+        if len(self._units) == 1:
+            # when only one unit is selected, chose a randomly selected set of individual multi-clips to calc PC
+            u: Neuron = self._units[0]
+            n_clips = min(Task.NCLIPS_FOR_PCA, u.num_spikes)
+            clip_dur = int(Task.SPIKE_CLIP_DUR_SEC * samples_per_sec)
+            if n_clips == u.num_spikes:
+                clip_starts = [int((t - Task.PRE_SPIKE_SEC) * samples_per_sec) for t in u.spike_times]
+            else:
+                spike_indices = sorted(random.sample(range(u.num_spikes), n_clips))
+                clip_starts = [int((u.spike_times[i] - Task.PRE_SPIKE_SEC) * samples_per_sec) for i in spike_indices]
+
+            all_clips = np.empty((n_clips, 0), dtype='<h')
             for i, ch_idx in enumerate(channel_list):
                 clips = self._retrieve_channel_clips(ch_idx, clip_starts, clip_dur)
-                unit_clips = np.hstack((unit_clips, clips))
-                pct = int(100 * (i+1) / len(channel_list))
-                self.signals.progress.emit(f"Retrieving {n_select} spike clips for unit {u.label} "
+                all_clips = np.hstack((all_clips, clips))
+                pct = int(100 * (i + 1) / len(channel_list))
+                self.signals.progress.emit(f"Retrieving {n_clips} spike clips for unit {u.label} "
                                            f"across {len(channel_list)} analog channels.", pct)
                 if self._cancelled:
                     raise Exception("Operation cancelled")
-            all_clips = np.vstack((all_clips, unit_clips))
+        else:
+            # when multiple units in focus list, use spike template waveform clips to form matrix for PCA: Each row is
+            # the horizontal concatenation of the spike templates for a unit across all recorded analog channels. Each
+            # row corresponds to a different unit.
+            clip_dur = int(Task.SPIKE_CLIP_DUR_SEC * samples_per_sec)
+            all_clips = np.zeros((len(self._units), clip_dur*len(channel_list)))
+            for i_unit, u in enumerate(self._units):
+                for i, ch_idx in enumerate(channel_list):
+                    all_clips[i_unit, i*clip_dur:(i+1)*clip_dur] = u.get_template_for_channel(ch_idx)[0:clip_dur]
 
-        # the Lx2 matrix contains the first 2 principal components for sampled spike clips, where L = clip duration x
-        # the number of analog channels on which the neural units were recorded.
-        self.signals.progress.emit(f"Computing principal components from spike clips...", -1)
+        self.signals.progress.emit(f"Computing principal components from spike clips/templates...", -1)
         pc_matrix = stats.compute_principal_components(all_clips)
         if self._cancelled:
             raise Exception("Operation cancelled")
