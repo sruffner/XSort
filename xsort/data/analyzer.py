@@ -203,6 +203,15 @@ class Analyzer(QObject):
                 out.append(u)
         return out
 
+    @property
+    def primary_neuron(self) -> Optional[Neuron]:
+        """
+        The primary neuron is the first in the list of neurons currently selected for display/comparison purposes.
+        :return: The primary neuron, as described. Returns None if the focus list is currently empty.
+        """
+        focus_neurons = self.neurons_with_display_focus
+        return focus_neurons[0] if len(focus_neurons) > 0 else None
+
     def display_color_for_neuron(self, unit_label: str) -> Optional[str]:
         """
         Get the display color assigned to a neuron in the subset of neurons selected for display/comparison purposes.

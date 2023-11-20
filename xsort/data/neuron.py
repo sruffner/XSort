@@ -197,6 +197,8 @@ class Neuron:
         unit is not currently in the focus list, or if the projection has not yet been computed. Principal component 
         analysis occurs in the background and can take many seconds to complete.
         """
+        self._cached_similarity: Dict[str, float] = dict()
+        """ Similarity of this neural unit to another, lazily computed and cached. Keyed by label of other unit. """
 
     @property
     def label(self) -> str:
@@ -289,6 +291,38 @@ class Neuron:
         else:
             wv = self._templates.get(self._primary_channel)
             return float(np.max(wv) - np.min(wv))
+
+    def similarity_to(self, other_unit: "Neuron") -> float:
+        """
+        Calculate a similarity metric comparing this unit to another one. The metric is based on the spike template
+        waveforms of the two units. For each unit, a 1D sequence is formed by concatenating the per-channel spike
+        template waveforms. The cross correlation coefficient for the two sequences is the similarity metric.
+
+        :param other_unit: The neural unit to which this one is compared.
+        :return: The similarity metric, as described. Always returns 1.0 if the `other_unit` refers to this unit. **If
+        the per-channel spike template waveforms have not yet been computed for either unit, then this metric is not yet
+        determined and 0.0 is returned.**
+        """
+        if other_unit.label == self.label:
+            return 1.0
+        elif other_unit.label in self._cached_similarity:
+            return self._cached_similarity[other_unit.label]
+
+        similarity = 0.0
+        if len(self._templates) > 0 and len(other_unit._templates) > 0:
+            x1 = np.array([])
+            x2 = np.array([])
+            channels = sorted([k for k in self._templates.keys()])
+            if not all([(idx in other_unit._templates) for idx in channels]):
+                return similarity
+            for idx in channels:
+                x1 = np.hstack((x1, self._templates[idx]))
+                x2 = np.hstack((x2, other_unit._templates[idx]))
+            cc = np.corrcoef(x1, x2)
+            similarity = float(cc[0, 1])
+            self._cached_similarity[other_unit.label] = similarity
+            other_unit._cached_similarity[self.label] = similarity
+        return similarity
 
     def get_template_for_channel(self, idx: int) -> Optional[np.ndarray]:
         """

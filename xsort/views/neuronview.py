@@ -14,13 +14,16 @@ class _NeuronTableModel(QAbstractTableModel):
     Table model for the list of neural units exposed by the data manager object, :class:`Analyzer`. It is merely a
     wrapper around that list, and supports sorting the table on any of its columns: the neuron label, its primary
     channel, total # of spikes on the neuron, mean firing rate in Hz, SNR on primary channel, peak spike template
-    amplitude (typically on the primary channel), and the observed percentage of interspike intervals less than 1ms.
+    amplitude (typically on the primary channel), the observed percentage of interspike intervals less than 1ms, and
+    the similarity metric. Note that the similarity metric is a comparison to the first unit in the focus list -- the
+    so-called "primary neuron". If the focus list is empty, the metric is undefined for all units.
         Each row in the table corresponds to one neuron. Any neuron that is currently in the neuron display focus list
     are highlighted by setting the background color for that row to the RGB color assigned to the neuron's position
     within that focus list.
     """
 
-    _header_labels: List[str] = ['UID', 'Channel', '#Spikes', 'Rate (Hz)', 'SNR', 'Amp(\u00b5V)', '%ISI<1']
+    _header_labels: List[str] = ['UID', 'Channel', '#Spikes', 'Rate (Hz)',
+                                 'SNR', 'Amp(\u00b5V)', '%ISI<1', 'Similarity']
     """ Column header labels. """
 
     def __init__(self, data_manager: Analyzer):
@@ -60,7 +63,7 @@ class _NeuronTableModel(QAbstractTableModel):
         if (0 <= r < self.rowCount()) and (0 <= c <= self.columnCount()):
             if role == Qt.DisplayRole:
                 idx = self._sorted_indices[r]
-                return _NeuronTableModel._to_string(self._data_manager.neurons[idx], c)
+                return self._to_string(self._data_manager.neurons[idx], c)
             elif (role == Qt.BackgroundRole) or (role == Qt.ForegroundRole):
                 u = self._data_manager.neurons[self._sorted_indices[r]].label
                 color_str = self._data_manager.display_color_for_neuron(u)
@@ -73,8 +76,8 @@ class _NeuronTableModel(QAbstractTableModel):
                 return Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         return None
 
-    @staticmethod
-    def _to_string(u: Neuron, col: int):
+    def _to_string(self, u: Neuron, col: int):
+        primary = self._data_manager.primary_neuron
         switcher = {
             0: u.label,
             1: '' if u.primary_channel is None else str(u.primary_channel),
@@ -82,7 +85,8 @@ class _NeuronTableModel(QAbstractTableModel):
             3: f"{u.mean_firing_rate_hz:.2f}",
             4: f"{u.snr:.2f}" if isinstance(u.snr, float) else "",
             5: f"{u.amplitude:.1f}" if isinstance(u.amplitude, float) else "",
-            6: f"{(100.0 * u.fraction_of_isi_violations):.2f}"
+            6: f"{(100.0 * u.fraction_of_isi_violations):.2f}",
+            7: "" if (primary is None) else ("---" if (primary.label == u.label) else f"{u.similarity_to(primary):.2f}")
         }
         return switcher.get(col, '')
 
@@ -97,6 +101,7 @@ class _NeuronTableModel(QAbstractTableModel):
     def _resort(self) -> None:
         self._sorted_indices.clear()
         u = self._data_manager.neurons
+        primary = self._data_manager.primary_neuron
         num = len(u)
         if num > 1:
             switcher = {
@@ -108,7 +113,9 @@ class _NeuronTableModel(QAbstractTableModel):
                 4: sorted(range(num), key=lambda k: 0 if (u[k].snr is None) else u[k].snr, reverse=self._reversed),
                 5: sorted(range(num), key=lambda k: 0 if (u[k].amplitude is None) else u[k].amplitude,
                           reverse=self._reversed),
-                6: sorted(range(num), key=lambda k: u[k].fraction_of_isi_violations, reverse=self._reversed)
+                6: sorted(range(num), key=lambda k: u[k].fraction_of_isi_violations, reverse=self._reversed),
+                7: sorted(range(num), key=lambda k: k if (primary is None) else u[k].similarity_to(primary),
+                          reverse=self._reversed)
             }
             self._sorted_indices = switcher.get(self._sort_col)
 

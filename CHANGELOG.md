@@ -1,5 +1,13 @@
 # Changelog
-
+## v0.1.0 (TBD)
+- Defined similarity metric: The correlation coefficient of two vectors: the horizontal concatenation of the 
+per-channel spike template waveforms for one unit and similarly for the other unit. 
+- Updated `NeuronView` to include the similarity metric in neural unit table. The metric always compares each unit to
+the so-called **_primary neuron_**, ie, the first neuron in the current display/focus list. If no units are currently
+selected, then the similarity metric is undefined, and all entries in the `Similarity` column are blank. As with any
+column in the table, you can sort on the new column. When similarity is undefined, sorting on that column is the same 
+as sorting on the UID.
+- 
 ## v0.0.9 (11/20/2023)
 - Modified approach to principal component analysis for the `PCAView`. Instead of using a random sampling of 1000
 spike multi-clips (horizontal concatenation of the 2ms spike clips recorded on P analog channels) across all units,
