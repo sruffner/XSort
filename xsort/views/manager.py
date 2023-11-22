@@ -15,7 +15,6 @@ from xsort.views.neuronview import NeuronView
 from xsort.views.pcaview import PCAView
 from xsort.views.correlogramview import CorrelogramView
 from xsort.views.templateview import TemplateView
-from xsort.views.umapview import UMAPView
 
 
 class ViewManager(QObject):
@@ -40,10 +39,9 @@ class ViewManager(QObject):
         self._firingrate_view = FiringRateView(self.data_analyzer)
         self._pca_view = PCAView(self.data_analyzer)
         self._channels_view = ChannelView(self.data_analyzer)
-        self._umap_view = UMAPView(self.data_analyzer)
 
         self._all_views = [self._neuron_view, self._templates_view, self._correlogram_view,
-                           self._isi_view, self._firingrate_view, self._pca_view, self._channels_view, self._umap_view]
+                           self._isi_view, self._firingrate_view, self._pca_view, self._channels_view]
         """ List of all managed views. """
 
         # actions and menus

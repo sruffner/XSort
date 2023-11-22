@@ -723,7 +723,7 @@ class Task(QRunnable):
 
         self._compute_pca_projection()
 
-    NCLIPS_FOR_PCA: int = 500
+    NCLIPS_FOR_PCA: int = 1000
     """
     When only 1 unit is in the focus list, we select this many randomly selected spike multi-clips (horizontal concat
     of spike clip on each of the recorded analog channels) to calculate principal components. When more than one unit

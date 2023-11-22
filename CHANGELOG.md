@@ -7,7 +7,7 @@ the so-called **_primary neuron_**, ie, the first neuron in the current display/
 selected, then the similarity metric is undefined, and all entries in the `Similarity` column are blank. As with any
 column in the table, you can sort on the new column. When similarity is undefined, sorting on that column is the same 
 as sorting on the UID.
-- 
+
 ## v0.0.9 (11/20/2023)
 - Modified approach to principal component analysis for the `PCAView`. Instead of using a random sampling of 1000
 spike multi-clips (horizontal concatenation of the 2ms spike clips recorded on P analog channels) across all units,
