@@ -403,7 +403,8 @@ class Analyzer(QObject):
             if seg.channel_index in self._channel_segments:
                 self._channel_segments[seg.channel_index] = seg
                 self.data_ready.emit(DataType.CHANNELTRACE, str(seg.channel_index))
-        elif (data_type in [DataType.ISI, DataType.ACG, DataType.CCG, DataType.PCA]) and isinstance(data, Neuron):
+        elif (data_type in [DataType.ISI, DataType.ACG, DataType.ACG_VS_RATE, DataType.CCG, DataType.PCA]) and \
+                isinstance(data, Neuron):
             # statistics cached in neural unit record on background thread -- NOT supplying a new Neuron instance!
             unit: Neuron = data
             self.data_ready.emit(data_type, unit.label)

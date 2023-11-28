@@ -1,5 +1,5 @@
 # Changelog
-## v0.1.0 (TBD)
+## v0.1.0 (11/28/2023)
 - Defined similarity metric: The correlation coefficient of two vectors: the horizontal concatenation of the 
 per-channel spike template waveforms for one unit and similarly for the other unit. 
 - Updated `NeuronView` to include the similarity metric in neural unit table. The metric always compares each unit to
@@ -7,6 +7,11 @@ the so-called **_primary neuron_**, ie, the first neuron in the current display/
 selected, then the similarity metric is undefined, and all entries in the `Similarity` column are blank. As with any
 column in the table, you can sort on the new column. When similarity is undefined, sorting on that column is the same 
 as sorting on the UID.
+- Removed `UMAPView`. UMAP (Uniform Manifold Approximation and Projection) analysis is too slow. May revisit this 
+decision in a future release.
+- Initial implementation of `ACGRateView`, which plots the autocorrelogram as a function of firing rate for each of
+the units in the current display/focus list.
+- Project dependencies now maintained in `requirements.txt`.
 
 ## v0.0.9 (11/20/2023)
 - Modified approach to principal component analysis for the `PCAView`. Instead of using a random sampling of 1000

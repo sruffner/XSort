@@ -688,7 +688,7 @@ class Task(QRunnable):
             return
 
         num_units = len(self._units)
-        num_hists = 2 * num_units + num_units * (num_units - 1)
+        num_hists = 3 * num_units + num_units * (num_units - 1)
 
         self.signals.progress.emit(f"Computing histograms for {len(self._units)} units ...", 0)
         t0 = time.time()
@@ -696,18 +696,28 @@ class Task(QRunnable):
         for u in self._units:
             if u.cache_isi_if_necessary():
                 self.signals.data_available.emit(DataType.ISI, u)
+            if self._cancelled:
+                raise Exception("Operation cancelled")
             time.sleep(0.2)
             n += 1
             if u.cache_acg_if_necessary():
                 self.signals.data_available.emit(DataType.ACG, u)
-            time.sleep(0.2)
-            n += 1
             if self._cancelled:
                 raise Exception("Operation cancelled")
+            time.sleep(0.2)
+            n += 1
+            if u.cache_acg_vs_rate_if_necessary():
+                self.signals.data_available.emit(DataType.ACG_VS_RATE, u)
+            if self._cancelled:
+                raise Exception("Operation cancelled")
+            time.sleep(0.2)
+            n += 1
+
             if time.time() - t0 > 1:
                 pct = int(100 * n / num_hists)
                 self.signals.progress.emit(f"Computing histograms for {len(self._units)} units ...", pct)
                 t0 = time.time()
+
             for u2 in self._units:
                 if u.label != u2.label:
                     if u.cache_ccg_if_necessary(other_unit=u2):
@@ -723,7 +733,7 @@ class Task(QRunnable):
 
         self._compute_pca_projection()
 
-    NCLIPS_FOR_PCA: int = 1000
+    NCLIPS_FOR_PCA: int = 5000
     """
     When only 1 unit is in the focus list, we select this many randomly selected spike multi-clips (horizontal concat
     of spike clip on each of the recorded analog channels) to calculate principal components. When more than one unit

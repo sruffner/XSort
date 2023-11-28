@@ -3,7 +3,7 @@ stats.py: A collection of functions implementing various statistical calculation
 
     NOTE: Copied from sglportalapi package on 10/2/2023.
 """
-from typing import Tuple
+from typing import Tuple, Optional
 import numpy as np
 
 
@@ -58,7 +58,7 @@ def generate_cross_correlogram(
             Each element contains the count of unit 2 spikes in the corresponding time bin. To get a relative measure of
             the likelihood of a spike occurring in each bin, divide each bin count by n.
     Raises:
-        ValueError: If either array of spike times is empty.
+        ValueError: If either array of spike times is empty, or contains a non-finite value.
     """
     if (len(spike_times_1) == 0) or (len(spike_times_2) == 0):
         raise ValueError("Empty spike times array")
@@ -94,6 +94,101 @@ def generate_cross_correlogram(
         counts[span_ms] = 0
 
     return counts, n
+
+
+def gen_cross_correlogram_vs_firing_rate(
+        spike_times_1: np.ndarray, spike_times_2: np.ndarray, span_ms: int = 100, num_fr_bins: int = 10,
+        smooth: Optional[float] = 250e-3) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Generate a series of cross-correlograms of the spike trains for two neural units across the observed instantaneous
+    firing rates. The result is a 2D matrix: the first dimension is binned firing rate, while the second is time
+    relative to the spike occurrence time at t=0, in one-millisecond bins.
+        **NOTE**: If the two spike trains are identical, the result is an auto-correlogram of the unit's spikes across
+    the range of observed instantaneous firing rates. This can be thought of as a 3D ACG that shows firing regularity
+    when the unit is firing at different rates. In the ACG case, by convention, all firing rate bins for a time delta
+    of 0 are set to 0.
+
+    :param spike_times_1: Array of spike times for a neural unit, in seconds. Must be in chronological order.
+    :param spike_times_2: Array of spike times for a second neural unit, in seconds. Passing the same array into both
+        arguments yields the auto-correlogram of the spike train vs firing rate for a single unit.
+    :param span_ms: Correlogram span in milliseconds. Default = 100. Minimum value of 20.
+    :param num_fr_bins: Number of bins, N, for the firing rate axis. Default = 10.
+    :param smooth: Width of the boxcar filter used to smooth the calculated instantaneous firing rate, in seconds. If
+        None, firing rate is not filtered. Default = 0.25s.
+    :return: 2-tuple (A, B), where A is a 1D Numpy array of length N holding the bin centers for the firing rate axis,
+        and B is a NxM matrix holding the result, where M = span_ms*2 + 1.
+    :raises ValueError: If there are fewer than 2 spikes in either spike train, or if either spike train contains a
+        non-finite (NaN, infinite) value.
+    """
+    if (len(spike_times_1) < 2) or (not np.all(np.isfinite(spike_times_1))) or \
+            (len(spike_times_2) < 2) or (not np.all(np.isfinite(spike_times_2))):
+        raise ValueError("Non-finite spike time, or not enough spike times")
+
+    is_acg = np.array_equal(spike_times_1, spike_times_2)
+
+    # convert spike times to integer milliseconds
+    spikes_ms_1 = np.ceil(spike_times_1 * 1000.0).astype(np.int64)
+    spikes_ms_2 = np.ceil(spike_times_2 * 1000.0).astype(np.int64)
+
+    # creaate a binned spike train for the second unit, with each 1-ms bin containing the # of spikes in that bin
+    train_len = int(np.ceil(max(np.nanmax(spikes_ms_1, axis=0), np.nanmax(spikes_ms_2, axis=0))))
+    spike_train_2 = np.zeros(train_len+1, dtype=np.uint8)
+    for i in range(len(spikes_ms_2)):
+        spike_train_2[spikes_ms_2[i]] += 1
+
+    # compute instantaneous firing rate for the second unit using the inverse ISI method.
+    firing_rate = np.zeros(spike_train_2.shape)
+    for i in range(len(spikes_ms_2)-1):
+        t0_ms, t1_ms = spikes_ms_2[i], spikes_ms_2[i+1]
+        if t0_ms == t1_ms:
+            continue
+        current_fr = 1000.0 / (t1_ms - t0_ms)
+        firing_rate[int(t0_ms):int(t1_ms)] = current_fr
+        if i == 0:
+            firing_rate[0:int(t0_ms)] = current_fr
+        elif i == len(spikes_ms_2) - 2:
+            firing_rate[int(t1_ms):] = current_fr
+
+    # smooth the instantaneous firing rate waveform if requested
+    if isinstance(smooth, float):
+        width = int(smooth * 1000.0)   # smoothing width in millisecs
+        half_width = round(width / 2)
+        n = len(firing_rate)
+        firing_rate = np.convolve(np.ones(width) / width, firing_rate)[half_width:half_width+n]
+
+    # get the IFR for the second unit at each spike occurrence time for the first unit, then determine the N bins
+    # for the list of rates
+    quantile_probabilities = [i/(num_fr_bins+1) for i in range(1, num_fr_bins+1)]
+    rates = firing_rate[spikes_ms_1]
+    firing_rate_axis = np.quantile(rates, quantile_probabilities)
+
+    # prepare the correlogram vs firing rate matrix: for every spike occurrence time T in the first unit, get the firing
+    # rate in the second unit at that time and locate the corresponding firing rate bin. Increment the spike counts for
+    # that bin IAW the spikes found in the segment [T-span_ms:T+span_ms] in the second unit's binned spike train...
+    counts = np.zeros(shape=(len(firing_rate_axis), 2*span_ms+1))
+    num_per_bin = np.zeros(len(firing_rate_axis))
+    for i, t_ms in enumerate(spikes_ms_1):
+        start = int(t_ms) - span_ms
+        stop = start + 2 * span_ms + 1
+        if (start < 0) or stop >= train_len:  # skip spikes too close to the beginning or end of the spike train
+            continue
+        current_fr = firing_rate[t_ms]
+        # omit any spike where the corresponding firing rate is outside the bounds of the firing rate axis
+        if (current_fr > firing_rate_axis[-1] + (firing_rate_axis[-1] - firing_rate_axis[-2]) / 2.0) or \
+                (current_fr < firing_rate_axis[0] - (firing_rate_axis[1] - firing_rate_axis[0]) / 2.0):
+            continue
+        bin_num = int(np.argmin(np.abs(firing_rate_axis - current_fr)))
+        counts[bin_num, :] += spike_train_2[start:stop]
+        num_per_bin[bin_num] = num_per_bin[bin_num] + 1
+
+    # normalize by dividing by the number of samples contributing to each firing rate bin
+    counts = counts / num_per_bin[:, np.newaxis]
+
+    # for ACG case, set to 0 at spike occurrence time (t=0) in each firing rate bin
+    if is_acg:
+        counts[:, span_ms] = 0
+
+    return firing_rate_axis, counts
 
 
 def compute_principal_components(samples: np.ndarray, num_cmpts: int = 2) -> np.ndarray:

@@ -75,6 +75,7 @@ class PCAView(BaseView):
         will include one point per spike in a unit's spike train -- potentially 100K+ points! 
         """
         self._toggle_z_btn = QPushButton("Toggle Z Order")
+        """ Clicking this pushbutton toggles the display order of the PCA projections drawn in this view. """
 
         # some configuration. We hide both axes because the units of the two principal components are meaningless.
         self._plot_item.setMenuEnabled(False)

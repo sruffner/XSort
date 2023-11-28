@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QMainWindow, QMessageBox, QFileDialog, QMenu, QDoc
 
 from xsort.data.analyzer import Analyzer, DataType
 from xsort.constants import APP_NAME
+from xsort.views.acgrateview import ACGRateView
 from xsort.views.baseview import BaseView
 from xsort.views.channelview import ChannelView
 from xsort.views.firingrateview import FiringRateView
@@ -36,12 +37,13 @@ class ViewManager(QObject):
         self._templates_view = TemplateView(self.data_analyzer)
         self._correlogram_view = CorrelogramView(self.data_analyzer)
         self._isi_view = ISIView(self.data_analyzer)
+        self._acg_vs_rate_view = ACGRateView(self.data_analyzer)
         self._firingrate_view = FiringRateView(self.data_analyzer)
         self._pca_view = PCAView(self.data_analyzer)
         self._channels_view = ChannelView(self.data_analyzer)
 
-        self._all_views = [self._neuron_view, self._templates_view, self._correlogram_view,
-                           self._isi_view, self._firingrate_view, self._pca_view, self._channels_view]
+        self._all_views = [self._neuron_view, self._templates_view, self._correlogram_view, self._isi_view,
+                           self._acg_vs_rate_view, self._firingrate_view, self._pca_view, self._channels_view]
         """ List of all managed views. """
 
         # actions and menus

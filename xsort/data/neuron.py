@@ -12,8 +12,9 @@ class DataType(Enum):
     CHANNELTRACE = 2,   # analog channel traces for a 1-second segment of the analog recording
     ISI = 3,   # ISI histogram for a neural unit in the focus list
     ACG = 4,   # Autocorrelogram for a neural unit in the focus list
-    CCG = 5,   # Crosscorrelogram for a neual unit vs another unit in the focus list
-    PCA = 6    # PCA projection for a neural unit in the focus list
+    ACG_VS_RATE = 5,  # 3D autocorrelogram vs firing rate for a neural unit in the focus list
+    CCG = 6,   # Crosscorrelogram for a neual unit vs another unit in the focus list
+    PCA = 7    # PCA projection for a neural unit in the focus list
 
 
 class ChannelTraceSegment:
@@ -81,8 +82,9 @@ class Neuron:
         When initially constructed from the spike sorter results file in the XSort working directory, the only
     available information about a neural unit is its label and spike train. Metadata and metrics are computed in the
     background and stored, along with the spike train, in an internal cache file in the working directory. Additional
-    statistics -- the autocorrelogram, interspike interval histogram, cross correlograms with other units, and principal
-    component analysis results -- are computed at application runtime and cached in this object.
+    statistics -- the autocorrelogram, autocorrelogram as a function of firing rate, interspike interval histogram,
+    cross correlograms with other units, and principal component analysis results -- are computed at application runtime
+    and cached in this object.
         Principal component analysis is performed on the spike trains of the neural units in the current "focus list".
     The result of PCA is a projection of each unit's spikes into a 2D space defined by the 2 principal components
     exhibiting the most variance (aka, the most "information"), and it is this projection which is cached in this
@@ -90,7 +92,9 @@ class Neuron:
     projection is reset.
     """
     FIXED_HIST_SPAN_MS: int = 200
-    """ The (fixed) time span for all neural unit ISI histograms and correlograms, in milliseconds. """
+    """ The +/- time span (ms) for most neural unit histograms (ISI, ACG, CCG). """
+    ACG_VS_RATE_SPAN_MS: int = 100
+    """ The +/- time span (ms) for the neural unit 3D histogram representing ACG as a function of firing rate. """
 
     @staticmethod
     def omniplex_channel_id(is_wideband: bool, ch: int) -> str:
@@ -199,6 +203,14 @@ class Neuron:
         """
         self._cached_similarity: Dict[str, float] = dict()
         """ Similarity of this neural unit to another, lazily computed and cached. Keyed by label of other unit. """
+        self._cached_acg_vs_rate: Optional[Tuple[np.ndarray, np.ndarray]] = None
+        """ 
+        Cached 3D histogram representing the autocorrelogram as a function of firing rate for this unit. The 3D
+        histogram is represented by a 2-tuple of Numpy arrays. The first is a 10x1 vector specifying the bin centers
+        for the firing rate axis, while the second is a 10x201 matrix defining the autocorrelogram in each firing
+        rate bin. The second dimension of this matrix is time relative to the spike occurrence at T=0, ranging from -100
+        to 100 milliseconds. Lazily created on a background thread when needed.
+        """
 
     @property
     def label(self) -> str:
@@ -385,6 +397,23 @@ class Neuron:
         """
         return np.array([]) if self._cached_acg is None else np.copy(self._cached_acg)
 
+    def cached_acg_vs_rate(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        The autocorrelogram for this unit's spike train as a function of firing rate -- a measure of firing regularity
+        when the unit is firing at different rates.
+            By design, the ACG-vs-rate "3D histogram" is lazily created on a background thread when the unit is first
+        selected for display during application runtime. It is computed for a fixed correlogram span of 200ms and 10
+        firing rate bins. Once computed, it is cached in this object, where it remains until application exit.
+
+        :return: A 2-tuple of Numpy arrays: The first is a 10x1 vector specifying the bin centers for the firing rate
+            axis (in Hz), while the second is a 10x201 matrix containing the computed autocorrelogram for each firing
+            rate bin. The second dimension is the correlogram span [-100..100] milliseconds, that is, time relative to
+            the occurence of a spike at T=0. Returns an independent copy of the 2-tuple. Both arrays in the tuple will
+            be empty if the ACG-vs-rate histogram is not yet available.
+        """
+        return (np.array([]), np.array([])) if self._cached_acg_vs_rate is None \
+            else (np.copy(self._cached_acg_vs_rate[0]), np.copy(self._cached_acg_vs_rate[1]))
+
     def get_cached_ccg(self, other_unit: str) -> np.ndarray:
         """
         Get the cross-correlogram for this unit's spike train vs the spike train of the unit specified, if avaiable. The
@@ -429,6 +458,19 @@ class Neuron:
             if n > 0:
                 out = out * (1.0 / n)
             self._cached_acg = out
+            return True
+        return False
+
+    def cache_acg_vs_rate_if_necessary(self) -> bool:
+        """
+        Compute and cache the 3D histogram representing this unit's +/-100-ms autocorrelogram as a function of firing
+        rate, if it has not already been computed. **As the computation can take a significant amount of time, only
+        invoke this method on a background thread.**
+        :return: True if ACG-vs-firing-rate 3D histogram was computed, False if it was already cached.
+        """
+        if self._cached_acg_vs_rate is None:
+            self._cached_acg_vs_rate = stats.gen_cross_correlogram_vs_firing_rate(
+                self.spike_times, self.spike_times, span_ms=self.ACG_VS_RATE_SPAN_MS)
             return True
         return False
 
