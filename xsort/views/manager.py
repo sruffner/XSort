@@ -1,10 +1,13 @@
+from importlib import resources as impresources
 from pathlib import Path
 from typing import List, Optional
 
-from PySide6.QtCore import Slot, QStandardPaths, QSettings, QCoreApplication, QByteArray, Qt, QObject
+from PySide6.QtCore import Slot, QStandardPaths, QSettings, QCoreApplication, QByteArray, Qt, QObject, QSize
 from PySide6.QtGui import QAction
-from PySide6.QtWidgets import QMainWindow, QMessageBox, QFileDialog, QMenu, QDockWidget
+from PySide6.QtWidgets import QMainWindow, QMessageBox, QFileDialog, QMenu, QDockWidget, QDialog, QVBoxLayout, \
+    QDialogButtonBox, QTextBrowser
 
+import xsort.assets as xsort_assets
 from xsort.data.analyzer import Analyzer, DataType
 from xsort.constants import APP_NAME
 from xsort.views.acgrateview import ACGRateView
@@ -32,6 +35,8 @@ class ViewManager(QObject):
         The master data model. It encapsulates the notion of XSort's 'current working directory, mediates access to 
         data stored in the various files within that directory, performs analyses triggered by view actions, and so on.
         """
+        self._about_dlg = self._create_about_dialog()
+        """ The application's 'About' dialog. """
 
         self._neuron_view = NeuronView(self.data_analyzer)
         self._templates_view = TemplateView(self.data_analyzer)
@@ -119,6 +124,28 @@ class ViewManager(QObject):
 
         # status bar
         self._main_window.statusBar().showMessage("Ready")
+
+    def _create_about_dialog(self) -> QDialog:
+        dlg = QDialog(self._main_window)
+        dlg.setWindowTitle("About XSort")
+
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
+        button_box.accepted.connect(dlg.accept)
+
+        inp_file = (impresources.files(xsort_assets) / 'about.md')
+        with inp_file.open("rt") as f:
+            markdown = f.read()
+        about_browser = QTextBrowser()
+        about_browser.setReadOnly(True)
+        about_browser.setOpenExternalLinks(True)
+        about_browser.setMarkdown(markdown)
+
+        layout = QVBoxLayout()
+        layout.addWidget(about_browser)
+        layout.addWidget(button_box)
+        dlg.setLayout(layout)
+        dlg.setMinimumSize(QSize(400, 300))
+        return dlg
 
     @property
     def dockable_views(self) -> List[BaseView]:
@@ -249,7 +276,7 @@ class ViewManager(QObject):
         Handler for the 'About <application name>' menu command. It raises a modal message dialog describing the
         application.
         """
-        QMessageBox.about(self._main_window, f"About {APP_NAME}", f"A description will go here!")
+        self._about_dlg.exec()
 
     def _save_settings_and_exit(self) -> None:
         """ Save all user settings and exit the application without user prompt. """

@@ -1,4 +1,11 @@
 # Changelog
+
+## v0.1.1 (TBD)
+- `NeuronView`: Selected columns in the neural units table may be hidden/shown via a popup context menu raised by
+clicking anywhere on the table header. The UID and Channel columns may not be hidden. Column visibility is saved in
+user settings at application shutdown and restored from settings at startup.
+- Added an "About XSort" dialog.
+
 ## v0.1.0 (11/28/2023)
 - Defined similarity metric: The correlation coefficient of two vectors: the horizontal concatenation of the 
 per-channel spike template waveforms for one unit and similarly for the other unit. 

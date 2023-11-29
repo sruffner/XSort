@@ -1,8 +1,8 @@
 from typing import List, Any, Optional
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QTableView, QHeaderView, QHBoxLayout, QSizePolicy
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings
+from PySide6.QtGui import QColor, QAction
+from PySide6.QtWidgets import QTableView, QHeaderView, QHBoxLayout, QSizePolicy, QMenu
 
 from xsort.data.analyzer import Analyzer
 from xsort.data.neuron import Neuron
@@ -38,6 +38,10 @@ class _NeuronTableModel(QAbstractTableModel):
         self._sorted_indices: List[int] = [i for i in range(len(data_manager.neurons))]
         """ Maps table row index to index of corresponding neuron IAW the current sort column and sort order. """
         self.reload_table_data()
+
+    def hideable_columns(self) -> List[int]:
+        """ The column indices of all columns that can be optionally hidden hidden. """
+        return [i for i in range(2, len(self._header_labels))]
 
     def reload_table_data(self):
         self._resort()
@@ -135,7 +139,8 @@ class NeuronView(BaseView):
     """
     A tabular view of the list of neurons exposed by the data manager object, :class:`Analyzer`. Each row in the
     table represents one neural unit, with the unit label and various numerical statistics shown in the columns. The
-    table may be sorted on any column, in ascending or descending order.
+    table may be sorted on any column, in ascending or descending order. The visibility of selected columns may be
+    toggled via a context menu raised when the user clicks anywhere on the column header.
         The user selects a neuron for the display focus by clicking on it, and removes the focus by clicking it again.
     The display focus list may contain up to MAX_NUM_FOCUS_NEURONS, and a unique color is assigned to each slot in that
     list. Most other views in XSort display data for neurons in the current display list, using the assigned colors.
@@ -145,6 +150,8 @@ class NeuronView(BaseView):
         super().__init__('Neurons', None, data_manager)
         self._table_view = QTableView()
         """ Table view displaying the neuron table (read-only). """
+        self._table_context_menu = QMenu(self._table_view)
+        """ Context menu for table to hide/show selected table columns. """
         self._model = _NeuronTableModel(data_manager)
         """ Neuron table model (essentially wraps a table model around the data manager's neuron list). """
 
@@ -161,6 +168,15 @@ class NeuronView(BaseView):
         self._table_view.setSizePolicy(size)
 
         self._table_view.clicked.connect(self.on_item_clicked)
+
+        # set up context menu for toggling the visibility of selected columns in the table.
+        for col in self._model.hideable_columns():
+            action = QAction(self._model.headerData(col, Qt.Horizontal), parent=self._table_context_menu,
+                             checkable=True, checked=True,
+                             triggered=lambda checked, x=col: self._toggle_table_column_visibility(x))
+            self._table_context_menu.addAction(action)
+        self._table_view.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._table_view.horizontalHeader().customContextMenuRequested.connect(self._on_table_right_click)
 
         main_layout = QHBoxLayout()
         main_layout.addWidget(self._table_view)
@@ -179,3 +195,47 @@ class NeuronView(BaseView):
         u = self._model.unit_label_for_row(index.row())
         if not (u is None):
             self.data_manager.update_neurons_with_display_focus(u)
+
+    def _on_table_right_click(self, pos: QPoint) -> None:
+        """ Handler raises the context menu by which user toggles the visiblity of selected columns in the table. """
+        pos = self._table_view.horizontalHeader().mapToGlobal(pos)
+        pos += QPoint(5, 10)
+        self._table_context_menu.move(pos)
+        self._table_context_menu.show()
+
+    def _toggle_table_column_visibility(self, col: int) -> None:
+        """
+        Toggle the visibility of the specified column in the neural units table. No action is taken if the specified
+        column may not be hidden.
+        :param col: The table column index.
+        """
+        if col in self._model.hideable_columns():
+            hidden = self._table_view.isColumnHidden(col)
+            if hidden:
+                self._table_view.showColumn(col)
+            else:
+                self._table_view.hideColumn(col)
+
+    def save_settings(self, settings: QSettings) -> None:
+        """ Overridden to preserve which columns in the neural units table have been hidden by the user. """
+        hidden = [str(i) for i in self._model.hideable_columns() if self._table_view.isColumnHidden(i)]
+        settings.setValue('neuronview_hidden_cols', ','.join(hidden))
+
+    def restore_settings(self, settings: QSettings) -> None:
+        """ Overridden to restore the current histogram span from user settings. """
+        try:
+            # because the corresponding context menu items are initially checked, we have to fix them after hiding
+            # any columns to correctly reflect the current state
+            hidden: str = settings.value('neuronview_hidden_cols', '')
+            hidden_column_labels: List[str] = list()
+            for col_str in hidden.split(','):
+                col = int(col_str)
+                if col in self._model.hideable_columns():
+                    self._table_view.hideColumn(col)
+                    hidden_column_labels.append(self._model.headerData(col, Qt.Horizontal))
+            if len(hidden_column_labels) > 0:
+                for a in self._table_context_menu.actions():
+                    if a.text() in hidden_column_labels:
+                        a.setChecked(False)
+        except Exception:
+            pass
