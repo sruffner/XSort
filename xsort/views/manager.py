@@ -21,6 +21,31 @@ from xsort.views.correlogramview import CorrelogramView
 from xsort.views.templateview import TemplateView
 
 
+class _UserGuideView(BaseView):
+    """
+    This view contains a simple user's guide for XSort, maintained in the Markdown file :file:`assets/help.md`. We put
+    this in a view so the user can dock the guide like any other real data view.
+    """
+
+    def __init__(self, data_manager: Analyzer) -> None:
+        super().__init__('Help', None, data_manager)
+        self._help_browser = QTextBrowser()
+        """ The user guide content is displayed entirelyl in this widget. """
+
+        # load the user guide contents
+        inp_file = (impresources.files(xsort_assets) / 'help.md')
+        with inp_file.open("rt") as f:
+            markdown = f.read()
+        self._help_browser.setReadOnly(True)
+        self._help_browser.setOpenExternalLinks(True)
+        self._help_browser.setMarkdown(markdown)
+
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self._help_browser)
+
+        self.view_container.setLayout(main_layout)
+
+
 class ViewManager(QObject):
     """
     TODO: UNDER DEV -- This is essentially the view + controller for XSort. It builds the UI in the main application
@@ -46,9 +71,11 @@ class ViewManager(QObject):
         self._firingrate_view = FiringRateView(self.data_analyzer)
         self._pca_view = PCAView(self.data_analyzer)
         self._channels_view = ChannelView(self.data_analyzer)
+        self._user_guide_view = _UserGuideView(self.data_analyzer)
 
         self._all_views = [self._neuron_view, self._templates_view, self._correlogram_view, self._isi_view,
-                           self._acg_vs_rate_view, self._firingrate_view, self._pca_view, self._channels_view]
+                           self._acg_vs_rate_view, self._firingrate_view, self._pca_view, self._channels_view,
+                           self._user_guide_view]
         """ List of all managed views. """
 
         # actions and menus
@@ -112,7 +139,12 @@ class ViewManager(QObject):
             dock.setAllowedAreas(Qt.BottomDockWidgetArea | Qt.RightDockWidgetArea)
             dock.setWidget(v.view_container)
             self._main_window.addDockWidget(Qt.RightDockWidgetArea, dock)
+            # dock widget holding the user guide is separated from the other views and hidden by default
+            if isinstance(v, _UserGuideView):
+                self._view_menu.addSeparator()
+                dock.setHidden(True)
             self._view_menu.addAction(dock.toggleViewAction())
+
         self._main_window.setDockNestingEnabled(True)
         self._main_window.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
 
@@ -144,7 +176,7 @@ class ViewManager(QObject):
         layout.addWidget(about_browser)
         layout.addWidget(button_box)
         dlg.setLayout(layout)
-        dlg.setMinimumSize(QSize(400, 300))
+        dlg.setMinimumSize(QSize(600, 400))
         return dlg
 
     @property
