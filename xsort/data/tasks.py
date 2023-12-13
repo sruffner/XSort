@@ -320,7 +320,7 @@ class Task(QRunnable):
             self.signals.progress.emit("Caching/retrieving neural unit metrics",
                                        int(100 * (n_units - len(neurons))/n_units))
             neuron = neurons.pop(0)
-            updated_neuron = self._retrieve_neural_unit(neuron.label, suppress=True)
+            updated_neuron = self._retrieve_neural_unit(neuron.uid, suppress=True)
             if updated_neuron is None:
                 self._cache_neural_unit(neuron)
                 updated_neuron = neuron
@@ -477,12 +477,12 @@ class Task(QRunnable):
         return ChannelTraceSegment(idx, 0, samples_per_sec,
                                    channel_dict['coeff_to_convert_to_units'] * 1.0e6, first_second)
 
-    def _retrieve_neural_unit(self, unit_label: str, suppress: bool = False) -> Optional[Neuron]:
+    def _retrieve_neural_unit(self, uid: str, suppress: bool = False) -> Optional[Neuron]:
         """
         Retrieve all metrics (spike train, per-channel mean spike waveforms, metadata) for a specified neural unit
         from the corresponding cache file in the working directory.
 
-        :param unit_label: Label uniquely identifying the neural unit.
+        :param uid: The neural unit's UID.
         :param suppress: If True, any exception (file not found, file IO error) is suppressed. Default is False.
         :return: A **Neuron** object encapsulating all metrics for the specified neural unit, or None if an error
             occurred and exceptions are suppressed.
@@ -490,18 +490,18 @@ class Task(QRunnable):
             regardless if the unit label is invalid.
         """
         # validate unit label and extract unit index. Exception thrown if invalid
-        unit_idx, unit_is_complex = Neuron.dissect_unit_label(unit_label)
+        unit_idx, unit_is_complex = Neuron.dissect_unit_label(uid)
 
         try:
-            unit_cache_file = Path(self._working_dir, f"{UNIT_CACHE_FILE_PREFIX}{unit_label}")
+            unit_cache_file = Path(self._working_dir, f"{UNIT_CACHE_FILE_PREFIX}{uid}")
             if not unit_cache_file.is_file():
-                raise Exception(f"Unit metrics cache file missing for neural unit {unit_label}")
+                raise Exception(f"Unit metrics cache file missing for neural unit {uid}")
 
             with open(unit_cache_file, 'rb') as fp:
                 hdr = struct.unpack_from('f4I', fp.read(struct.calcsize('f4I')))
                 ok = (len(hdr) == 5) and all([k >= 0 for k in hdr])
                 if not ok:
-                    raise Exception(f"Invalid header in unit metrics cache file for neural unit {unit_label}")
+                    raise Exception(f"Invalid header in unit metrics cache file for neural unit {uid}")
                 n_bytes = struct.calcsize("<{:d}f".format(hdr[2]))
                 spike_times = np.frombuffer(fp.read(n_bytes), dtype='<f')
                 template_dict: Dict[int, np.ndarray] = dict()
@@ -543,7 +543,7 @@ class Task(QRunnable):
         :raises Exception: If an error occurs. In most cases, the exception message may be used as a human-facing
             error description.
         """
-        self.signals.progress.emit(f"Computing and cacheing statistics for unit {unit.label} ...", 0)
+        self.signals.progress.emit(f"Computing and cacheing statistics for unit {unit.uid} ...", 0)
 
         # get indices of recorded analog channels in ascending order
         channel_list: List[int] = list()
@@ -561,7 +561,7 @@ class Task(QRunnable):
         samples_in_template = int(samples_per_sec * 0.01)
 
         # the file where unit metrics will be cached
-        unit_cache_file = Path(self._working_dir, f"{UNIT_CACHE_FILE_PREFIX}{unit.label}")
+        unit_cache_file = Path(self._working_dir, f"{UNIT_CACHE_FILE_PREFIX}{unit.uid}")
 
         # compute mean spike waveform for unit on each recorded analog channel. The analog data stream is read from the
         # corresponding channel cache file, which should be present in the working directory.
@@ -615,7 +615,7 @@ class Task(QRunnable):
                         channel_progress_delta = 1 / len(channel_list)
                         total_progress_frac = idx / len(channel_list) + channel_progress_delta * (i + 1) / num_blocks
                         self.signals.progress.emit(
-                            f"Calculating metrics for unit {unit.label} on Omniplex channel {str(idx)} ... ",
+                            f"Calculating metrics for unit {unit.uid} on Omniplex channel {str(idx)} ... ",
                             int(100.0 * total_progress_frac))
                         t0 = time.time()
                     if self._cancelled:
@@ -637,7 +637,7 @@ class Task(QRunnable):
                 raise Exception("Operation cancelled")
 
         # store metrics in cache file
-        self.signals.progress.emit(f"Storing metrics for unit {unit.label} to internal cache...", 99)
+        self.signals.progress.emit(f"Storing metrics for unit {unit.uid} to internal cache...", 99)
         unit_cache_file.unlink(missing_ok=True)
         with open(unit_cache_file, 'wb') as dst:
             dst.write(struct.pack('<f4I', best_snr, primary_channel_idx, unit.num_spikes,
@@ -719,7 +719,7 @@ class Task(QRunnable):
                 t0 = time.time()
 
             for u2 in self._units:
-                if u.label != u2.label:
+                if u.uid != u2.uid:
                     if u.cache_ccg_if_necessary(other_unit=u2):
                         self.signals.data_available.emit(DataType.CCG, u)
                     if self._cancelled:
@@ -797,10 +797,10 @@ class Task(QRunnable):
             raise Exception(f"PCA projection requires 1-3 units, not {len(self._units)}!")
         for u in self._units:
             if u.primary_channel is None:
-                raise Exception(f"Mean spike templates missing for unit {u.label}; cannot do PC analaysis.")
+                raise Exception(f"Mean spike templates missing for unit {u.uid}; cannot do PC analaysis.")
 
         self.signals.progress.emit(f"Computing PCA projections for {len(self._units)} units: "
-                                   f"{','.join([u.label for u in self._units])} ...", -1)
+                                   f"{','.join([u.uid for u in self._units])} ...", -1)
 
         # retrieve channel list from Omniplex file. All analog channel traces should be separately cached already.
         omniplex_file, _, emsg = get_required_data_files(self._working_dir)
@@ -842,7 +842,7 @@ class Task(QRunnable):
                 clips = self._retrieve_channel_clips(ch_idx, clip_starts, clip_dur)
                 all_clips = np.hstack((all_clips, clips))
                 pct = int(100 * (i + 1) / len(channel_list))
-                self.signals.progress.emit(f"Retrieving {n_clips} spike clips for unit {u.label} "
+                self.signals.progress.emit(f"Retrieving {n_clips} spike clips for unit {u.uid} "
                                            f"across {len(channel_list)} analog channels.", pct)
                 if self._cancelled:
                     raise Exception("Operation cancelled")
@@ -865,7 +865,7 @@ class Task(QRunnable):
         # compute the projection of each unit's spikes onto the 2D space defined by the 2 principal components
         clips_in_chunk = np.zeros((Task.SPIKES_PER_BATCH, clip_dur * len(channel_list)), dtype='<h')
         for i, u in enumerate(self._units):
-            self.signals.progress.emit(f"Computing PCA projection for unit {u.label}...", 0)
+            self.signals.progress.emit(f"Computing PCA projection for unit {u.uid}...", 0)
 
             unit_prj = np.zeros((u.num_spikes, 2))
             n_spikes_so_far = 0
@@ -886,7 +886,7 @@ class Task(QRunnable):
                 n_spikes_so_far += n_spikes_in_chunk
 
                 pct = int(100 * n_spikes_so_far / u.num_spikes)
-                self.signals.progress.emit(f"Computing PCA projection for unit {u.label}...", pct)
+                self.signals.progress.emit(f"Computing PCA projection for unit {u.uid}...", pct)
 
                 # cache the PCA projection so far and signal it is available so GUI can update
                 if n_spikes_so_far < u.num_spikes:

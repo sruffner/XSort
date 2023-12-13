@@ -96,7 +96,7 @@ class CorrelogramView(BaseView):
         visible_span = self._hist_span_slider.sliderPosition()
         for i, unit in enumerate(displayed):
             for j in range(num_units):
-                hist = displayed[i].cached_acg if i == j else displayed[i].get_cached_ccg(displayed[j].label)
+                hist = displayed[i].cached_acg if i == j else displayed[i].get_cached_ccg(displayed[j].uid)
                 color = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[i])
                 if i != j:
                     color2 = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[j])
@@ -126,7 +126,7 @@ class CorrelogramView(BaseView):
     def on_focus_neurons_changed(self) -> None:
         self._reset()
 
-    def on_focus_neurons_stats_updated(self, data_type: DataType, unit_label: str) -> None:
+    def on_focus_neurons_stats_updated(self, data_type: DataType, uid: str) -> None:
         """
         Whenever ACG/CCG stats are updated for a neural unit in the current display list, we need to update the
         corresponding plot data items within the subplots currently installed in this view.
@@ -138,9 +138,9 @@ class CorrelogramView(BaseView):
         span_ms = Neuron.FIXED_HIST_SPAN_MS
         unit: Neuron
         for i, unit in enumerate(displayed):
-            if unit.label == unit_label:
+            if unit.uid == uid:
                 for j in range(num_units):
-                    hist = unit.cached_acg if i == j else unit.get_cached_ccg(displayed[j].label)
+                    hist = unit.cached_acg if i == j else unit.get_cached_ccg(displayed[j].uid)
                     plot_item = self._layout_widget.ci.getItem(row=i, col=j)
                     if isinstance(plot_item, pg.PlotItem):
                         pdi = next(iter(plot_item.listDataItems()), None)

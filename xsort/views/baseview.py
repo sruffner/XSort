@@ -56,12 +56,12 @@ class BaseView(QObject):
         """
         pass
 
-    def on_neuron_metrics_updated(self, unit_label: str) -> None:
+    def on_neuron_metrics_updated(self, uid: str) -> None:
         """
         Refresh view contents after the metrics for a neural unit have been updated or retrieved from the
         working directory contents.  Default implementation takes no action.
 
-        :param unit_label: The unique label identifying the neural unit for which updated metrics are available.
+        :param uid: UID identifying the neural unit for which updated metrics are available.
         """
         pass
 
@@ -81,14 +81,14 @@ class BaseView(QObject):
         """
         pass
 
-    def on_focus_neurons_stats_updated(self, data_type: DataType, unit_label: str) -> None:
+    def on_focus_neurons_stats_updated(self, data_type: DataType, uid: str) -> None:
         """
         Refresh view contents after some statistic is computed for a specified neuron within the list of neurons
         currently seelected for display/comparison purposes -- aka the "focus list". Default implementation takes no
         action. Note that the statistic is cached in the :class:`Neuron` instance.
 
         :param data_type: Indicates the type of statistic that was computed or recomputed.
-        :param unit_label: The unique label identifying the neural unit for which a computed statistic is available.
+        :param uid: UID identifying the neural unit for which a computed statistic is available.
         """
         pass
 

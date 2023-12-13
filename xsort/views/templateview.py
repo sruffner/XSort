@@ -162,14 +162,14 @@ class TemplateView(BaseView):
         """
         self._reset()
 
-    def on_neuron_metrics_updated(self, unit_label: str) -> None:
+    def on_neuron_metrics_updated(self, uid: str) -> None:
         """
         If the unit metrics are updated for a neural unit currently displayed in this view, update the rendered spike
         templates for the unit across all available analog channels.
 
-        :param unit_label: Label identifying the updated neural unit.
+        :param uid: Label identifying the updated neural unit.
         """
-        self._refresh(template_span_changed=False, unit_updated=unit_label)
+        self._refresh(template_span_changed=False, uid_updated=uid)
 
     def on_focus_neurons_changed(self) -> None:
         """
@@ -183,7 +183,7 @@ class TemplateView(BaseView):
         """ Refresh the entire view whenever the user changes the template span. """
         self._refresh(template_span_changed=True)
 
-    def _refresh(self, template_span_changed: bool, unit_updated: Optional[str] = None) -> None:
+    def _refresh(self, template_span_changed: bool, uid_updated: Optional[str] = None) -> None:
         """
         Refresh the view in response to a change in the set of displayed neurons, a change in the template span, or
         upon retrieval of the metrics for a neuron.
@@ -195,8 +195,8 @@ class TemplateView(BaseView):
         Note that only one of these changes will occur at a time.
 
         :param template_span_changed: True if template span was changed.
-        :param unit_updated: Label uniquely identifying the neural unit for which metrics have just been retrieved from
-            the application cache; otherwise None.
+        :param uid_updated: UID  identifying the neural unit for which metrics have just been retrieved from the
+            application cache; otherwise None.
         """
         if len(self.data_manager.channel_indices) == 0:
             return
@@ -205,12 +205,12 @@ class TemplateView(BaseView):
         displayed = self.data_manager.neurons_with_display_focus
 
         # if refresh is because a unit's metrics were updated, but that unit is not displayed, there's nothing to do.
-        if isinstance(unit_updated, str) and not (unit_updated in [u.label for u in displayed]):
+        if isinstance(uid_updated, str) and not (uid_updated in [u.uid for u in displayed]):
             return
 
         for k, template_dict in enumerate(self._spike_templates):
             # when refresing because a unit's metrics were updated, only update the templates for that unit
-            if isinstance(unit_updated, str) and ((k >= len(displayed)) or (displayed[k].label != unit_updated)):
+            if isinstance(uid_updated, str) and ((k >= len(displayed)) or (displayed[k].uid != uid_updated)):
                 continue
             row: int = 0
             col: int = 0

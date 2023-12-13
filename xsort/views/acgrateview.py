@@ -128,7 +128,7 @@ class ACGRateView(BaseView):
     def on_focus_neurons_changed(self) -> None:
         self._reset()
 
-    def on_focus_neurons_stats_updated(self, data_type: DataType, unit_label: str) -> None:
+    def on_focus_neurons_stats_updated(self, data_type: DataType, uid: str) -> None:
         """
         Whenever the ACG-vs-rate histogram is updated for a neural unit in the current display list, we need to update
         the corresponding plot data item within the subplots currently installed in this view.
@@ -139,7 +139,7 @@ class ACGRateView(BaseView):
         span_ms = Neuron.FIXED_HIST_SPAN_MS
         unit: Neuron
         for i, unit in enumerate(displayed):
-            if unit.label == unit_label:
+            if unit.uid == uid:
                 plot_item: pg.PlotItem = self._layout_widget.ci.getItem(row=0, col=i)
                 color = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[i])
                 rate_bins, acgs = displayed[i].cached_acg_vs_rate()

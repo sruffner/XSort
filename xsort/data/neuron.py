@@ -138,7 +138,9 @@ class Neuron:
         Initialize a neural unit.
 
         :param idx: An integer index assigned to unit. For neural units obtained from the original spike sorter results
-        file, this should be the ordinal index (starting from 1) of the unit.
+        file, this should be the ordinal index (starting from 1) of the unit. For units created by merging other units
+        or splitting one unit into two populations of spikes, this index will be larger than that of the last unit
+        extracted from the orinal spike sorter file.
         :param spike_times: The unit's spike train, ie, an array of spike occurrence times **in seconds elapsed since
         the start of the electrophysiological recording**.
         :param is_complex: True for the complex spikes train of a Purkinje cell, False for the simple spikes train of a
@@ -149,11 +151,11 @@ class Neuron:
         The integer index assigned to unit. Note that a Purkinje cell has two associated units, which willl have the
         same index -- so this does not uniquely identify a unit.
         """
-        self._label = f"{str(idx)}{'c' if is_complex else 's'}" if isinstance(is_complex, bool) else str(idx)
+        self._uid = f"{str(idx)}{'c' if is_complex else 's'}" if isinstance(is_complex, bool) else str(idx)
         """ 
-        A label which uniquely identifies the unit and has one of three forms: 'N' for a non-Purkinje cell; 'Ns' for
-        the simple spikes of a Purkinje cell, and 'Nc' for the complex spikes of the same Purkinje cell -- where N is
-        the integer index assigned to the unit.
+        A short string which uniquely identifies the unit and has one of three forms: 'N' for a non-Purkinje cell; 'Ns' 
+        for the simple spikes of a Purkinje cell, and 'Nc' for the complex spikes of the same Purkinje cell -- where N 
+        is the integer index assigned to the unit.
         """
         self.spike_times = spike_times.astype(dtype='<f')
         """ The unit's spike train: spike times in seconds elapsed since the start of EPhys recording (f32). """
@@ -213,17 +215,17 @@ class Neuron:
         """
 
     @property
-    def label(self) -> str:
+    def uid(self) -> str:
         """
-        A label uniquely identifying this neural unit. For non-Purkinje cell units, this is simply an integer index
-        (starting from 1) assigned to the unit. For a neural unit representing the simple or complex spike train of a
-        Purkinje cell, the character 's' or 'c' is appended to that index.
+        A short string uniquely identifying this neural unit. For non-Purkinje cell units, this is simply an integer
+        index (starting from 1) assigned to the unit. For a neural unit representing the simple or complex spike train
+        of a Purkinje cell, the character 's' or 'c' is appended to that index.
         """
-        return self._label
+        return self._uid
 
     def is_purkinje(self) -> bool:
         """ True if this neural unit represents the simple or complex spike train of a Purkinje cell. """
-        return (self._label.find('c') > 0) or (self._label.find('s') > 0)
+        return (self._uid.find('c') > 0) or (self._uid.find('s') > 0)
 
     @property
     def mean_firing_rate_hz(self) -> float:
@@ -315,10 +317,10 @@ class Neuron:
         the per-channel spike template waveforms have not yet been computed for either unit, then this metric is not yet
         determined and 0.0 is returned.**
         """
-        if other_unit.label == self.label:
+        if other_unit.uid == self.uid:
             return 1.0
-        elif other_unit.label in self._cached_similarity:
-            return self._cached_similarity[other_unit.label]
+        elif other_unit.uid in self._cached_similarity:
+            return self._cached_similarity[other_unit.uid]
 
         similarity = 0.0
         if len(self._templates) > 0 and len(other_unit._templates) > 0:
@@ -332,8 +334,8 @@ class Neuron:
                 x2 = np.hstack((x2, other_unit._templates[idx]))
             cc = np.corrcoef(x1, x2)
             similarity = float(cc[0, 1])
-            self._cached_similarity[other_unit.label] = similarity
-            other_unit._cached_similarity[self.label] = similarity
+            self._cached_similarity[other_unit.uid] = similarity
+            other_unit._cached_similarity[self.uid] = similarity
         return similarity
 
     def get_template_for_channel(self, idx: int) -> Optional[np.ndarray]:
@@ -481,12 +483,12 @@ class Neuron:
         :param other_unit: The other neural unit.
         :return: True if the CCG was computed, False if it was already cached.
         """
-        ccg = self._cached_ccgs.get(other_unit.label)
+        ccg = self._cached_ccgs.get(other_unit.uid)
         if ccg is None:
             out, n = stats.generate_cross_correlogram(self.spike_times, other_unit.spike_times, self.FIXED_HIST_SPAN_MS)
             if n > 0:
                 out = out * (1.0 / n)
-            self._cached_ccgs[other_unit.label] = out
+            self._cached_ccgs[other_unit.uid] = out
             return True
         return False
 

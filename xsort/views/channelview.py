@@ -226,15 +226,14 @@ class ChannelView(BaseView):
                     x, y = self._prepare_clip_data(unit, seg, offset)
                     pdi.setData(x=x, y=y)
 
-    def on_neuron_metrics_updated(self, unit_label: str) -> None:
+    def on_neuron_metrics_updated(self, uid: str) -> None:
         """
         When the metrics of a neural unit are updated, this handler refreshes the spike clips for that unit IF it is
         in the current neuron display list.
-        :param unit_label: Label identifying the neural unit for which metrics were updated.
         """
         displayed = self.data_manager.neurons_with_display_focus
         for k, pdi in enumerate(self._unit_spike_clips):
-            if (k < len(displayed)) and (displayed[k].label == unit_label):
+            if (k < len(displayed)) and (displayed[k].uid == uid):
                 u = displayed[k]
                 offset = self._trace_offset * self.data_manager.channel_indices.index(u.primary_channel)
                 seg = self.data_manager.channel_trace(u.primary_channel)

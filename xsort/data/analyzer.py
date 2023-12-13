@@ -198,7 +198,7 @@ class Analyzer(QObject):
         """
         out: List[Neuron] = list()
         for uid in self._focus_neurons:
-            u = next((n for n in self._neurons if n.label == uid), None)
+            u = next((n for n in self._neurons if n.uid == uid), None)
             if u:
                 out.append(u)
         return out
@@ -225,23 +225,22 @@ class Analyzer(QObject):
         except ValueError:
             return None
 
-    def update_neurons_with_display_focus(self, unit_label: str) -> None:
+    def update_neurons_with_display_focus(self, uid: str) -> None:
         """
         Update the list of neural units currently selected for display/comparison purposes. The specified unit is
         removed from the selection list if it is already there; otherwise, it is appended to the end of the list unless
         _MAX_NUM_FOCUS_NEURONS are already selected. **A signal is emitted whenever the neuron display list changes.**
 
-        :param unit_label: Unique label identifying the neural unit to be added or removed from the selection list. If
-            the label is invalid, or the current display list is full and does not contain the specified unit, no action
-            is taken.
+        :param uid: The UID of the neural unit to be added or removed from the selection list. If the UID is invalid, or
+            the current display list is full and does not contain the specified unit, no action is taken.
         """
-        if unit_label in self._focus_neurons:
-            self._focus_neurons.remove(unit_label)
+        if uid in self._focus_neurons:
+            self._focus_neurons.remove(uid)
         elif ((len(self._focus_neurons) == self.MAX_NUM_FOCUS_NEURONS) or not
-                (unit_label in [n.label for n in self._neurons])):
+                (uid in [n.uid for n in self._neurons])):
             return
         else:
-            self._focus_neurons.append(unit_label)
+            self._focus_neurons.append(uid)
 
         # the focus list changed, we need to cancel an ongoing task that is computing stats and clear out any cached
         # PCA projections
@@ -392,12 +391,12 @@ class Analyzer(QObject):
             unit_with_metrics: Neuron = data
             found = False
             for i in range(len(self._neurons)):
-                if self._neurons[i].label == unit_with_metrics.label:
+                if self._neurons[i].uid == unit_with_metrics.uid:
                     self._neurons[i] = unit_with_metrics
                     found = True
                     break
             if found:
-                self.data_ready.emit(DataType.NEURON, unit_with_metrics.label)
+                self.data_ready.emit(DataType.NEURON, unit_with_metrics.uid)
         elif (data_type == DataType.CHANNELTRACE) and isinstance(data, ChannelTraceSegment):
             seg: ChannelTraceSegment = data
             if seg.channel_index in self._channel_segments:
@@ -407,4 +406,4 @@ class Analyzer(QObject):
                 isinstance(data, Neuron):
             # statistics cached in neural unit record on background thread -- NOT supplying a new Neuron instance!
             unit: Neuron = data
-            self.data_ready.emit(data_type, unit.label)
+            self.data_ready.emit(data_type, unit.uid)

@@ -69,7 +69,7 @@ class _NeuronTableModel(QAbstractTableModel):
                 idx = self._sorted_indices[r]
                 return self._to_string(self._data_manager.neurons[idx], c)
             elif (role == Qt.BackgroundRole) or (role == Qt.ForegroundRole):
-                u = self._data_manager.neurons[self._sorted_indices[r]].label
+                u = self._data_manager.neurons[self._sorted_indices[r]].uid
                 color_str = self._data_manager.display_color_for_neuron(u)
                 bkg_color = None if color_str is None else QColor.fromString(color_str)
                 if role == Qt.BackgroundRole:
@@ -83,14 +83,14 @@ class _NeuronTableModel(QAbstractTableModel):
     def _to_string(self, u: Neuron, col: int):
         primary = self._data_manager.primary_neuron
         switcher = {
-            0: u.label,
+            0: u.uid,
             1: '' if u.primary_channel is None else str(u.primary_channel),
             2: str(u.num_spikes),
             3: f"{u.mean_firing_rate_hz:.2f}",
             4: f"{u.snr:.2f}" if isinstance(u.snr, float) else "",
             5: f"{u.amplitude:.1f}" if isinstance(u.amplitude, float) else "",
             6: f"{(100.0 * u.fraction_of_isi_violations):.2f}",
-            7: "" if (primary is None) else ("---" if (primary.label == u.label) else f"{u.similarity_to(primary):.2f}")
+            7: "" if (primary is None) else ("---" if (primary.uid == u.uid) else f"{u.similarity_to(primary):.2f}")
         }
         return switcher.get(col, '')
 
@@ -123,15 +123,15 @@ class _NeuronTableModel(QAbstractTableModel):
             }
             self._sorted_indices = switcher.get(self._sort_col)
 
-    def unit_label_for_row(self, row: int) -> Optional[str]:
+    def unit_uid_for_row(self, row: int) -> Optional[str]:
         """
-        The unit label for the specified row in the table.
+        The UID for the neural unit displayed in the specified row in the table.
         :param row: Row index
-        :return: Corresponding neural unit label, or None if row index is invalid.
+        :return: UID of the corresponding neural unit, or None if row index is invalid.
         """
         if 0 <= row < self.rowCount():
             idx = self._sorted_indices[row]
-            return self._data_manager.neurons[idx].label
+            return self._data_manager.neurons[idx].uid
         return None
 
 
@@ -185,14 +185,14 @@ class NeuronView(BaseView):
     def on_working_directory_changed(self) -> None:
         self._model.reload_table_data()
 
-    def on_neuron_metrics_updated(self, unit_label: str) -> None:
+    def on_neuron_metrics_updated(self, uid: str) -> None:
         self._model.reload_table_data()
 
     def on_focus_neurons_changed(self) -> None:
         self._model.reload_table_data()
 
     def on_item_clicked(self, index: QModelIndex) -> None:
-        u = self._model.unit_label_for_row(index.row())
+        u = self._model.unit_uid_for_row(index.row())
         if not (u is None):
             self.data_manager.update_neurons_with_display_focus(u)
 

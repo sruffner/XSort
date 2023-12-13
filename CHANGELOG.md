@@ -5,6 +5,7 @@
 clicking anywhere on the table header. The UID and Channel columns may not be hidden. Column visibility is saved in
 user settings at application shutdown and restored from settings at startup.
 - Added an "About XSort" dialog.
+- Created a skeleton "user guide" which appears in a dock widget like the other XSort views. Contents TBD.
 
 ## v0.1.0 (11/28/2023)
 - Defined similarity metric: The correlation coefficient of two vectors: the horizontal concatenation of the 

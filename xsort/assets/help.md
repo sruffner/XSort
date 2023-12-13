@@ -8,6 +8,8 @@ data in the Stephen G. Lisberger lab at Duke University.
 ### Overview
 
 
+### The User Interface
+
 ### Neural Units Table
 
 
