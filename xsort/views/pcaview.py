@@ -143,11 +143,11 @@ class PCAView(BaseView):
     def on_focus_neurons_changed(self) -> None:
         self._refresh()
 
-    def on_focus_neurons_stats_updated(self, data_type: DataType, uid: str) -> None:
+    def on_focus_neurons_stats_updated(self, data_type: DataType, unit_label: str) -> None:
         if data_type == DataType.PCA:
             displayed = self.data_manager.neurons_with_display_focus
             for k in range(len(displayed)):
-                if displayed[k].uid == uid:
+                if displayed[k].uid == unit_label:
                     self._pca_data[k].setData(displayed[k].cached_pca_projection())
                     break
 

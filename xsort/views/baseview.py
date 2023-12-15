@@ -81,6 +81,14 @@ class BaseView(QObject):
         """
         pass
 
+    def on_neuron_label_updated(self, uid: str) -> None:
+        """
+        Refresh view contents after the label of any unit in the neural unit list is updated. Default implementation
+        takes no action.
+        :param uid: UID identifying the neural unit that was re-labeled.
+        """
+        pass
+
     def on_focus_neurons_stats_updated(self, data_type: DataType, uid: str) -> None:
         """
         Refresh view contents after some statistic is computed for a specified neuron within the list of neurons

@@ -22,9 +22,12 @@ class _NeuronTableModel(QAbstractTableModel):
     within that focus list.
     """
 
-    _header_labels: List[str] = ['UID', 'Channel', '#Spikes', 'Rate (Hz)',
+    _header_labels: List[str] = ['UID', 'Label', 'Channel', '#Spikes', 'Rate (Hz)',
                                  'SNR', 'Amp(\u00b5V)', '%ISI<1', 'Similarity']
     """ Column header labels. """
+
+    LABEL_COL_IDX = 1
+    """ Index of the 'Label' column -- unit labels may be edited. """
 
     def __init__(self, data_manager: Analyzer):
         """ Construct an initally empty neurons table model. """
@@ -41,7 +44,7 @@ class _NeuronTableModel(QAbstractTableModel):
 
     def hideable_columns(self) -> List[int]:
         """ The column indices of all columns that can be optionally hidden hidden. """
-        return [i for i in range(2, len(self._header_labels))]
+        return [i for i in range(1, len(self._header_labels))]
 
     def reload_table_data(self):
         self._resort()
@@ -53,22 +56,37 @@ class _NeuronTableModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()) -> int:
         return len(self._header_labels)
 
-    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole) -> Any:
-        if role != Qt.DisplayRole:
+    def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
+        if role != Qt.ItemDataRole.DisplayRole:
             return None
         if (orientation == Qt.Horizontal) and (0 <= section < self.columnCount()):
             return self._header_labels[section]
         else:
             return None
 
-    def data(self, index, role: int = Qt.DisplayRole) -> Any:
+    def flags(self, index):
+        f = super().flags(index)
+        if index.column() == self.LABEL_COL_IDX:
+            f = f | Qt.ItemFlag.ItemIsEditable
+        return f
+
+    def setData(self, index, value, role=...):
+        r, c = index.row(), index.column()
+        if ((0 <= r < self.rowCount()) and (index.column() == self.LABEL_COL_IDX) and
+                (role == Qt.ItemDataRole.EditRole)):
+            idx = self._sorted_indices[index.row()]
+            return self._data_manager.edit_unit_label(idx, str(value))
+        else:
+            return super().setData(index, value, role)
+
+    def data(self, index, role: int = Qt.ItemDataRole.DisplayRole) -> Any:
         r = index.row()
         c = index.column()
         if (0 <= r < self.rowCount()) and (0 <= c <= self.columnCount()):
-            if role == Qt.DisplayRole:
+            if role in [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole]:
                 idx = self._sorted_indices[r]
                 return self._to_string(self._data_manager.neurons[idx], c)
-            elif (role == Qt.BackgroundRole) or (role == Qt.ForegroundRole):
+            elif (role == Qt.ItemDataRole.BackgroundRole) or (role == Qt.ItemDataRole.ForegroundRole):
                 u = self._data_manager.neurons[self._sorted_indices[r]].uid
                 color_str = self._data_manager.display_color_for_neuron(u)
                 bkg_color = None if color_str is None else QColor.fromString(color_str)
@@ -76,7 +94,7 @@ class _NeuronTableModel(QAbstractTableModel):
                     return bkg_color
                 else:
                     return None if color_str is None else QColor(Qt.black if bkg_color.lightness() < 140 else Qt.white)
-            elif role == Qt.TextAlignmentRole:
+            elif role == Qt.ItemDataRole.TextAlignmentRole:
                 return Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
         return None
 
@@ -84,13 +102,14 @@ class _NeuronTableModel(QAbstractTableModel):
         primary = self._data_manager.primary_neuron
         switcher = {
             0: u.uid,
-            1: '' if u.primary_channel is None else str(u.primary_channel),
-            2: str(u.num_spikes),
-            3: f"{u.mean_firing_rate_hz:.2f}",
-            4: f"{u.snr:.2f}" if isinstance(u.snr, float) else "",
-            5: f"{u.amplitude:.1f}" if isinstance(u.amplitude, float) else "",
-            6: f"{(100.0 * u.fraction_of_isi_violations):.2f}",
-            7: "" if (primary is None) else ("---" if (primary.uid == u.uid) else f"{u.similarity_to(primary):.2f}")
+            1: u.label,
+            2: '' if u.primary_channel is None else str(u.primary_channel),
+            3: str(u.num_spikes),
+            4: f"{u.mean_firing_rate_hz:.2f}",
+            5: f"{u.snr:.2f}" if isinstance(u.snr, float) else "",
+            6: f"{u.amplitude:.1f}" if isinstance(u.amplitude, float) else "",
+            7: f"{(100.0 * u.fraction_of_isi_violations):.2f}",
+            8: "" if (primary is None) else ("---" if (primary.uid == u.uid) else f"{u.similarity_to(primary):.2f}")
         }
         return switcher.get(col, '')
 
@@ -110,15 +129,16 @@ class _NeuronTableModel(QAbstractTableModel):
         if num > 1:
             switcher = {
                 0: sorted(range(num), key=lambda k: k, reverse=self._reversed),
-                1: sorted(range(num), key=lambda k: -1 if (u[k].primary_channel is None) else u[k].primary_channel,
+                1: sorted(range(num), key=lambda k: u[k].label, reverse=self._reversed),
+                2: sorted(range(num), key=lambda k: -1 if (u[k].primary_channel is None) else u[k].primary_channel,
                           reverse=self._reversed),
-                2: sorted(range(num), key=lambda k: u[k].num_spikes, reverse=self._reversed),
-                3: sorted(range(num), key=lambda k: u[k].mean_firing_rate_hz, reverse=self._reversed),
-                4: sorted(range(num), key=lambda k: 0 if (u[k].snr is None) else u[k].snr, reverse=self._reversed),
-                5: sorted(range(num), key=lambda k: 0 if (u[k].amplitude is None) else u[k].amplitude,
+                3: sorted(range(num), key=lambda k: u[k].num_spikes, reverse=self._reversed),
+                4: sorted(range(num), key=lambda k: u[k].mean_firing_rate_hz, reverse=self._reversed),
+                5: sorted(range(num), key=lambda k: 0 if (u[k].snr is None) else u[k].snr, reverse=self._reversed),
+                6: sorted(range(num), key=lambda k: 0 if (u[k].amplitude is None) else u[k].amplitude,
                           reverse=self._reversed),
-                6: sorted(range(num), key=lambda k: u[k].fraction_of_isi_violations, reverse=self._reversed),
-                7: sorted(range(num), key=lambda k: k if (primary is None) else u[k].similarity_to(primary),
+                7: sorted(range(num), key=lambda k: u[k].fraction_of_isi_violations, reverse=self._reversed),
+                8: sorted(range(num), key=lambda k: k if (primary is None) else u[k].similarity_to(primary),
                           reverse=self._reversed)
             }
             self._sorted_indices = switcher.get(self._sort_col)
@@ -160,7 +180,8 @@ class NeuronView(BaseView):
         self._model.sort(0)   # to ensure table view is initially sorted by column 0 in ascending order
         self._table_view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self._table_view.setSelectionMode(QTableView.SelectionMode.NoSelection)
-        self._table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._table_view.horizontalHeader().setStretchLastSection(True)
         self._table_view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self._table_view.verticalHeader().setVisible(False)
         size = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
@@ -189,6 +210,9 @@ class NeuronView(BaseView):
         self._model.reload_table_data()
 
     def on_focus_neurons_changed(self) -> None:
+        self._model.reload_table_data()
+
+    def on_neuron_label_updated(self, uid: str) -> None:
         self._model.reload_table_data()
 
     def on_item_clicked(self, index: QModelIndex) -> None:

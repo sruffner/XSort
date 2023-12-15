@@ -1,9 +1,10 @@
 from pathlib import Path
-from typing import Union, Optional, Dict, Any, List
+from typing import Union, Optional, Dict, Any, List, Tuple
 
 from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer
 
 from xsort.data import PL2
+from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
 from xsort.data.tasks import Task, TaskType, get_required_data_files, load_spike_sorter_results
 
@@ -45,6 +46,8 @@ class Analyzer(QObject):
     Signals that the elapsed starting time (relative to that start of the electrophysiological recording) for all
     analog channel trace segments has just changed.
     """
+    neuron_label_updated: Signal = Signal(str)
+    """ Signals that a neural unit's label wwa successfully modified. Arg(str): UID of affected unit. """
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,6 +79,8 @@ class Analyzer(QObject):
         """
         self._focus_neurons: List[str] = list()
         """ The labels of the neural units currently selected for display focus, in selection order. """
+        self._edit_history: List[UserEdit] = list()
+        """ The edit history, a record of all user-initiated changes to the list of neural units, in chrono order. """
         self._thread_pool = QThreadPool()
         """ Managed thread pool for running slow background tasks. """
 
@@ -292,6 +297,25 @@ class Analyzer(QObject):
         self._background_tasks[t] = task
         self._thread_pool.start(task)
 
+    def prepare_for_shutdown(self) -> None:
+        """
+        Prepare for XSort to shutdown. The analyzer saves the edit history for the current working directory and
+        cancels any running background tasks. A long-running task will prevent the application from exiting. There
+        STILL may be a noticeable delay before the application exits because certain tasks may take several seconds
+        to respond to the cancel request.
+        """
+        for task_type in self._background_tasks:
+            self._cancel_background_task(task_type)
+        self.save_edit_history()
+
+    def save_edit_history(self):
+        """
+        Save the edit history for the current XSort working directory. Be sure to call this method prior to
+        application shutdown.
+        """
+        if isinstance(self._working_directory, Path) and self._working_directory.is_dir():
+            UserEdit.save_edit_history(self._working_directory, self._edit_history)
+
     def change_working_directory(self, p: Union[str, Path]) -> Optional[str]:
         """
         Change the analyzer's current working directory. If the specified directory exists and contains the requisite
@@ -303,6 +327,8 @@ class Analyzer(QObject):
         :return: An error description if the cancdidate directory does not exist or does not contain the expected data
             files; else None.
         """
+        self.save_edit_history()
+
         _p = Path(p) if isinstance(p, str) else p
         if not isinstance(_p, Path):
             return "Invalid directory path"
@@ -335,6 +361,11 @@ class Analyzer(QObject):
         if len(emsg) > 0:
             return f"Unable to read spike sorter results from PKL file: {emsg}"
 
+        # load edit history file (if present)
+        emsg, edit_history = UserEdit.load_edit_history(_p)
+        if len(emsg) > 0:
+            return f"Error reading edit history: {emsg}"
+
         # success
         self._working_directory = _p
         self._pl2_file = pl2_file
@@ -343,7 +374,12 @@ class Analyzer(QObject):
         self._channel_seg_start = 0
         self._pkl_file = pkl_file
         self._neurons = neurons
+        self._edit_history = edit_history
         self._focus_neurons.clear()
+
+        # apply full edit history to bring neuron list up-to-date
+        for edit_rec in self._edit_history:
+            edit_rec.apply_to(self._neurons)
 
         # signal views
         self.working_directory_changed.emit()
@@ -353,6 +389,60 @@ class Analyzer(QObject):
         self._launch_background_task(TaskType.BUILDCACHE)
 
         return None
+
+    def edit_unit_label(self, idx: int, label: str) -> bool:
+        """
+        Edit the label assigned to a neural unit.
+        :param idx: Ordinal position of unit in the neural unit list.
+        :param label: The new label. Any leading or trailing whitespace is removed. No action taken if this matches the
+            current label
+        :return: True if successful; False if specified unit not found or the specified label is invalid.
+        """
+        label = label.strip()
+        try:
+            u = self._neurons[idx]
+            prev_label = u.label
+            u.label = label
+            edit_rec = UserEdit(op=UserEdit.LABEL, params=[u.uid, prev_label, label])
+            self._edit_history.append(edit_rec)
+            return True
+        except Exception:
+            pass
+        return False
+
+    def undo_last_edit(self) -> bool:
+        """
+        Undo the most recent user-initiated edit to the current neural unit list.
+        :return: True if undo succeeds, False otherwise.
+        """
+        if len(self._edit_history) == 0:
+            return False
+        edit_rec = self._edit_history.pop()
+        if edit_rec.operation == UserEdit.LABEL:
+            for u in self._neurons:
+                if u.uid == edit_rec.affected_uids and u.label == edit_rec.unit_label:
+                    u.label = edit_rec.previous_unit_label
+                    self.neuron_label_updated.emit(u.uid)
+                    return True
+            return False
+        elif edit_rec.operation == UserEdit.DELETE:
+            return False   # TODO: IMPLEMENT
+        elif edit_rec.operation == UserEdit.MERGE:
+            return False   # TODO: IMPLEMENT
+        else:   # TODO: IMPLEMENT - SPLIT
+            return False
+
+    def undo_last_edit_description(self) -> Optional[Tuple[str, str]]:
+        """
+        Get a short and longer description of the most recent user-initiated edit to the current neural unit list -- ie,
+        the edit that will be "undone" if :method:`undo_last_edit()` is invoked.
+        :return: A 2-tuple (S, L) containing the short and longer descriptions, or None if the edit history is empty.
+        """
+        try:
+            edit_rec = self._edit_history[-1]
+            return edit_rec.short_description, edit_rec.longer_description
+        except IndexError:
+            return None
 
     @Slot(str, int)
     def on_task_progress(self, desc: str, pct: int) -> None:
@@ -392,6 +482,9 @@ class Analyzer(QObject):
             found = False
             for i in range(len(self._neurons)):
                 if self._neurons[i].uid == unit_with_metrics.uid:
+                    # HACK: The Neuron object is created in the background with the added metrics, but it won't
+                    # include the user-specified label. So here we have to restore the label
+                    unit_with_metrics.label = self._neurons[i].label
                     self._neurons[i] = unit_with_metrics
                     found = True
                     break

@@ -95,6 +95,8 @@ class Neuron:
     """ The +/- time span (ms) for most neural unit histograms (ISI, ACG, CCG). """
     ACG_VS_RATE_SPAN_MS: int = 100
     """ The +/- time span (ms) for the neural unit 3D histogram representing ACG as a function of firing rate. """
+    MAX_LABEL_LEN: int = 25
+    """ Maximum length of any user-defined label attached to a neural unit. """
 
     @staticmethod
     def omniplex_channel_id(is_wideband: bool, ch: int) -> str:
@@ -111,9 +113,10 @@ class Neuron:
     @staticmethod
     def dissect_unit_label(label: str) -> Tuple[int, Optional[bool]]:
         """
-        By design, the label uniquely identifying a neural unit in XSort has three possible forms: a simple integer
-        string for non-Purkinje units, 'Nc' for a unit representing the complex spikes from a Purkinje cell assigned
-        the integer index N, and 'Ns' for a unit representing the simple spikes from that same Purkinje cell.
+        By design, the UID uniquely identifying a neural unit in XSort has four possible forms: a simple integer
+        string for non-Purkinje units, 'Nx' for a unit created as the result of merging two units or splitting another
+        unit, 'Nc' for a unit representing the complex spikes from a Purkinje cell assigned the integer index N, and
+        'Ns' for a unit representing the simple spikes from that same Purkinje cell.
 
         This method dissects the label to extract the integer N and a flag indicating whether the unit is a Purkinje
         complex spike train (True), a Purkinje simple spike train (False), or a non-Purkinje unit (None)
@@ -128,34 +131,61 @@ class Neuron:
             index = int(index_str)
         else:
             is_complex = None
-            if not label.isdigit():
+            index_str = label[:-1] if label.endswith('x') else label
+            if not index_str.isdigit():
                 raise Exception("Invalid unit label")
-            index = int(label)
+            index = int(index_str)
         return index, is_complex
 
-    def __init__(self, idx: int, spike_times: np.ndarray, is_complex: Optional[bool] = None):
+    @staticmethod
+    def merge(unit1: 'Neuron', unit2: 'Neuron', idx: int) -> 'Neuron':
+        """
+        Create a new neural unit that merges the spike trains of the two specified units, with the merged spike times
+        re-sorted in in chronological order.
+        :param unit1: A neural unit.
+        :param unit2: A second neural unit.
+        :param idx: The index assigned to the merged unit. The unit's UID will have the form f"{idx}x", where the 'x'
+            indicates the unit is the result of a merge (or split).
+        :return: The merged unit.
+        """
+        merged_spikes = np.concatenate((unit1.spike_times, unit2.spike_times))
+        merged_spikes.sort()
+        return Neuron(idx, merged_spikes, is_complex=None, is_mod=True)
+
+    def __init__(self, idx: int, spike_times: np.ndarray, is_complex: Optional[bool] = None, is_mod: bool = False):
         """
         Initialize a neural unit.
 
         :param idx: An integer index assigned to unit. For neural units obtained from the original spike sorter results
-        file, this should be the ordinal index (starting from 1) of the unit. For units created by merging other units
-        or splitting one unit into two populations of spikes, this index will be larger than that of the last unit
-        extracted from the orinal spike sorter file.
+            file, this should be the ordinal index (starting from 1) of the unit. For units created by merging other
+            units or splitting one unit into two populations of spikes, this index will be larger than that of the last
+            unit extracted from the orinal spike sorter file.
         :param spike_times: The unit's spike train, ie, an array of spike occurrence times **in seconds elapsed since
-        the start of the electrophysiological recording**.
+            the start of the electrophysiological recording**.
         :param is_complex: True for the complex spikes train of a Purkinje cell, False for the simple spikes train of a
-        Purkinje cell; and None for a non-Purkinje cell.
+            Purkinje cell; and None for a non-Purkinje cell.
+        :param is_mod: True if the unit is the result of merging two units or splitting a unit into two populations of
+            spikes. The UID for such units has the letter 'x' appended to the specified index.
         """
         self._idx = idx
         """
         The integer index assigned to unit. Note that a Purkinje cell has two associated units, which willl have the
         same index -- so this does not uniquely identify a unit.
         """
-        self._uid = f"{str(idx)}{'c' if is_complex else 's'}" if isinstance(is_complex, bool) else str(idx)
+        if isinstance(is_complex, bool):
+            suffix = 'c' if is_complex else 's'
+        else:
+            suffix = 'x' if is_mod else ''
+        self._uid = f"{str(idx)}{suffix}"
         """ 
-        A short string which uniquely identifies the unit and has one of three forms: 'N' for a non-Purkinje cell; 'Ns' 
-        for the simple spikes of a Purkinje cell, and 'Nc' for the complex spikes of the same Purkinje cell -- where N 
-        is the integer index assigned to the unit.
+        A short string which uniquely identifies the unit and has one of four forms: 'N' for a non-Purkinje cell; 'Ns' 
+        for the simple spikes of a Purkinje cell, 'Nc' for the complex spikes of the same Purkinje cell, and 'Nx' for
+        a unit that is the result of merging two units or splitting a unit -- where N is the assigned integer index.
+        """
+        self._label = ""
+        """ 
+        A short user-defined label attached to the unit -- typically the putative neuron type. Restricted in 
+        length. May contain spaces but no commas. Initially an empty string when unit is "created".
         """
         self.spike_times = spike_times.astype(dtype='<f')
         """ The unit's spike train: spike times in seconds elapsed since the start of EPhys recording (f32). """
@@ -222,6 +252,30 @@ class Neuron:
         of a Purkinje cell, the character 's' or 'c' is appended to that index.
         """
         return self._uid
+
+    @property
+    def label(self) -> str:
+        """
+        An arbitrary, user-defined label attached to the unit, typically the putative neuron type. Will be an empty
+        string if no label has been assigned to this unit.
+        """
+        return self._label
+
+    @label.setter
+    def label(self, s: str) -> None:
+        """
+        Specify a label for the unit.
+
+        :param s: The candidate label. No commas allowed. May not exceed 25 characters in length after leading and
+            trailing whitespace removed.
+        :raises ValueError: If candiaate label is invalid.
+        """
+        if not isinstance(s, str):
+            raise ValueError('Unit label must be a string')
+        s = s.strip()
+        if (len(s) > Neuron.MAX_LABEL_LEN) or (s.find(',') > -1):
+            raise ValueError('Unit label too long or contains a comma')
+        self._label = s
 
     def is_purkinje(self) -> bool:
         """ True if this neural unit represents the simple or complex spike train of a Purkinje cell. """

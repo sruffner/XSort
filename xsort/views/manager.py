@@ -83,7 +83,13 @@ class ViewManager(QObject):
         self._quit_action: Optional[QAction] = None
         self._about_action: Optional[QAction] = None
         self._about_qt_action: Optional[QAction] = None
+        self._undo_action: Optional[QAction] = None
+        self._delete_action: Optional[QAction] = None
+        self._merge_action: Optional[QAction] = None
+        self._split_action: Optional[QAction] = None
+
         self._file_menu: Optional[QMenu] = None
+        self._edit_menu: Optional[QMenu] = None
         self._view_menu: Optional[QMenu] = None
         self._help_menu: Optional[QMenu] = None
 
@@ -95,6 +101,7 @@ class ViewManager(QObject):
         self.data_analyzer.data_ready.connect(self.on_data_ready)
         self.data_analyzer.focus_neurons_changed.connect(self.on_focus_neurons_changed)
         self.data_analyzer.channel_seg_start_changed.connect(self.on_channel_seg_start_changed)
+        self.data_analyzer.neuron_label_updated.connect(self.on_neuron_label_updated)
 
         self._main_window.setMinimumSize(800, 600)
         self._restore_from_settings()
@@ -123,13 +130,27 @@ class ViewManager(QObject):
 
         self._about_action = QAction("&About", self._main_window, statusTip=f"About {APP_NAME}", triggered=self._about)
 
-        self._about_qt_action = QAction("About &Qt", self._main_window, statusTip="About the Qt library",
+        self._about_qt_action = QAction("About Qt", self._main_window, statusTip="About the Qt library",
                                         triggered=QCoreApplication.instance().aboutQt)
+
+        self._undo_action = QAction("&Undo", self._main_window, shortcut="Ctrl+Z", enabled=False, triggered=self._undo)
+        self._delete_action = QAction("&Delete", self._main_window, shortcut="Ctrl+X", enabled=False)
+        self._merge_action = QAction("&Merge", self._main_window, shortcut="Ctrl+M", enabled=False)
+        self._split_action = QAction("S&plit", self._main_window, shortcut="Ctrl+Y", enabled=False)
+
         # menus
         self._file_menu = self._main_window.menuBar().addMenu("&File")
         self._file_menu.addAction(self._open_action)
         self._file_menu.addSeparator()
         self._file_menu.addAction(self._quit_action)
+        self._file_menu.setToolTipsVisible(True)
+
+        self._edit_menu = self._main_window.menuBar().addMenu("&Edit")
+        self._edit_menu.addAction(self._undo_action)
+        self._edit_menu.addSeparator()
+        self._edit_menu.addAction(self._delete_action)
+        self._edit_menu.addAction(self._merge_action)
+        self._edit_menu.addAction(self._split_action)
 
         # the View menu controls the visibility of all dockable views
         self._view_menu = self._main_window.menuBar().addMenu("&View")
@@ -151,6 +172,7 @@ class ViewManager(QObject):
         self._main_window.menuBar().addSeparator()
 
         self._help_menu = self._main_window.menuBar().addMenu("&Help")
+        # under the hood, these are automatically put in the "Apple" menu on Mac OS X
         self._help_menu.addAction(self._about_action)
         self._help_menu.addAction(self._about_qt_action)
 
@@ -199,9 +221,10 @@ class ViewManager(QObject):
 
     @Slot()
     def on_working_directory_changed(self) -> None:
-        """ Handler updates all views when the current working directory has changed. """
+        """ Handler updates all views and refreshes menu state when the current working directory has changed. """
         for v in self._all_views:
             v.on_working_directory_changed()
+        self._refresh_menus()
 
     @Slot(str)
     def on_background_task_updated(self, msg: str) -> None:
@@ -234,10 +257,22 @@ class ViewManager(QObject):
     @Slot()
     def on_focus_neurons_changed(self) -> None:
         """
-        Handler notifies all views when there's any change in the subset of neurons having the display focus.
+        Handler notifies all views when there's any change in the subset of neurons having the display focus. It also
+        refreshes the state of the edit actions, which depend on whether and how many units are selected.
         """
         for v in self._all_views:
             v.on_focus_neurons_changed()
+        self._refresh_menus()
+
+    @Slot()
+    def on_neuron_label_updated(self, uid: str) -> None:
+        """
+        Handler notifies all views when a neural unit's label has changed.
+        :param uid: The UID identifying the affected neural unit.
+        """
+        for v in self._all_views:
+            v.on_neuron_label_updated(uid)
+        self._refresh_menus()
 
     @Slot()
     def on_channel_seg_start_changed(self) -> None:
@@ -301,6 +336,7 @@ class ViewManager(QObject):
         """
         res = QMessageBox.question(self._main_window, "Exit", "Are you sure you want to quit?")
         if res == QMessageBox.StandardButton.Yes:
+            self.data_analyzer.save_edit_history()
             self._save_settings_and_exit()
 
     def _about(self) -> None:
@@ -309,6 +345,28 @@ class ViewManager(QObject):
         application.
         """
         self._about_dlg.exec()
+
+    def _undo(self) -> None:
+        """ Handler for the 'Edit|Undo' menu command. It undos the last change to the current neural unit list. """
+        self.data_analyzer.undo_last_edit()
+        self._refresh_menus()
+
+    def _refresh_menus(self) -> None:
+        """ Update the enabled state and item text for selected menu items. """
+        descriptors = self.data_analyzer.undo_last_edit_description()
+        if isinstance(descriptors, tuple):
+            self._undo_action.setText(f"&Undo {descriptors[0]}")
+            self._undo_action.setToolTip(descriptors[1])
+            self._undo_action.setStatusTip(descriptors[1])
+            self._undo_action.setEnabled(True)
+        else:
+            self._undo_action.setText("&Undo")
+            self._undo_action.setToolTip("")
+            self._undo_action.setStatusTip("")
+            self._undo_action.setEnabled(False)
+
+        # TODO: Refresh other Edit menu items based on contents of focus/display list. Exactly 1 unit selected for
+        #   Delete or Split; exactly 2 for Merge.
 
     def _save_settings_and_exit(self) -> None:
         """ Save all user settings and exit the application without user prompt. """

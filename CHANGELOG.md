@@ -2,10 +2,21 @@
 
 ## v0.1.1 (TBD)
 - `NeuronView`: Selected columns in the neural units table may be hidden/shown via a popup context menu raised by
-clicking anywhere on the table header. The UID and Channel columns may not be hidden. Column visibility is saved in
-user settings at application shutdown and restored from settings at startup.
+clicking anywhere on the table header. The UID column may not be hidden. Column visibility is saved in user settings at
+application shutdown and restored from settings at startup.
 - Added an "About XSort" dialog.
 - Created a skeleton "user guide" which appears in a dock widget like the other XSort views. Contents TBD.
+- Added user-editable `label` property to `Neuron`, distinct from its `uid`. The label string is restricted to 25 
+characters or less and may not contain a comma.`NeuronView` modified to display the unit labels in a **_Label_** 
+column. Users can edit each unit's label "in place".
+- Developed infrastructure for editing the neural list. Supported operations include: edit a unit label, delete a unit,
+or merge two units. A future release will add support for splitting a unit in two by "lassoing" a subset of that unit's
+spikes in the `PCAView`. Each individual edit is saved to an "edit history" for the neural unit list. This history is
+persisted in a dedicated CSV file in the current XSort working directory prior to switching directories or exiting the
+application. Upon returning to a given working directory, the initial state of the neural list is read from the original
+spike sorter file, then that list is updated by applying each of the edits in the saved edit history, in order.
+- Units created by merging or splitting will have a UID ending in the letter 'x'. The integer index assigned to a unit
+is incremented each time a unit is created by merging or splitting, thereby ensuring that unit UIDs are always unique.
 
 ## v0.1.0 (11/28/2023)
 - Defined similarity metric: The correlation coefficient of two vectors: the horizontal concatenation of the 
