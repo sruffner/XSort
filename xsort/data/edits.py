@@ -18,7 +18,7 @@ class UserEdit:
      - Label a neural unit (typically to specify the putative neuron type).
      - Delete a neural unit. Often an "uncurated" spike sorter results file contains many "garbage" units, and the
        user's first task in XSort is to simply delete all such units.
-     - Create a new unit by merging two (or, rarely, three) selected units.
+     - Create a new unit by merging two selected units.
      - Split an existing unit. This is done by specifying a subset of the existing unit's spikes to assign to one unit,
        while the remaining are assigned to another. In practice, this is done on the XSort UI by "lassoing" a population
        of spikes in the principal component analysis (PCA) view.
@@ -34,7 +34,7 @@ class UserEdit:
     """ Merge two selected units into one: 'MERGE,uid1,uid2,uid_merged'. """
     SPLIT: str = 'SPLIT'
     """ Split a unit into two units: 'SPLIT,uid_before,uid_split1,uid_split2'. """
-    _EDIT_OPS = {LABEL: 'Change unit label', DELETE: 'Delete unit', MERGE: 'Merge units', SPLIT: 'Split units'}
+    _EDIT_OPS = {LABEL: 'Change unit label', DELETE: 'Delete unit', MERGE: 'Merge units', SPLIT: 'Split unit'}
     """ All recognized edit operations. """
 
     def __init__(self, op: str, params: List[str]):
@@ -89,13 +89,13 @@ class UserEdit:
     def longer_description(self) -> str:
         """ A longer description of the edit record that includes the UIDs of the affected/created units. """
         if self._op == UserEdit.LABEL:
-            desc = f"Changed unit {self.affected_uids} label: '{self.previous_unit_label}' > '{self.unit_label}"
+            desc = f"Changed unit {self.affected_uids} label: '{self.previous_unit_label}' --> '{self.unit_label}"
         elif self._op == UserEdit.DELETE:
-            desc = f"Deleted unit {self.affected_uids}"
+            desc = f"Deleted unit '{self.affected_uids}'"
         elif self._op == UserEdit.MERGE:
-            desc = f"Merged units {self.affected_uids} into unit {self.result_uids}"
+            desc = f"Merged units {self.affected_uids} into unit '{self.result_uids}'"
         else:   # SPLIT
-            desc = f"Split unit {self.affected_uids} into units {self.result_uids}"
+            desc = f"Split unit '{self.affected_uids}' into units {self.result_uids}"
         return desc
 
     @property
@@ -226,33 +226,3 @@ class UserEdit:
         except Exception as e:
             msg = f"Failed to load edit history: {str(e)}"
             return msg, []
-
-
-if __name__ == '__main__':
-    g_history: List[UserEdit] = list()
-    g_history.append(UserEdit('LABEL', ['1', '', 'Purkinje']))
-    g_history.append(UserEdit('DELETE', ['2s']))
-    g_history.append(UserEdit('DELETE', ['14']))
-    g_history.append(UserEdit('MERGE', ['10', '11', '24x']))
-    g_history.append(UserEdit('SPLIT', ['20', '25x', '26x']))
-    g_history.append(UserEdit('LABEL', ['1', 'Purkinje', '']))
-
-    work_dir = Path('/Users/sruffner/Desktop/test')
-    ok, err_msg = UserEdit.save_edit_history(work_dir, g_history)
-    if not ok:
-        print(err_msg)
-    else:
-        err_msg, g_history_2 = UserEdit.load_edit_history(work_dir)
-        if len(err_msg) > 0:
-            print(err_msg)
-        else:
-            if len(g_history) != len(g_history_2):
-                print("Length mismatch!")
-            else:
-                ok = True
-                for g_i, g_ue in enumerate(g_history):
-                    if g_ue != g_history_2[g_i]:
-                        print(f"At index {g_i}: before={str(g_ue)}, after={str(g_history_2[g_i])}")
-                        ok = False
-                if ok:
-                    print("Save/load cycle OK!")

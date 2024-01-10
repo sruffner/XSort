@@ -134,17 +134,17 @@ class ViewManager(QObject):
                                         triggered=QCoreApplication.instance().aboutQt)
 
         self._undo_action = QAction("&Undo", self._main_window, shortcut="Ctrl+Z", enabled=False, triggered=self._undo)
-        self._delete_action = QAction("&Delete", self._main_window, shortcut="Ctrl+X", enabled=False)
+        self._delete_action = QAction("&Delete", self._main_window, shortcut="Ctrl+X", enabled=False,
+                                      triggered=self._delete)
         self._merge_action = QAction("&Merge", self._main_window, shortcut="Ctrl+M", enabled=False)
         self._split_action = QAction("S&plit", self._main_window, shortcut="Ctrl+Y", enabled=False)
 
-        # menus
+        # menus - note that I couldn't get tool tips to show for menu actions on MacOS. So, for the Undo action, the
+        # action's text reflects the operation to be undone. See _refresh_menus().
         self._file_menu = self._main_window.menuBar().addMenu("&File")
         self._file_menu.addAction(self._open_action)
         self._file_menu.addSeparator()
         self._file_menu.addAction(self._quit_action)
-        self._file_menu.setToolTipsVisible(True)
-
         self._edit_menu = self._main_window.menuBar().addMenu("&Edit")
         self._edit_menu.addAction(self._undo_action)
         self._edit_menu.addSeparator()
@@ -351,19 +351,35 @@ class ViewManager(QObject):
         self.data_analyzer.undo_last_edit()
         self._refresh_menus()
 
+    def _delete(self) -> None:
+        """
+        Handler for the 'Edit|Delete' menu command. It deletes the currently selected neuron, if possible, and
+        moves the selection to a neighboring unit in the neuron list as displayed in the neuron view.
+        """
+        try:
+            uid_to_delete = self.data_analyzer.primary_neuron.uid
+            uid_neighbor = self._neuron_view.uid_of_unit_below(uid_to_delete)
+            self.data_analyzer.delete_primary_neuron(uid_neighbor)
+        except Exception:
+            pass
+
     def _refresh_menus(self) -> None:
         """ Update the enabled state and item text for selected menu items. """
         descriptors = self.data_analyzer.undo_last_edit_description()
         if isinstance(descriptors, tuple):
-            self._undo_action.setText(f"&Undo {descriptors[0]}")
-            self._undo_action.setToolTip(descriptors[1])
-            self._undo_action.setStatusTip(descriptors[1])
+            self._undo_action.setText(f"&Undo: {descriptors[1]}")
             self._undo_action.setEnabled(True)
         else:
             self._undo_action.setText("&Undo")
-            self._undo_action.setToolTip("")
-            self._undo_action.setStatusTip("")
             self._undo_action.setEnabled(False)
+
+        can_delete = self.data_analyzer.can_delete_primary_neuron()
+        if can_delete:
+            self._delete_action.setText(f"&Delete unit {self.data_analyzer.primary_neuron.uid}")
+            self._delete_action.setEnabled(True)
+        else:
+            self._delete_action.setText(f"&Delete")
+            self._delete_action.setEnabled(False)
 
         # TODO: Refresh other Edit menu items based on contents of focus/display list. Exactly 1 unit selected for
         #   Delete or Split; exactly 2 for Merge.

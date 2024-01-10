@@ -6,16 +6,13 @@ from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer
 from xsort.data import PL2
 from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
-from xsort.data.tasks import Task, TaskType, get_required_data_files, load_spike_sorter_results
+from xsort.data.tasks import (Task, TaskType, get_required_data_files, load_spike_sorter_results,
+                              unit_cache_file_exists, load_neural_unit_from_cache)
 
 
 class Analyzer(QObject):
     """
     The data model manager object for XSort.
-    TODO: UNDER DEV.  Note that it subclasses QObject so we can define signals! ...Currently I'm using this object
-        for inter-view communication, which should be in ViewManager: the "focus neuron list" and the elapsed time
-        epoch currently displayed in the analog channel trace view. But putting these in ViewManager leads to circular
-        import issue bc manaager.py imports all the view classes, which would also have to import manager.py!
     """
 
     MAX_NUM_FOCUS_NEURONS: int = 3
@@ -39,7 +36,8 @@ class Analyzer(QObject):
     focus_neurons_changed: Signal = Signal()
     """
     Signals that the set of neural units currently selected for display/comparison purposes has changed in some way.
-    All views should be refreshed accordingly.
+    All views should be refreshed accordingly. **NOTE**: This signal is also sent whenever a unit is added or removed
+    because of a user-initiated delete/merge/split/undo operation -- because the focus list is always changed as well.
     """
     channel_seg_start_changed: Signal = Signal()
     """ 
@@ -247,19 +245,7 @@ class Analyzer(QObject):
         else:
             self._focus_neurons.append(uid)
 
-        # the focus list changed, we need to cancel an ongoing task that is computing stats and clear out any cached
-        # PCA projections
-        self._cancel_background_task(TaskType.COMPUTESTATS)
-        for u in self._neurons:
-            u.set_cached_pca_projection(None)
-
-        self.focus_neurons_changed.emit()
-
-        # changing the focus list will trigger refreshes across all views. We don't want to launch the CPU-intensive
-        # task that computes statistics given the focus list until AFTER those refreshes are done. Hence the delayed
-        # launch below.
-        if len(self._focus_neurons) > 0:
-            QTimer.singleShot(0, self._launch_compute_stats_task)
+        self._on_focus_list_changed()
 
     def _launch_compute_stats_task(self) -> None:
         self._launch_background_task(TaskType.COMPUTESTATS)
@@ -405,10 +391,50 @@ class Analyzer(QObject):
             u.label = label
             edit_rec = UserEdit(op=UserEdit.LABEL, params=[u.uid, prev_label, label])
             self._edit_history.append(edit_rec)
+            self.neuron_label_updated.emit(u.uid)
             return True
         except Exception:
             pass
         return False
+
+    def can_delete_primary_neuron(self) -> bool:
+        """
+        Can the unit currently selected as the 'primary neuron' be deleted? Deletion is permitted ONLY if: (1) there are
+        no other units in the current display focus list (units may only be deleted one at a time); and (2) the unit's
+        internal cache file has already been generated. The latter requirement facilitates quickly and reliably undoing
+        a previous delete operation -- by simply reloading the unit from that cache file.
+
+        :return: True only if the above requirements are met.
+        """
+        primary: Optional[Neuron] = self.primary_neuron
+        return (len(self._focus_neurons) == 1) and unit_cache_file_exists(self._working_directory, primary.uid)
+
+    def delete_primary_neuron(self, uid: Optional[str] = None) -> None:
+        """
+        Delete the current 'primary neuron', ie, the first unit in the current display focus list.
+
+        Only one unit may be deleted at a time, so no action is taken if the display focus list is empty or contains
+        more than one unit. Deleting a unit does not remove the associated unit cache file (if present) from the current
+        working directory.
+
+        :param uid: The UID of a remaining unit that should become the 'primary neuron' after the deletion. If None or
+            invalid, the display focus list will be empty after the deletion.
+        """
+        if not self.can_delete_primary_neuron():
+            return
+        try:
+            deleted_uid = self._focus_neurons[0]
+            deleted_idx = next((i for i in range(len(self._neurons)) if self._neurons[i].uid == deleted_uid), None)
+            u = self._neurons.pop(deleted_idx)
+            if uid in [n.uid for n in self._neurons]:
+                self._focus_neurons[0] = uid
+            else:
+                self._focus_neurons.pop(0)
+            edit_rec = UserEdit(op=UserEdit.DELETE, params=[u.uid])
+            self._edit_history.append(edit_rec)
+            self._on_focus_list_changed()
+        except Exception:
+            pass
 
     def undo_last_edit(self) -> bool:
         """
@@ -426,11 +452,39 @@ class Analyzer(QObject):
                     return True
             return False
         elif edit_rec.operation == UserEdit.DELETE:
-            return False   # TODO: IMPLEMENT
+            uid = edit_rec.affected_uids
+            u = load_neural_unit_from_cache(self._working_directory, uid)
+            if isinstance(u, Neuron):
+                # success: make undeleted neuron the one and only neuron in the current display list
+                self._neurons.append(u)
+                self._focus_neurons.clear()
+                self._focus_neurons.append(u.uid)
+                self._on_focus_list_changed()
+                return True
+            return False
         elif edit_rec.operation == UserEdit.MERGE:
             return False   # TODO: IMPLEMENT
         else:   # TODO: IMPLEMENT - SPLIT
             return False
+
+    def _on_focus_list_changed(self) -> None:
+        """
+        Whenever the current display focus list changes, we need to cancel any ongoing COMPUTESTATS task before
+        signalling the view manager, and then queue a new COMPUTESTATS task (unless the focus list is now empty)
+        after a short delay so that the user-facing views have a chance to refresh before that CPU-intensive task
+        begins.
+        """
+        # cancel an ongoing COMPUTESTATS task (if any) and clear out stale PCA projections
+        self._cancel_background_task(TaskType.COMPUTESTATS)
+        for u in self._neurons:
+            u.set_cached_pca_projection(None)
+
+        # signal the view manager and associated views
+        self.focus_neurons_changed.emit()
+
+        # if the focus list is not empty, trigger a new COMPUTESTATS task after a brief delay
+        if len(self._focus_neurons) > 0:
+            QTimer.singleShot(0, self._launch_compute_stats_task)
 
     def undo_last_edit_description(self) -> Optional[Tuple[str, str]]:
         """

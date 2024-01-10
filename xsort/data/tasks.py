@@ -29,7 +29,7 @@ def get_required_data_files(folder: Path) -> Tuple[Optional[Path], Optional[Path
 
     :param folder: File system path for the current XSort working directory.
     :return: On success, returns (pl2_file, pkl_file, ""), where the first two elements are the paths of the PL2 and
-    pickle files, respectively. On failure, returns (None, None, emgs) -- where the last element is a brief description
+    pickle files, respectively. On failure, returns (None, None, emsg) -- where the last element is a brief description
     of the error encountered.
     """
     if not isinstance(folder, Path):
@@ -79,8 +79,8 @@ def load_spike_sorter_results(sorter_file: Path) -> Tuple[str, Optional[List[Neu
                 raise Exception("Unexpected content found")
             for i, u in enumerate(res):
                 if u['type__'] == 'PurkinjeCell':
-                    neurons.append(Neuron(i + 1, u['spike_indices__'] / u['sampling_rate__'], False))
-                    neurons.append(Neuron(i + 1, u['cs_spike_indices__'] / u['sampling_rate__'], True))
+                    neurons.append(Neuron(i + 1, u['spike_indices__'] / u['sampling_rate__'], suffix='s'))
+                    neurons.append(Neuron(i + 1, u['cs_spike_indices__'] / u['sampling_rate__'], suffix='c'))
                     purkinje_neurons.append(neurons[-1])
                 else:
                     neurons.append(Neuron(i + 1, u['spike_indices__'] / u['sampling_rate__']))
@@ -95,7 +95,7 @@ def load_spike_sorter_results(sorter_file: Path) -> Tuple[str, Optional[List[Neu
     for purkinje in purkinje_neurons:
         n: Neuron
         for i, n in enumerate(neurons):
-            if (not n.is_purkinje()) and purkinje.matching_spike_trains(n):
+            if (not n.is_purkinje) and purkinje.matching_spike_trains(n):
                 removal_list.append(i)
                 break
     for idx in sorted(removal_list, reverse=True):
@@ -120,16 +120,61 @@ def channel_cache_files_exist(folder: Path, channel_indices: List[int]) -> bool:
     return True
 
 
-def unit_cache_file_exists(folder: Path, label: str) -> bool:
+def unit_cache_file_exists(folder: Path, uid: str) -> bool:
     """
     Does an internal cache file exist for the specified neural unit in the specified working directory? The unit cache
     file name has the format f'{UNIT_CACHE_FILE_PREFIX}{label}', where {label} is a label string uniquely identifying
     the unit. The method does not validate the contents of the file.
     :param folder: File system path for the current XSort working directory.
-    :param label: A label uniquely identifying the unit.
+    :param uid: A label uniquely identifying the unit.
     :return: True if the specified unit cache file is found; else False.
     """
-    return Path(folder, f"{UNIT_CACHE_FILE_PREFIX}{label}").is_file()
+    return Path(folder, f"{UNIT_CACHE_FILE_PREFIX}{uid}").is_file()
+
+
+def load_neural_unit_from_cache(folder: Path, uid: str, suppress: bool = True) -> Optional[Neuron]:
+    """
+    Retrieve all metrics (spike train, per-channel mean spike waveforms, metadata) for a specified neural unit
+    from the corresponding internal cache file in the specified working directory.
+
+    :param folder: File system path for the current XSort working directory.
+    :param uid: The neural unit's UID.
+    :param suppress: If True, any exception (file not found, file IO error) is suppressed. Default is True.
+    :return: A **Neuron** object encapsulating all metrics for the specified neural unit, or None if an error
+        occurred and exceptions are suppressed.
+    :raises Exception: If an error occurs and exceptions are not suppressed. However, an exception is thrown
+        regardless if the unit label is invalid.
+    """
+    # validate unit label and extract unit index. Exception thrown if invalid
+    unit_idx, unit_suffix = Neuron.dissect_uid(uid)
+
+    try:
+        unit_cache_file = Path(folder, f"{UNIT_CACHE_FILE_PREFIX}{uid}")
+        if not unit_cache_file.is_file():
+            raise Exception(f"Unit metrics cache file missing for neural unit {uid}")
+
+        with open(unit_cache_file, 'rb') as fp:
+            hdr = struct.unpack_from('f4I', fp.read(struct.calcsize('f4I')))
+            ok = (len(hdr) == 5) and all([k >= 0 for k in hdr])
+            if not ok:
+                raise Exception(f"Invalid header in unit metrics cache file for neural unit {uid}")
+            n_bytes = struct.calcsize("<{:d}f".format(hdr[2]))
+            spike_times = np.frombuffer(fp.read(n_bytes), dtype='<f')
+            template_dict: Dict[int, np.ndarray] = dict()
+            template_len = struct.calcsize("<{:d}f".format(hdr[4]))
+            for i in range(hdr[3]):
+                channel_index: int = struct.unpack_from('<I', fp.read(struct.calcsize('<I')))[0]
+                template = np.frombuffer(fp.read(template_len), dtype='<f')
+                template_dict[channel_index] = template
+
+            unit = Neuron(unit_idx, spike_times, suffix=unit_suffix)
+            unit.update_metrics(hdr[1], hdr[0], template_dict)
+            return unit
+    except Exception:
+        if not suppress:
+            raise
+        else:
+            return None
 
 
 class TaskType(Enum):
@@ -320,7 +365,7 @@ class Task(QRunnable):
             self.signals.progress.emit("Caching/retrieving neural unit metrics",
                                        int(100 * (n_units - len(neurons))/n_units))
             neuron = neurons.pop(0)
-            updated_neuron = self._retrieve_neural_unit(neuron.uid, suppress=True)
+            updated_neuron = load_neural_unit_from_cache(self._working_dir, neuron.uid)
             if updated_neuron is None:
                 self._cache_neural_unit(neuron)
                 updated_neuron = neuron
@@ -477,48 +522,6 @@ class Task(QRunnable):
         return ChannelTraceSegment(idx, 0, samples_per_sec,
                                    channel_dict['coeff_to_convert_to_units'] * 1.0e6, first_second)
 
-    def _retrieve_neural_unit(self, uid: str, suppress: bool = False) -> Optional[Neuron]:
-        """
-        Retrieve all metrics (spike train, per-channel mean spike waveforms, metadata) for a specified neural unit
-        from the corresponding cache file in the working directory.
-
-        :param uid: The neural unit's UID.
-        :param suppress: If True, any exception (file not found, file IO error) is suppressed. Default is False.
-        :return: A **Neuron** object encapsulating all metrics for the specified neural unit, or None if an error
-            occurred and exceptions are suppressed.
-        :raises Exception: If an error occurs and exceptions are not suppressed. However, an exception is thrown
-            regardless if the unit label is invalid.
-        """
-        # validate unit label and extract unit index. Exception thrown if invalid
-        unit_idx, unit_is_complex = Neuron.dissect_unit_label(uid)
-
-        try:
-            unit_cache_file = Path(self._working_dir, f"{UNIT_CACHE_FILE_PREFIX}{uid}")
-            if not unit_cache_file.is_file():
-                raise Exception(f"Unit metrics cache file missing for neural unit {uid}")
-
-            with open(unit_cache_file, 'rb') as fp:
-                hdr = struct.unpack_from('f4I', fp.read(struct.calcsize('f4I')))
-                ok = (len(hdr) == 5) and all([k >= 0 for k in hdr])
-                if not ok:
-                    raise Exception(f"Invalid header in unit metrics cache file for neural unit {uid}")
-                n_bytes = struct.calcsize("<{:d}f".format(hdr[2]))
-                spike_times = np.frombuffer(fp.read(n_bytes), dtype='<f')
-                template_dict: Dict[int, np.ndarray] = dict()
-                template_len = struct.calcsize("<{:d}f".format(hdr[4]))
-                for i in range(hdr[3]):
-                    channel_index: int = struct.unpack_from('<I', fp.read(struct.calcsize('<I')))[0]
-                    template = np.frombuffer(fp.read(template_len), dtype='<f')
-                    template_dict[channel_index] = template
-
-                unit = Neuron(unit_idx, spike_times, unit_is_complex)
-                unit.update_metrics(hdr[1], hdr[0], template_dict)
-                return unit
-        except Exception:
-            if not suppress:
-                raise
-            else:
-                return None
 
     def _cache_neural_unit(self, unit: Neuron) -> None:
         """

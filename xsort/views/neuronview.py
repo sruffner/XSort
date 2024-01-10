@@ -128,7 +128,7 @@ class _NeuronTableModel(QAbstractTableModel):
         num = len(u)
         if num > 1:
             switcher = {
-                0: sorted(range(num), key=lambda k: k, reverse=self._reversed),
+                0: sorted(range(num), key=lambda k: Neuron.dissect_uid(u[k].uid), reverse=self._reversed),
                 1: sorted(range(num), key=lambda k: u[k].label, reverse=self._reversed),
                 2: sorted(range(num), key=lambda k: -1 if (u[k].primary_channel is None) else u[k].primary_channel,
                           reverse=self._reversed),
@@ -152,6 +152,24 @@ class _NeuronTableModel(QAbstractTableModel):
         if 0 <= row < self.rowCount():
             idx = self._sorted_indices[row]
             return self._data_manager.neurons[idx].uid
+        return None
+
+    def find_uid_of_neighboring_unit(self, uid: str) -> Optional[str]:
+        """
+        Find the UID of the neural unit occupying the table row immediately below the specified unit. If the specified
+        unit is at the bottom of the table, then return the UID of the unit in the row above.
+        :param uid: UID of a neural unit
+        :return: UID of the unit's neighbor IAW the current sort order, as described. Returns None if the table is
+            empty or contains only one unit, or if the specified unit is not in the table.
+        """
+        if self.rowCount() < 2:
+            return None
+        for row in range(self.rowCount()):
+            idx = self._sorted_indices[row]
+            if self._data_manager.neurons[idx].uid == uid:
+                row = (row - 1) if (row == self.rowCount() - 1) else (row + 1)
+                idx = self._sorted_indices[row]
+                return self._data_manager.neurons[idx].uid
         return None
 
 
@@ -202,6 +220,16 @@ class NeuronView(BaseView):
         main_layout = QHBoxLayout()
         main_layout.addWidget(self._table_view)
         self.view_container.setLayout(main_layout)
+
+    def uid_of_unit_below(self, uid: str) -> Optional[str]:
+        """
+        Get the UID of the unit in the row below (or above, if necessary) the table row that displays the unit
+        specified. The order of the rows depends on the current sort order.
+
+        :param uid: The UID of a neural unit
+        :return: UID of unit displayed in the row below or above that unit, or None if not found.
+        """
+        return self._model.find_uid_of_neighboring_unit(uid)
 
     def on_working_directory_changed(self) -> None:
         self._model.reload_table_data()
