@@ -13,6 +13,7 @@ import scipy
 from PySide6.QtCore import QObject, Slot, Signal, QRunnable
 
 from xsort.data import PL2, stats
+from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
 
 CHANNEL_CACHE_FILE_PREFIX: str = '.xs.ch.'
@@ -132,6 +133,16 @@ def unit_cache_file_exists(folder: Path, uid: str) -> bool:
     return Path(folder, f"{UNIT_CACHE_FILE_PREFIX}{uid}").is_file()
 
 
+def delete_unit_cache_file(folder: Path, uid: str) -> None:
+    """
+    Delete the internal cache file for the specified neural unit, if it exists in the specified working directory.
+    :param folder: File system path for the current XSort working directory.
+    :param uid: A label uniquely identifying the unit.
+    """
+    p = Path(folder, f"{UNIT_CACHE_FILE_PREFIX}{uid}")
+    p.unlink(missing_ok=True)
+
+
 def load_neural_unit_from_cache(folder: Path, uid: str, suppress: bool = True) -> Optional[Neuron]:
     """
     Retrieve all metrics (spike train, per-channel mean spike waveforms, metadata) for a specified neural unit
@@ -192,6 +203,10 @@ class TaskType(Enum):
     computed: the ISI and ACG for each unit, the CCG for each units vs the other units in the list, and the projection
     of each unit's spikes onto a 2D plane defined by principal component analysis of the spike template waveforms. All 
     statistics are cached in the unit instances.
+    
+        If the internal cache file is missing for any unit in the list, that unit's metrics are computed and the 
+    cache file generated before proceeding with the statistics calcs. This takes care of "derived" units that are
+    created when the user merges two units or splits one unit into two new units.
     """
 
 
@@ -276,7 +291,8 @@ class Task(QRunnable):
 
     def cancel(self) -> None:
         """
-        Cancel this task. **NOTE that the task will not stop until the run() method detects the cancellation**.
+        Cancel this task, if possible. **NOTE that the task will not stop until the run() method detects the
+        cancellation.**
         """
         self._cancelled = True
 
@@ -299,10 +315,10 @@ class Task(QRunnable):
               delivered. If the file exists but has the wrong size or the read fails, the file is recreated.
 
         In the second phase, the task loads neural unit information from the spike sorter results file (.PKL) in the
-        working directory. It then uses the analog channel caches to compute the per-channel mean spike waveforms, aka
-        'templates', and other metrics for each unit, then stores the unit spike train, templates, and other metadata
-        in a cache file named f'{UNIT_CACHE_FILE_PREFIX}{U}', where U is a label uniquely identifying the unit. For
-        each unit found in the sorter results file:
+        working directory. It then applies the edit history, if any, to bring the list of neural units "up to date". It
+        then uses the analog channel caches to compute the per-channel mean spike waveforms, aka 'templates', and other
+        metrics for each unit, then stores the unit spike train, templates, and other metadata in a cache file named
+        f'{UNIT_CACHE_FILE_PREFIX}{U}', where U is a UID uniquely identifying the unit. For each unit:
             - If the corresponding cache file already exists, it loads the unit record and delivers it to any receivers
               via a dedicated signal.
             - If the file does not exist, the unit metrics are prepared and cached, and then the unit record is 
@@ -360,6 +376,14 @@ class Task(QRunnable):
             raise Exception(emsg)
         if self._cancelled:
             raise Exception("Operation cancelled")
+
+        # load and apply edit history to bring the neuron list "up to date"
+        emsg, edit_history = UserEdit.load_edit_history(self._working_dir)
+        if len(emsg) > 0:
+            raise Exception(f"Error reading edit history: {emsg}")
+        for edit_rec in edit_history:
+            edit_rec.apply_to(neurons)
+
         n_units = len(neurons)
         while len(neurons) > 0:
             self.signals.progress.emit("Caching/retrieving neural unit metrics",
@@ -522,11 +546,10 @@ class Task(QRunnable):
         return ChannelTraceSegment(idx, 0, samples_per_sec,
                                    channel_dict['coeff_to_convert_to_units'] * 1.0e6, first_second)
 
-
-    def _cache_neural_unit(self, unit: Neuron) -> None:
+    def _cache_neural_unit(self, unit: Neuron, allow_cancel: bool = True) -> None:
         """
         Calculate the per-channel mean spike waveforms (aka, 'templates') and other metrics for a given neural unit and
-        store the waveforms, spike train and other metadata in a dedicated cache file in thw XSort working directory.
+        store the waveforms, spike train and other metadata in a dedicated cache file in the XSort working directory.
             The Lisberger lab's spike sorter algorithm outputs a spike train for each identified neural unit, but it
         does not generate any other metrics. XSort needs to compute the unit's mean spike waveform, or "template", on
         each recorded Omniplex channel, measure SNR, etc.
@@ -543,10 +566,11 @@ class Task(QRunnable):
         :param unit: The neural unit record to be cached. This will be an incomplete **Neuron** object, lacking the
             spike templates, SNR, and primary channel designation. If this information is succesfully computed and
             cached, this object is updated accordingly.
+        :param allow_cancel: If False, the method will ignore the task cancellation flag. Default = True.
         :raises Exception: If an error occurs. In most cases, the exception message may be used as a human-facing
             error description.
         """
-        self.signals.progress.emit(f"Computing and cacheing statistics for unit {unit.uid} ...", 0)
+        self.signals.progress.emit(f"Computing and cacheing metrics for unit {unit.uid} ...", 0)
 
         # get indices of recorded analog channels in ascending order
         channel_list: List[int] = list()
@@ -621,7 +645,7 @@ class Task(QRunnable):
                             f"Calculating metrics for unit {unit.uid} on Omniplex channel {str(idx)} ... ",
                             int(100.0 * total_progress_frac))
                         t0 = time.time()
-                    if self._cancelled:
+                    if allow_cancel and self._cancelled:
                         raise Exception("Operation cancelled")
 
             # prepare mean spike waveform template and compute SNR for this channel. The unit's SNR is the highest
@@ -636,7 +660,7 @@ class Task(QRunnable):
             template *= to_volts * 1.0e6
             template_dict[idx] = template
 
-            if self._cancelled:
+            if allow_cancel and self._cancelled:
                 raise Exception("Operation cancelled")
 
         # store metrics in cache file
@@ -647,7 +671,7 @@ class Task(QRunnable):
                                   len(template_dict), samples_in_template))
             dst.write(unit.spike_times.tobytes())
 
-            if self._cancelled:
+            if allow_cancel and self._cancelled:
                 dst.close()
                 unit_cache_file.unlink(missing_ok=True)
                 raise Exception("Operation cancelled")
@@ -672,6 +696,12 @@ class Task(QRunnable):
         :class:`Neuron` objects live on the main GUI thread. :class:`Neuron` instance methods compute the various
         histograms and cache them internally, but these should only be invoked on a background thread because they can
         take a significant amount of time to execute. Only histograms that have not been cached already are computed.
+
+            If the standard metrics (spike template waveforms, SNR, etc) have not been computed yet for any unit in the
+        focus list, then those metrics are computed and cached in a unit cache file -- as would be done in the
+        BUILDCACHE task. This takes care of cache file generation for "derived units" that are created by a user-
+        initiated merge or split operation.
+
             The principal component analysis can take quite a long time, depending on how many total spikes there are
         across the units in the focus list. The projections are cached in the `Neuron` instances as they are computed,
         but unlike the ISI/ACG/CCG, these only apply to the current focus list. Every time the focus list changes --
@@ -689,6 +719,20 @@ class Task(QRunnable):
         """
         if len(self._units) == 0:
             return
+
+        # read in information from Omniplex file. We need the Omniplex information to perform this task...
+        omniplex_file, _, emsg = get_required_data_files(self._working_dir)
+        if len(emsg) > 0:
+            raise Exception(emsg)
+        with open(omniplex_file, 'rb', buffering=65536 * 2) as src:
+            self._info = PL2.load_file_information(src)
+
+        # calculate and cache metrics (like template waveforms) for any units that need it. This portion of the
+        # task may NOT be cancelled.
+        for u in self._units:
+            if u.primary_channel is None:
+                self._cache_neural_unit(u, allow_cancel=False)
+                self.signals.data_available.emit(DataType.NEURON, u)
 
         num_units = len(self._units)
         num_hists = 3 * num_units + num_units * (num_units - 1)
@@ -805,16 +849,7 @@ class Task(QRunnable):
         self.signals.progress.emit(f"Computing PCA projections for {len(self._units)} units: "
                                    f"{','.join([u.uid for u in self._units])} ...", -1)
 
-        # retrieve channel list from Omniplex file. All analog channel traces should be separately cached already.
-        omniplex_file, _, emsg = get_required_data_files(self._working_dir)
-        if len(emsg) > 0:
-            raise Exception(emsg)
-        with open(omniplex_file, 'rb', buffering=65536 * 2) as src:
-            self._info = PL2.load_file_information(src)
-
-        if self._cancelled:
-            raise Exception("Operation cancelled")
-
+        # the analog channel list. All analog channel cache files should already exist.
         channel_list: List[int] = list()
         all_channels = self._info['analog_channels']
         for i in range(len(all_channels)):

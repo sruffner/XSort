@@ -7,7 +7,7 @@ from xsort.data import PL2
 from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
 from xsort.data.tasks import (Task, TaskType, get_required_data_files, load_spike_sorter_results,
-                              unit_cache_file_exists, load_neural_unit_from_cache)
+                              unit_cache_file_exists, load_neural_unit_from_cache, delete_unit_cache_file)
 
 
 class Analyzer(QObject):
@@ -76,7 +76,7 @@ class Analyzer(QObject):
         units identified in the original spiker sorter results file located in that directory.
         """
         self._focus_neurons: List[str] = list()
-        """ The labels of the neural units currently selected for display focus, in selection order. """
+        """ The UIDs of the neural units currently selected for display focus, in selection order. """
         self._edit_history: List[UserEdit] = list()
         """ The edit history, a record of all user-initiated changes to the list of neural units, in chrono order. """
         self._thread_pool = QThreadPool()
@@ -271,10 +271,12 @@ class Analyzer(QObject):
             if len(focus_list) == 0:
                 return
             task = Task(TaskType.COMPUTESTATS, self._working_directory, units=focus_list)
-        else:   # t == TaskType.GETCHANNELS
+        elif t == TaskType.GETCHANNELS:
             t0 = self._channel_seg_start
             task = Task(TaskType.GETCHANNELS, self._working_directory, start=t0 * self.channel_samples_per_sec,
                         count=self.channel_samples_per_sec)
+        else:
+            return
 
         task.signals.progress.connect(self.on_task_progress)
         task.signals.error.connect(self.on_task_failed)
@@ -436,6 +438,72 @@ class Analyzer(QObject):
         except Exception:
             pass
 
+    def can_merge_focus_neurons(self) -> bool:
+        """
+        Can the units currently selected for display/focus purposes be merged into a single unit. The "merge" is
+        permitted only if: (1) exactly TWO units are selected for display/focus; and (2) the internal cache file for
+        each unit has already been generated. The latter requirement facilitates quickly and reliably undoing the merge
+        operation -- by simply reloading the two merged units from their respective cache files.
+
+        :return: True only if the above requirements are met.
+        """
+        return (len(self._focus_neurons) == 2) and all([unit_cache_file_exists(self._working_directory, uid)
+                                                        for uid in self._focus_neurons])
+
+    def merge_focus_neurons(self) -> None:
+        """
+        Merge the neural units in the current focus list into a single unit. The newly derived unit is appended to the
+        list of derived units, while the two component units are removed. The new unit also becomes the sole occupant
+        of the focus list.
+
+            A background task is immediately spawned to cache the spike times and other metrics (per-channel template
+        waveforms, SNR, etc) for the merged unit, then compute the various statistics (ISI/ACG/CCG/PCA) for units in
+        the focus list.
+
+            The unit cache files corresponding to the units that were merged remain in the XSort working directory so
+        that they may be quickly "recovered" if the merge operation is later undone.
+        """
+        if not self.can_merge_focus_neurons():
+            return
+
+        try:
+            units = self.neurons_with_display_focus
+            merged_unit = Neuron.merge(units[0], units[1], self._find_next_assignable_unit_index())
+            edit_rec = UserEdit(op=UserEdit.MERGE, params=[units[0].uid, units[1].uid, merged_unit.uid])
+            self._focus_neurons.clear()
+            for u in units:
+                self._neurons.remove(u)  # works bc neurons_with_display_focus contains units from this list
+            self._neurons.append(merged_unit)
+            self._focus_neurons.append(merged_unit.uid)
+            self._edit_history.append(edit_rec)
+            self._on_focus_list_changed()
+        except Exception as e:
+            print(f"Merge failed: {str(e)}")
+            pass
+
+    def _find_next_assignable_unit_index(self) -> int:
+        """
+        Find the next available integer that can be assigned to a new unit created by a merge or split operation. This
+        method checks the edit history for the "derived" unit with the largest index N and returns N+1. If the edit
+        history is empty, then it finds the largest index N among the units in the current unit list.
+        :return: The next available integer index.
+        """
+        max_idx: int = 0
+        if len(self._neurons) > 0:
+            max_idx = max([u.index for u in self._neurons])
+        edit_indices: List[int] = list()
+        for edit_rec in self._edit_history:
+            if edit_rec.operation == UserEdit.DELETE:
+                edit_indices.append(Neuron.dissect_uid(edit_rec.affected_uids)[0])
+            elif edit_rec.operation == UserEdit.MERGE:
+                edit_indices.append(Neuron.dissect_uid(edit_rec.result_uids)[0])
+            elif edit_rec.operation == UserEdit.SPLIT:
+                edit_indices.append(Neuron.dissect_uid(edit_rec.result_uids[0])[0])
+        if len(edit_indices) > 0:
+            max_idx = max(max_idx, max([i for i in edit_indices]))
+
+        return max_idx + 1
+
     def undo_last_edit(self) -> bool:
         """
         Undo the most recent user-initiated edit to the current neural unit list.
@@ -463,7 +531,22 @@ class Analyzer(QObject):
                 return True
             return False
         elif edit_rec.operation == UserEdit.MERGE:
-            return False   # TODO: IMPLEMENT
+            merged_uid = edit_rec.result_uids
+            merged_idx = next((i for i in range(len(self._neurons)) if self._neurons[i].uid == merged_uid), None)
+            restored_units = list()
+            for uid in edit_rec.affected_uids:
+                restored_units.append(load_neural_unit_from_cache(self._working_directory, uid))
+            if isinstance(merged_idx, int) and all([isinstance(u, Neuron) for u in restored_units]):
+                # success: remove the merged unit (including cache file), restore component units, and put them in the
+                # focus list
+                self._neurons.pop(merged_idx)
+                delete_unit_cache_file(self._working_directory, merged_uid)
+                self._neurons.extend(restored_units)
+                self._focus_neurons.clear()
+                self._focus_neurons.extend([u.uid for u in restored_units])
+                self._on_focus_list_changed()
+                return True
+            return False
         else:   # TODO: IMPLEMENT - SPLIT
             return False
 

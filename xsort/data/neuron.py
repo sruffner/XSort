@@ -258,6 +258,11 @@ class Neuron:
         return self._uid
 
     @property
+    def index(self) -> int:
+        """ The integer index assigned to this neural unit. """
+        return self._idx
+
+    @property
     def label(self) -> str:
         """
         An arbitrary, user-defined label attached to the unit, typically the putative neuron type. Will be an empty

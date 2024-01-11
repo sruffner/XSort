@@ -136,8 +136,10 @@ class ViewManager(QObject):
         self._undo_action = QAction("&Undo", self._main_window, shortcut="Ctrl+Z", enabled=False, triggered=self._undo)
         self._delete_action = QAction("&Delete", self._main_window, shortcut="Ctrl+X", enabled=False,
                                       triggered=self._delete)
-        self._merge_action = QAction("&Merge", self._main_window, shortcut="Ctrl+M", enabled=False)
-        self._split_action = QAction("S&plit", self._main_window, shortcut="Ctrl+Y", enabled=False)
+        self._merge_action = QAction("&Merge", self._main_window, shortcut="Ctrl+M", enabled=False,
+                                     triggered=self._merge)
+        self._split_action = QAction("S&plit", self._main_window, shortcut="Ctrl+Y", enabled=False,
+                                     triggered=self._split)
 
         # menus - note that I couldn't get tool tips to show for menu actions on MacOS. So, for the Undo action, the
         # action's text reflects the operation to be undone. See _refresh_menus().
@@ -253,6 +255,7 @@ class ViewManager(QObject):
         else:
             for v in self._all_views:
                 v.on_focus_neurons_stats_updated(dt, uid)
+        self._refresh_menus()
 
     @Slot()
     def on_focus_neurons_changed(self) -> None:
@@ -363,6 +366,14 @@ class ViewManager(QObject):
         except Exception:
             pass
 
+    def _merge(self) -> None:
+        """ Handler for the 'Edit|Merge menu command; invokes the :class:`Analyzer` method that does the merge. """
+        self.data_analyzer.merge_focus_neurons()
+
+    def _split(self) -> None:
+        """ TODO: IMPLEMENT. """
+        pass
+
     def _refresh_menus(self) -> None:
         """ Update the enabled state and item text for selected menu items. """
         descriptors = self.data_analyzer.undo_last_edit_description()
@@ -381,8 +392,18 @@ class ViewManager(QObject):
             self._delete_action.setText(f"&Delete")
             self._delete_action.setEnabled(False)
 
-        # TODO: Refresh other Edit menu items based on contents of focus/display list. Exactly 1 unit selected for
-        #   Delete or Split; exactly 2 for Merge.
+        can_merge = self.data_analyzer.can_merge_focus_neurons()
+        if can_merge:
+            uids = [u.uid for u in self.data_analyzer.neurons_with_display_focus]
+            self._merge_action.setText(f"&Merge units {','.join(uids)}")
+            self._merge_action.setEnabled(True)
+        else:
+            self._merge_action.setText(f"&Merge")
+            self._merge_action.setEnabled(False)
+
+        # TODO: Refresh Split action
+        self._split_action.setText(f"&Split")
+        self._split_action.setEnabled(False)
 
     def _save_settings_and_exit(self) -> None:
         """ Save all user settings and exit the application without user prompt. """

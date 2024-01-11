@@ -146,20 +146,16 @@ class UserEdit:
                 units.pop(found_idx)
                 return True
         elif self._op == UserEdit.MERGE:
-            idx1, idx2 = -1, -1
-            for i in range(len(units)):
-                if units[i].uid in self.affected_uids:
-                    if idx1 > -1:
-                        idx2 = i
-                        break
-                    else:
-                        idx1 = i
-            if (idx1 > -1) and (idx2 > -1):
-                unit1 = units.pop(idx1)
-                unit2 = units.pop(idx2)
+            components: List[Neuron] = list()
+            for u in units:
+                if u.uid in self.affected_uids:
+                    components.append(u)
+            if len(components) == 2:
+                for u in components:
+                    units.remove(u)
                 new_uid = self.result_uids
                 new_idx = int(new_uid[0:-1])  # remove the 'x' suffix to get the unit index
-                merged_unit = Neuron.merge(unit1, unit2, idx=new_idx)
+                merged_unit = Neuron.merge(components[0], components[1], idx=new_idx)
                 units.append(merged_unit)
                 return True
         else:   # SPLIT

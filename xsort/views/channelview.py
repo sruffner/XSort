@@ -255,10 +255,11 @@ class ChannelView(BaseView):
             y = []
             if k < len(displayed):
                 u = displayed[k]
-                offset = self._trace_offset * self.data_manager.channel_indices.index(u.primary_channel)
-                seg = self.data_manager.channel_trace(u.primary_channel)
-                if seg is not None:
-                    x, y = self._prepare_clip_data(u, seg, offset)
+                if isinstance(u.primary_channel, int):
+                    offset = self._trace_offset * self.data_manager.channel_indices.index(u.primary_channel)
+                    seg = self.data_manager.channel_trace(u.primary_channel)
+                    if seg is not None:
+                        x, y = self._prepare_clip_data(u, seg, offset)
             pdi.setData(x=x, y=y)
 
     def on_channel_trace_segment_start_changed(self) -> None:
