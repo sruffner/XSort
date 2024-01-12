@@ -1,9 +1,10 @@
 # Changelog
 
-## v0.1.1 (TBD)
+## v0.1.1 (01/12/2024)
 - `NeuronView`: Selected columns in the neural units table may be hidden/shown via a popup context menu raised by
 clicking anywhere on the table header. The UID column may not be hidden. Column visibility is saved in user settings at
-application shutdown and restored from settings at startup.
+application shutdown and restored from settings at startup. Fixed issue with sorting on UID column.
+- `ACGRateView`: Now renders ACG-vs-firing rate histograms as heatmap images.
 - Added an "About XSort" dialog.
 - Created a skeleton "user guide" which appears in a dock widget like the other XSort views. Contents TBD.
 - Added user-editable `label` property to `Neuron`, distinct from its `uid`. The label string is restricted to 25 
@@ -17,6 +18,9 @@ application. Upon returning to a given working directory, the initial state of t
 spike sorter file, then that list is updated by applying each of the edits in the saved edit history, in order.
 - Units created by merging or splitting will have a UID ending in the letter 'x'. The integer index assigned to a unit
 is incremented each time a unit is created by merging or splitting, thereby ensuring that unit UIDs are always unique.
+- Implemented **Edit|Delete** and **Edit|Merge** operations, along with **Edit|Undo** and **Edit|Undo All**. If you
+perform a "merge", you should wait until the metrics of the merged unit are calculated and cached in the background
+before proceeding with further edits.
 
 ## v0.1.0 (11/28/2023)
 - Defined similarity metric: The correlation coefficient of two vectors: the horizontal concatenation of the 
