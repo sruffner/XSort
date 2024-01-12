@@ -84,6 +84,7 @@ class ViewManager(QObject):
         self._about_action: Optional[QAction] = None
         self._about_qt_action: Optional[QAction] = None
         self._undo_action: Optional[QAction] = None
+        self._undo_all_action: Optional[QAction] = None
         self._delete_action: Optional[QAction] = None
         self._merge_action: Optional[QAction] = None
         self._split_action: Optional[QAction] = None
@@ -134,6 +135,7 @@ class ViewManager(QObject):
                                         triggered=QCoreApplication.instance().aboutQt)
 
         self._undo_action = QAction("&Undo", self._main_window, shortcut="Ctrl+Z", enabled=False, triggered=self._undo)
+        self._undo_all_action = QAction("Undo &All", self._main_window, enabled=False, triggered=self._undo_all)
         self._delete_action = QAction("&Delete", self._main_window, shortcut="Ctrl+X", enabled=False,
                                       triggered=self._delete)
         self._merge_action = QAction("&Merge", self._main_window, shortcut="Ctrl+M", enabled=False,
@@ -149,6 +151,7 @@ class ViewManager(QObject):
         self._file_menu.addAction(self._quit_action)
         self._edit_menu = self._main_window.menuBar().addMenu("&Edit")
         self._edit_menu.addAction(self._undo_action)
+        self._edit_menu.addAction(self._undo_all_action)
         self._edit_menu.addSeparator()
         self._edit_menu.addAction(self._delete_action)
         self._edit_menu.addAction(self._merge_action)
@@ -354,6 +357,10 @@ class ViewManager(QObject):
         self.data_analyzer.undo_last_edit()
         self._refresh_menus()
 
+    def _undo_all(self) -> None:
+        """ Handler for the 'Edit|Undo All' menu command. """
+        self.data_analyzer.undo_all_edits()
+
     def _delete(self) -> None:
         """
         Handler for the 'Edit|Delete' menu command. It deletes the currently selected neuron, if possible, and
@@ -383,6 +390,8 @@ class ViewManager(QObject):
         else:
             self._undo_action.setText("&Undo")
             self._undo_action.setEnabled(False)
+
+        self._undo_all_action.setEnabled(self.data_analyzer.can_undo_all_edits())
 
         can_delete = self.data_analyzer.can_delete_primary_neuron()
         if can_delete:

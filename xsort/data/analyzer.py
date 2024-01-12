@@ -7,7 +7,8 @@ from xsort.data import PL2
 from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
 from xsort.data.tasks import (Task, TaskType, get_required_data_files, load_spike_sorter_results,
-                              unit_cache_file_exists, load_neural_unit_from_cache, delete_unit_cache_file)
+                              unit_cache_file_exists, load_neural_unit_from_cache, delete_unit_cache_file,
+                              delete_all_derived_unit_cache_files_from)
 
 
 class Analyzer(QObject):
@@ -549,6 +550,68 @@ class Analyzer(QObject):
             return False
         else:   # TODO: IMPLEMENT - SPLIT
             return False
+
+    def can_undo_all_edits(self) -> bool:
+        """
+        Can the edit history be wiped out for the current XSort working directory? This operation is always
+        possible, unless the edit history is empty.
+        :return True if current edit history is not empty.
+        """
+        return len(self._edit_history) > 0
+
+    def undo_all_edits(self) -> None:
+        """
+        Undo all changes made to the contents of the current XSort woring directory, restoring it to its original
+        state. No action is taken if the edit history is empty.
+        """
+        if len(self._edit_history) == 0:
+            return
+
+        # special case: only unit labels have been changed
+        if all([rec.operation == UserEdit.LABEL for rec in self._edit_history]):
+            for u in self._neurons:
+                u.label = ''
+            self._edit_history.clear()
+            self._focus_neurons.clear()
+            self._on_focus_list_changed()
+            return
+
+        # reload all "original" neural units from the spike sorter results file (PKL)
+        emsg, neurons = load_spike_sorter_results(self._pkl_file)
+        if len(emsg) > 0:
+            return
+
+        # go through current unit list. Determine which original units are missing, and remove derived units
+        i = 0
+        while i < len(self._neurons):
+            u = self._neurons[i]
+            if u.is_mod:
+                self._neurons.pop(i)
+            else:
+                u.label = ''
+                for unit in neurons:
+                    if unit.uid == u.uid:
+                        neurons.remove(unit)
+                        break
+                i = i + 1
+
+        # for each "original unit" that is NOT in the current list, attempt to load its full metrics from internal
+        # cache file if we can, then put it back in the unit list
+        for u in neurons:
+            unit = load_neural_unit_from_cache(self._working_directory, u.uid)
+            self._neurons.append(unit if isinstance(unit, Neuron) else u)
+
+        self._focus_neurons.clear()
+
+        # clear edit history and remove any derived unit cache files
+        self._edit_history.clear()
+        self.save_edit_history()
+        delete_all_derived_unit_cache_files_from(self._working_directory)
+
+        # signal views
+        self._on_focus_list_changed()
+
+        # TODO: STILL NOT RIGHT BC WE NEED TO RELOAD UNIT METRICS FROM CACHE FILES
 
     def _on_focus_list_changed(self) -> None:
         """

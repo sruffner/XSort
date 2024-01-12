@@ -143,6 +143,20 @@ def delete_unit_cache_file(folder: Path, uid: str) -> None:
     p.unlink(missing_ok=True)
 
 
+def delete_all_derived_unit_cache_files_from(folder: Path) -> None:
+    """
+    Remove all internal cache files for "derived units" (created via merge or split operations) from the specified
+    working directory. Unit cache files end with the unit UID, and the UID of every derived unit ends with the letter
+    'x' -- so it is a simple task to selectively delete derived unit cache files.
+    :param folder: File system path for the current XSort working directory. No action taken if directory invalid.
+    """
+    if not (isinstance(folder, Path) and folder.is_dir()):
+        return
+    for child in folder.iterdir():
+        if child.is_file() and child.name.endswith('x'):
+            child.unlink(missing_ok=True)
+
+
 def load_neural_unit_from_cache(folder: Path, uid: str, suppress: bool = True) -> Optional[Neuron]:
     """
     Retrieve all metrics (spike train, per-channel mean spike waveforms, metadata) for a specified neural unit
@@ -727,12 +741,18 @@ class Task(QRunnable):
         with open(omniplex_file, 'rb', buffering=65536 * 2) as src:
             self._info = PL2.load_file_information(src)
 
-        # calculate and cache metrics (like template waveforms) for any units that need it. This portion of the
-        # task may NOT be cancelled.
-        for u in self._units:
+        # if any unit is missing the standard metrics (like template waveforms), either load them from the corresponding
+        # cache file (if it's there) or calculate the metrics and generate the cache. The calcs are SLOW. May not be
+        # cancelled here, since we may be cacheing a derived unit!
+        u: Neuron
+        for i, u in enumerate(self._units):
             if u.primary_channel is None:
-                self._cache_neural_unit(u, allow_cancel=False)
-                self.signals.data_available.emit(DataType.NEURON, u)
+                updated_unit = load_neural_unit_from_cache(self._working_dir, u.uid)
+                if updated_unit is None:
+                    self._cache_neural_unit(u, allow_cancel=False)
+                else:
+                    self._units[i] = updated_unit
+                self.signals.data_available.emit(DataType.NEURON, self._units[i])
 
         num_units = len(self._units)
         num_hists = 3 * num_units + num_units * (num_units - 1)
