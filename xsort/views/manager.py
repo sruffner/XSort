@@ -393,7 +393,7 @@ class ViewManager(QObject):
 
         self._undo_all_action.setEnabled(self.data_analyzer.can_undo_all_edits())
 
-        can_delete = self.data_analyzer.can_delete_primary_neuron()
+        can_delete = self.data_analyzer.can_delete_or_split_primary_neuron()
         if can_delete:
             self._delete_action.setText(f"&Delete unit {self.data_analyzer.primary_neuron.uid}")
             self._delete_action.setEnabled(True)

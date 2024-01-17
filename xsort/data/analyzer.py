@@ -400,13 +400,16 @@ class Analyzer(QObject):
             pass
         return False
 
-    def can_delete_primary_neuron(self) -> bool:
+    def can_delete_or_split_primary_neuron(self) -> bool:
         """
-        Can the unit currently selected as the 'primary neuron' be deleted? Deletion is permitted ONLY if: (1) there are
-        no other units in the current display focus list (units may only be deleted one at a time); and (2) the unit's
-        internal cache file has already been generated. The latter requirement facilitates quickly and reliably undoing
-        a previous delete operation -- by simply reloading the unit from that cache file.
+        Can the unit currently selected as the 'primary neuron' be deleted or be split into two units with disjoint
+        spike trains? Deletion or splitting is permitted ONLY if: (1) there are no other units in the current display
+        focus list; and (2) the unit's internal cache file has already been generated. The latter requirement
+        facilitates quickly and reliably undoing a previous delete or split operation -- by simply reloading the unit
+        from that cache file.
 
+            NOTE: To perform a split, the user must select a subset of the unit's spikes to be assigned to one of the
+        new units, while the remaining are assigned to the other. This requirement is enforced by the view manager.
         :return: True only if the above requirements are met.
         """
         primary: Optional[Neuron] = self.primary_neuron
@@ -423,7 +426,7 @@ class Analyzer(QObject):
         :param uid: The UID of a remaining unit that should become the 'primary neuron' after the deletion. If None or
             invalid, the display focus list will be empty after the deletion.
         """
-        if not self.can_delete_primary_neuron():
+        if not self.can_delete_or_split_primary_neuron():
             return
         try:
             deleted_uid = self._focus_neurons[0]

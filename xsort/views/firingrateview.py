@@ -1,11 +1,10 @@
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, Slot, QSettings, QEvent, QObject
+from PySide6.QtCore import Qt, Slot, QSettings, QEvent, QObject, QPointF
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QComboBox, QHBoxLayout, QCheckBox
 import pyqtgraph as pg
 import numpy as np
-from pyqtgraph import Point
 from pyqtgraph.GraphicsScene.mouseEvents import MouseClickEvent
 
 from xsort.data.analyzer import Analyzer
@@ -178,16 +177,15 @@ class FiringRateView(BaseView):
         """ Handler refreshes the plotted firing rate histograms whenever user toggles normalilzation on/off. """
         self._refresh()
 
-    @Slot(QEvent)
-    def _on_mouse_moved(self, evt: QEvent) -> None:
+    @Slot(QPointF)
+    def _on_mouse_moved(self, pos: QPointF) -> None:
         """
         Whenever the mouse moves over the plot window, update the position of the vertical line "time cursor" and its
         label indicating the elapsed time in the format "MM:SS". In addition, update the position and readout label for
         the target marker placed at the intersection of the time cursor and each visible firing rate histogram.
-        :param evt: The mouse movement event.
+        :param pos: The mouse location in scene coordinates.
         """
         normalized = self._normalized_cb.isChecked()
-        pos = evt
         if self._plot_item.sceneBoundingRect().contains(pos):
             loc = self._plot_item.getViewBox().mapSceneToView(pos)
             self._vline.setPos(loc.x())
@@ -202,6 +200,7 @@ class FiringRateView(BaseView):
                     marker.setPos(loc.x(), y)
                     marker.label().setFormat(f"y={y:.2f}" if normalized else f"y={int(y)}")
 
+    @Slot(MouseClickEvent)
     def _on_mouse_clicked(self, evt: MouseClickEvent) -> None:
         """
         Whenever the mouse is clicked over the plot window, get the elapsed time in the recorded timeline under the

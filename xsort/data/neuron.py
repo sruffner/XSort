@@ -586,6 +586,15 @@ class Neuron:
         """
         return np.empty((0, 2)) if self._cached_pca_projection is None else self._cached_pca_projection
 
+    @property
+    def is_pca_projection_cached(self) -> bool:
+        """
+        Iw the PCA projection for this neural unit cached in its entirety in this object? Since the PCA projection can
+        take a significant amount of time to compute, it may be cached in chunks.
+        :return: True if the PCA projection for this unit is cached in its entirety.
+        """
+        return self.num_spikes == len(self.cached_pca_projection())
+
     def set_cached_pca_projection(self, prj: Optional[np.ndarray] = None) -> None:
         """
         Cache the current PCA projection for this neural unit, or clear a previously computed projection.
