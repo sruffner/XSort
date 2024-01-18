@@ -332,11 +332,11 @@ class PCAView(BaseView):
                     dlg.setMinimumDuration(100)
                     dlg.setCancelButton(None)
                     dlg.setModal(True)
+                    dlg.setAutoClose(False)
                     dlg.show()
                     xfm_region: QPolygonF = self._plot_item.getViewBox().mapSceneToView(self._lasso_region)
                     pt = QPointF(0, 0)
                     self._split_spike_indices.clear()
-                    proj = self.data_manager.neurons_with_display_focus[0].cached_pca_projection()
                     selected_prj = np.zeros_like(proj)  # contains the subset of PCA points selected by lasso
                     j = 0
                     for i in range(len(proj)):

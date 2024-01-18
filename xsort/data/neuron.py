@@ -1,5 +1,5 @@
 from enum import Enum
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List
 
 import numpy as np
 
@@ -409,6 +409,32 @@ class Neuron:
             self._cached_similarity[other_unit.uid] = similarity
             other_unit._cached_similarity[self.uid] = similarity
         return similarity
+
+    @property
+    def num_templates(self) -> int:
+        """
+        The number of spike templates computed for this unit. Returns 0 if the templates have not yet been computed for
+        this unit (that computation happens on a background task whenever the XSort working directory changes or a new
+        neural unit is defined).
+        :return: The number of per-channel spike template waveforms
+        """
+        return len(self._templates)
+
+    @property
+    def template_length(self) -> int:
+        """
+        The length of any of the unit's spike template waveforms (they are all the same length). Returns 0 if the
+        templates have not yet been computed for this unit.
+        """
+        return 0 if self.primary_channel else len(self._templates[self.primary_channel])
+
+    @property
+    def template_channel_indices(self) -> List[int]:
+        """
+        List of indices identifying Omniplex analog data channels on which spike template waveforms were calculated.
+        Will return an empty list if the templates have not yet been computed for this unit.
+        """
+        return [k for k in self._templates.keys()]
 
     def get_template_for_channel(self, idx: int) -> Optional[np.ndarray]:
         """
