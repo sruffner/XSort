@@ -294,7 +294,7 @@ class TaskSignals(QObject):
     the data object is actually the :class:`Neuron` instance in which the computed statistics are cached.
     """
     error = Signal(str)
-    """ Signal emitted when the worker task has failed for any reason. Argument is an error description. """
+    """ Signal emitted when the worker task has failed. Argument is an error description. """
     finished = Signal(TaskType)
     """ Signal emitted when the worker task has finished, succesfully or otherwise. Argument is the task type. """
 

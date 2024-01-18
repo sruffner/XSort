@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.3 (TBD)
+- Added modal progress dialog to block user input when waiting on a cancelled background task to stop. The dialog
+message reads "Please wait..." The time it takes for a background task to detect the cancel request and stop is highly
+variable, but will be less than 5 seconds in most cases. The dialog's progress bar animates 0-99% completion in 5 
+seconds, even though the wait time is unknown. Most tasks will respond to the cancel signal within that time. If not, 
+the progress bar resets to 0% can continues animating. The same dialog will be raised at application exit if the user 
+quits while a background task is in progress.
+
+## v0.1.2 (01/18/2024)
+- `PCAView`: Implemented "lasso" interaction to define a closed polygonal region by clicking on a series of points 
+within the view -- in order to select a subset of spikes prior to "splitting" a neural unit. This interaction is
+enabled only when a single unit occupies the display focus list, and only when the unit's PCA projection has been 
+fully calculated. The "Split" operation is not yet implemented.
+- _BUG FIX_: Release 0.1.1 failed to launch because of a configuration error in packaging the wheel file -- the
+markdown files were missing from the `assets` folder.
+
 ## v0.1.1 (01/12/2024)
 - `NeuronView`: Selected columns in the neural units table may be hidden/shown via a popup context menu raised by
 clicking anywhere on the table header. The UID column may not be hidden. Column visibility is saved in user settings at

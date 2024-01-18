@@ -55,7 +55,7 @@ class ViewManager(QObject):
         super().__init__(None)
         self._main_window = main_window
         """ Reference to the main application window -- to update standard UIlike status bar and window title."""
-        self.data_analyzer = Analyzer()
+        self.data_analyzer = Analyzer(main_window)
         """
         The master data model. It encapsulates the notion of XSort's 'current working directory, mediates access to 
         data stored in the various files within that directory, performs analyses triggered by view actions, and so on.
@@ -342,7 +342,7 @@ class ViewManager(QObject):
         """
         res = QMessageBox.question(self._main_window, "Exit", "Are you sure you want to quit?")
         if res == QMessageBox.StandardButton.Yes:
-            self.data_analyzer.save_edit_history()
+            self.data_analyzer.prepare_for_shutdown()
             self._save_settings_and_exit()
 
     def _about(self) -> None:

@@ -1,7 +1,9 @@
+import time
 from pathlib import Path
 from typing import Union, Optional, Dict, Any, List, Tuple
 
 from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer
+from PySide6.QtWidgets import QMainWindow, QProgressDialog
 
 from xsort.data import PL2
 from xsort.data.edits import UserEdit
@@ -48,8 +50,13 @@ class Analyzer(QObject):
     neuron_label_updated: Signal = Signal(str)
     """ Signals that a neural unit's label wwa successfully modified. Arg(str): UID of affected unit. """
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, main_window: QMainWindow):
+        super().__init__()
+        self._main_window = main_window
+        """ 
+        The main application window. Need this in order to block the UI with a modal progress dialog whenever we need to
+        prevent further user interaction while waiting for some long-running task to finish.
+        """
         self._working_directory: Optional[Path] = None
         """ The current working directory. """
         self._pl2_file: Optional[Path] = None
@@ -252,9 +259,36 @@ class Analyzer(QObject):
         self._launch_background_task(TaskType.COMPUTESTATS)
 
     def _cancel_background_task(self, t: TaskType) -> None:
+        """
+        Cancel a running background task.
+
+            By design, no two instances of a particular task type can be running in the background at the same time.
+        Certain tasks (building the cache files for a new XSort working directory; computing the PCA projections for
+        units in the display focus list) can take a significant amount of time to complete. To keep XSort as responsive,
+        as possible, all tasks are cancellable. However, in the current framework, we must wait an indeterminate
+        amount of time for a task to "detect" the cancel request and stop.
+            While waiting, the UI should be blocked to prevent further user interactions which could trigger additional
+        background work. Thus, this method raises a modal progress dialog while waiting for the cancelled task to
+        finish.
+        :param t: The task type.
+        """
         if not (self._background_tasks[t] is None):
+            dlg = QProgressDialog("Please wait...", "", 0, 100, self._main_window)
+            dlg.setMinimumDuration(300)
+            dlg.setCancelButton(None)
+            dlg.setModal(True)
+            dlg.setAutoClose(False)
+            dlg.show()
             self._background_tasks[t].cancel()
+            i = 0
+            while self._background_tasks[t] is not None:
+                dlg.setValue(i)
+                time.sleep(0.05)
+                # in the unlikely event it takes more than 5s for task to stop, reset progress to 0%
+                i = 0 if i == 99 else i + 1
+
             self._background_tasks[t] = None
+            dlg.close()
 
     def _launch_background_task(self, t: TaskType) -> None:
         """
@@ -649,6 +683,13 @@ class Analyzer(QObject):
 
     @Slot(str, int)
     def on_task_progress(self, desc: str, pct: int) -> None:
+        """
+        This slot is the mechanism by which :class:`Analyzer` receives progress updates from a task running on a
+        background thread. It forwards a progress message to the view manager.
+        :param desc: Progress message.
+        :param pct: Percent complete. If this lies in [0..100], then "{pct}%" is appended to the progress message.
+        :return:
+        """
         if 0 <= pct <= 100:
             self.progress_updated.emit(f"{desc} - {pct}%")
         else:
@@ -656,15 +697,22 @@ class Analyzer(QObject):
 
     @Slot(TaskType)
     def on_task_done(self, task_type: TaskType) -> None:
+        """
+        This slot is the mechanism by which :class:`Analyzer` is notified that a background task has finished. After
+        discarding the task object, it signals the view manager that a background task finished.
+
+        :param task_type: Type of task that finished.
+        """
         self.progress_updated.emit("")
-        self._cancel_background_task(task_type)
+        self._background_tasks[task_type] = None
 
     @Slot(str)
     def on_task_failed(self, emsg: str) -> None:
+        """ This slot is the mechanism by which :class:`Analyzer` is notified that a background task has failed. """
         print(f"Background task failed: {emsg}")
         # TODO: WHen this happens, the UI needs to raise a modal dialog? How should these errors be handled?
 
-    @Slot(object)
+    @Slot(DataType, object)
     def on_data_available(self, data_type: DataType, data: object) -> None:
         """
         This slot is the mechanism by which Analyzer, living in the main GUI thread, receives data objects that are
