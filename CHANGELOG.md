@@ -5,8 +5,22 @@
 message reads "Please wait..." The time it takes for a background task to detect the cancel request and stop is highly
 variable, but will be less than 5 seconds in most cases. The dialog's progress bar animates 0-99% completion in 5 
 seconds, even though the wait time is unknown. Most tasks will respond to the cancel signal within that time. If not, 
-the progress bar resets to 0% can continues animating. The same dialog will be raised at application exit if the user 
+the progress bar resets to 0% and continues animating. The same dialog will be raised at application exit if the user 
 quits while a background task is in progress.
+- When the user changes the XSort working directory, tha `BUILDCACHE` background task is launched to examine the
+directory contents, cache all Omniplex analog data channel streams in individual binary files, compute metrics 
+(per-channel spike templates, best SNR and the analog channel on which that SNR was measured - aka the _primary 
+channel_) for each unit defind in the original spike sorter pickle file, and persist unit spike trains and metrics in 
+individual unit cache files. For a long recording session with many units, this task takes quite some time, and the 
+user can't really do a lot of useful work until it's done. Therefore, a modal progress dialog now blocks user input 
+until the `BUILDCACHE` task has finished.
+- Fixed calculation of firing rate-vs-time histogram in `Neuron`. When **not** normalized, each bin value is now
+divided by the bin size in seconds, so the histogram reflects spikes/second (aka, firing rate) rather than raw spike
+count.
+- `FiringRateView` modified so that the Y readout value indicates the firing rate at the corresponding time in Hz when
+the **Normalized** box is unchecked.
+- **BUG FIXED**: `NeuronView` failed to display correctly when the neural unit list contained only a single unit 
+(because the sort-by-column algorithm failed to initialize the list of sort indices in this scenario).
 
 ## v0.1.2 (01/18/2024)
 - `PCAView`: Implemented "lasso" interaction to define a closed polygonal region by clicking on a series of points 

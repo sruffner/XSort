@@ -142,6 +142,8 @@ class _NeuronTableModel(QAbstractTableModel):
                           reverse=self._reversed)
             }
             self._sorted_indices = switcher.get(self._sort_col)
+        else:
+            self._sorted_indices.append(0)   # only one unit -- nothing to sort!
 
     def unit_uid_for_row(self, row: int) -> Optional[str]:
         """

@@ -33,6 +33,7 @@ class _UserGuideView(BaseView):
         """ The user guide content is displayed entirelyl in this widget. """
 
         # load the user guide contents
+        # noinspection PyTypeChecker
         inp_file = (impresources.files(xsort_assets) / 'help.md')
         with inp_file.open("rt") as f:
             markdown = f.read()
@@ -57,8 +58,13 @@ class ViewManager(QObject):
         """ Reference to the main application window -- to update standard UIlike status bar and window title."""
         self.data_analyzer = Analyzer(main_window)
         """
-        The master data model. It encapsulates the notion of XSort's 'current working directory, mediates access to 
+        The master data model. It encapsulates the notion of XSort's current working directory, mediates access to 
         data stored in the various files within that directory, performs analyses triggered by view actions, and so on.
+        """
+        self._working_dir_path_at_startup: Optional[str] = None
+        """ 
+        File system path of the XSort working directory as obtained from user settings during startup. Once the
+        main application window is visible, we make this the current working directory if it is still valid.
         """
         self._about_dlg = self._create_about_dialog()
         """ The application's 'About' dialog. """
@@ -191,6 +197,7 @@ class ViewManager(QObject):
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok)
         button_box.accepted.connect(dlg.accept)
 
+        # noinspection PyTypeChecker
         inp_file = (impresources.files(xsort_assets) / 'about.md')
         with inp_file.open("rt") as f:
             markdown = f.read()
@@ -301,9 +308,11 @@ class ViewManager(QObject):
         continue. In this scenario, an explanatory message dialog notifies the user and offers the option to quit the
         application if no valid working directory exists.
         """
+        if starting_up and isinstance(self._working_dir_path_at_startup, str):
+            if self.data_analyzer.change_working_directory(self._working_dir_path_at_startup) is None:
+                return
+
         curr_dir = self.data_analyzer.working_directory
-        if starting_up and self.data_analyzer.is_valid_working_directory:
-            return
         ok = False
         msg_btns = QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Abort
         if self.data_analyzer.is_valid_working_directory:
@@ -465,7 +474,8 @@ class ViewManager(QObject):
         for v in self._all_views:
             v.restore_settings(settings)
 
-        # current working directory -- must restore this last as it will trigger a lot of stuff!
+        # remember the working directory path if available. Once the application window is shown, we make this the
+        # current working directory -- see select_working_directory()
         str_path: Optional[str] = settings.value("working_dir")
         if isinstance(str_path, str):
-            self.data_analyzer.change_working_directory(str_path)
+            self._working_dir_path_at_startup = str_path

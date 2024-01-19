@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Union, Optional, Dict, Any, List, Tuple
 
 from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMainWindow, QProgressDialog
 
 from xsort.data import PL2
@@ -10,7 +11,7 @@ from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
 from xsort.data.tasks import (Task, TaskType, get_required_data_files, load_spike_sorter_results,
                               unit_cache_file_exists, load_neural_unit_from_cache, delete_unit_cache_file,
-                              delete_all_derived_unit_cache_files_from)
+                              delete_all_derived_unit_cache_files_from, save_neural_unit_to_cache)
 
 
 class Analyzer(QObject):
@@ -93,6 +94,18 @@ class Analyzer(QObject):
         self._background_tasks: Dict[TaskType, Optional[Task]] = {
             TaskType.BUILDCACHE: None, TaskType.COMPUTESTATS: None, TaskType.GETCHANNELS: None
         }
+        """ Dictionary of running tasks, by type. """
+
+        self._progress_dlg = QProgressDialog("Please wait...", "", 0, 100, self._main_window)
+        """ A modal progress dialog used to block further user input when necessary. """
+
+        # customize progress dialog: modal, no cancel, no title bar (so you can't close it)
+        self._progress_dlg.setMinimumDuration(500)
+        self._progress_dlg.setCancelButton(None)
+        self._progress_dlg.setModal(True)
+        self._progress_dlg.setAutoClose(False)
+        self._progress_dlg.setWindowFlags(Qt.WindowType.SplashScreen | Qt.WindowType.FramelessWindowHint)
+        self._progress_dlg.close()   # if we don't call this, the dialog will appear shortly after app startup
 
     @property
     def working_directory(self) -> Optional[Path]:
@@ -273,22 +286,17 @@ class Analyzer(QObject):
         :param t: The task type.
         """
         if not (self._background_tasks[t] is None):
-            dlg = QProgressDialog("Please wait...", "", 0, 100, self._main_window)
-            dlg.setMinimumDuration(300)
-            dlg.setCancelButton(None)
-            dlg.setModal(True)
-            dlg.setAutoClose(False)
-            dlg.show()
-            self._background_tasks[t].cancel()
-            i = 0
-            while self._background_tasks[t] is not None:
-                dlg.setValue(i)
-                time.sleep(0.05)
-                # in the unlikely event it takes more than 5s for task to stop, reset progress to 0%
-                i = 0 if i == 99 else i + 1
-
-            self._background_tasks[t] = None
-            dlg.close()
+            try:
+                self._background_tasks[t].cancel()
+                i = 0
+                while self._background_tasks[t] is not None:
+                    self._progress_dlg.setValue(i)
+                    time.sleep(0.05)
+                    # in the unlikely event it takes more than 5s for task to stop, reset progress to 0%
+                    i = 0 if i == 99 else i + 1
+            finally:
+                self._background_tasks[t] = None
+                self._progress_dlg.close()
 
     def _launch_background_task(self, t: TaskType) -> None:
         """
@@ -352,6 +360,9 @@ class Analyzer(QObject):
         """
         self.save_edit_history()
 
+        for task_type in self._background_tasks:
+            self._cancel_background_task(task_type)
+
         _p = Path(p) if isinstance(p, str) else p
         if not isinstance(_p, Path):
             return "Invalid directory path"
@@ -407,9 +418,30 @@ class Analyzer(QObject):
         # signal views
         self.working_directory_changed.emit()
 
+        # building the internal cache can take a long time - especially when the directory has not been cached before -
+        # block user input with our modal progress dialog. For this particular task, progress messages are displayed in
+        # the dialog.
+        self._progress_dlg.show()
+        self._progress_dlg.setValue(0)
+
         # spawn task to build internal cache if necessary and/or retrieve the data we require: first second's worth
         # of each relevant analog channel trace, and metrics for all neural units
         self._launch_background_task(TaskType.BUILDCACHE)
+
+        # block UI while waing on BUILDCACHE task. The task progress handle will update the progress label and bar
+        # irregularly, but we need to call QProgressDialog.setValue() regularly - so we do that here while never
+        # hitting the maximum.
+        try:
+            while self._background_tasks[TaskType.BUILDCACHE] is not None:
+                time.sleep(0.05)
+                next_value = self._progress_dlg.value() + 1
+                if next_value > 99:
+                    next_value = 0
+                self._progress_dlg.setValue(next_value)
+        finally:
+            self._background_tasks[TaskType.BUILDCACHE] = None
+            self._progress_dlg.close()
+            self._progress_dlg.setLabelText("Please wait...")
 
         return None
 
@@ -462,19 +494,23 @@ class Analyzer(QObject):
         """
         if not self.can_delete_or_split_primary_neuron():
             return
-        try:
-            deleted_uid = self._focus_neurons[0]
-            deleted_idx = next((i for i in range(len(self._neurons)) if self._neurons[i].uid == deleted_uid), None)
-            u = self._neurons.pop(deleted_idx)
-            if uid in [n.uid for n in self._neurons]:
-                self._focus_neurons[0] = uid
-            else:
-                self._focus_neurons.pop(0)
-            edit_rec = UserEdit(op=UserEdit.DELETE, params=[u.uid])
-            self._edit_history.append(edit_rec)
-            self._on_focus_list_changed()
-        except Exception:
-            pass
+        deleted_idx = next((i for i in range(len(self._neurons))
+                            if self._neurons[i].uid == self._focus_neurons[0]), None)
+        if deleted_idx is None:
+            return
+
+        # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
+        # unit list while it is being altered here!
+        self._cancel_background_task(TaskType.COMPUTESTATS)
+
+        u = self._neurons.pop(deleted_idx)
+        if uid in [n.uid for n in self._neurons]:
+            self._focus_neurons[0] = uid
+        else:
+            self._focus_neurons.clear()
+        edit_rec = UserEdit(op=UserEdit.DELETE, params=[u.uid])
+        self._edit_history.append(edit_rec)
+        self._on_focus_list_changed()
 
     def can_merge_focus_neurons(self) -> bool:
         """
@@ -503,21 +539,26 @@ class Analyzer(QObject):
         """
         if not self.can_merge_focus_neurons():
             return
-
+        units = self.neurons_with_display_focus
+        merged_unit = Neuron.merge(units[0], units[1], self._find_next_assignable_unit_index())
         try:
-            units = self.neurons_with_display_focus
-            merged_unit = Neuron.merge(units[0], units[1], self._find_next_assignable_unit_index())
-            edit_rec = UserEdit(op=UserEdit.MERGE, params=[units[0].uid, units[1].uid, merged_unit.uid])
-            self._focus_neurons.clear()
-            for u in units:
-                self._neurons.remove(u)  # works bc neurons_with_display_focus contains units from this list
-            self._neurons.append(merged_unit)
-            self._focus_neurons.append(merged_unit.uid)
-            self._edit_history.append(edit_rec)
-            self._on_focus_list_changed()
+            save_neural_unit_to_cache(self._working_directory, merged_unit, suppress=False)
         except Exception as e:
-            print(f"Merge failed: {str(e)}")
-            pass
+            print(f"Save to cache failed: {str(e)}")
+            return  # TODO: Should report reason operation failed
+
+        # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
+        # unit list while it is being altered here!
+        self._cancel_background_task(TaskType.COMPUTESTATS)
+
+        edit_rec = UserEdit(op=UserEdit.MERGE, params=[units[0].uid, units[1].uid, merged_unit.uid])
+        self._focus_neurons.clear()
+        for u in units:
+            self._neurons.remove(u)  # works bc neurons_with_display_focus contains units from this list
+        self._neurons.append(merged_unit)
+        self._focus_neurons.append(merged_unit.uid)
+        self._edit_history.append(edit_rec)
+        self._on_focus_list_changed()
 
     def _find_next_assignable_unit_index(self) -> int:
         """
@@ -550,6 +591,12 @@ class Analyzer(QObject):
         if len(self._edit_history) == 0:
             return False
         edit_rec = self._edit_history.pop()
+
+        # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
+        # unit list while it is being altered here!
+        if edit_rec.operation != UserEdit.LABEL:
+            self._cancel_background_task(TaskType.COMPUTESTATS)
+
         if edit_rec.operation == UserEdit.LABEL:
             for u in self._neurons:
                 if u.uid == edit_rec.affected_uids and u.label == edit_rec.unit_label:
@@ -604,6 +651,10 @@ class Analyzer(QObject):
         if len(self._edit_history) == 0:
             return
 
+        # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
+        # unit list while it is being altered here!
+        self._cancel_background_task(TaskType.COMPUTESTATS)
+
         # special case: only unit labels have been changed
         if all([rec.operation == UserEdit.LABEL for rec in self._edit_history]):
             for u in self._neurons:
@@ -648,8 +699,6 @@ class Analyzer(QObject):
         # signal views
         self._on_focus_list_changed()
 
-        # TODO: STILL NOT RIGHT BC WE NEED TO RELOAD UNIT METRICS FROM CACHE FILES
-
     def _on_focus_list_changed(self) -> None:
         """
         Whenever the current display focus list changes, we need to cancel any ongoing COMPUTESTATS task before
@@ -667,7 +716,7 @@ class Analyzer(QObject):
 
         # if the focus list is not empty, trigger a new COMPUTESTATS task after a brief delay
         if len(self._focus_neurons) > 0:
-            QTimer.singleShot(0, self._launch_compute_stats_task)
+            QTimer.singleShot(100, self._launch_compute_stats_task)
 
     def undo_last_edit_description(self) -> Optional[Tuple[str, str]]:
         """
@@ -685,15 +734,20 @@ class Analyzer(QObject):
     def on_task_progress(self, desc: str, pct: int) -> None:
         """
         This slot is the mechanism by which :class:`Analyzer` receives progress updates from a task running on a
-        background thread. It forwards a progress message to the view manager.
+        background thread. It forwards a progress message to the view manager, and if the modal progress dialog is
+        currently visible, it updates the dialog label and progress bar accordingly.
+
         :param desc: Progress message.
         :param pct: Percent complete. If this lies in [0..100], then "{pct}%" is appended to the progress message.
         :return:
         """
-        if 0 <= pct <= 100:
-            self.progress_updated.emit(f"{desc} - {pct}%")
-        else:
-            self.progress_updated.emit(desc)
+        msg = f"{desc} - {pct}%" if (0 <= pct <= 100) else desc
+        self.progress_updated.emit(msg)
+
+        if self._progress_dlg.isVisible():
+            self._progress_dlg.setLabelText(msg)
+            if 0 <= pct <= 100:
+                self._progress_dlg.setValue(pct)
 
     @Slot(TaskType)
     def on_task_done(self, task_type: TaskType) -> None:

@@ -182,7 +182,9 @@ class FiringRateView(BaseView):
         """
         Whenever the mouse moves over the plot window, update the position of the vertical line "time cursor" and its
         label indicating the elapsed time in the format "MM:SS". In addition, update the position and readout label for
-        the target marker placed at the intersection of the time cursor and each visible firing rate histogram.
+        the target marker placed at the intersection of the time cursor and each visible firing rate histogram. When
+        this histogram is not normalized, the readout label reflect firing rate at that time point - "xx.x Hz"; if
+        normalized, the readout is the ratio of the firing rate at that time point vs the unit's mean firing rate.
         :param pos: The mouse location in scene coordinates.
         """
         normalized = self._normalized_cb.isChecked()
@@ -198,7 +200,7 @@ class FiringRateView(BaseView):
                     marker.label().setFormat(" ")
                 else:
                     marker.setPos(loc.x(), y)
-                    marker.label().setFormat(f"y={y:.2f}" if normalized else f"y={int(y)}")
+                    marker.label().setFormat(f"y={y:.2f}" if normalized else f"y={y:.1f} Hz")
 
     @Slot(MouseClickEvent)
     def _on_mouse_clicked(self, evt: MouseClickEvent) -> None:

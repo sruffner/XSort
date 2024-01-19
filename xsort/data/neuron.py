@@ -318,8 +318,7 @@ class Neuron:
             overall mean firing rate. The last partial bin, if any, is omitted.
         """
         out, _ = np.histogram(self.spike_times, bins=int(dur / bin_size), density=False)
-        if normalized:
-            out = out / (bin_size * self.mean_firing_rate_hz)
+        out = out / (bin_size * (self.mean_firing_rate_hz if normalized else 1))
         return out
 
     @property
@@ -426,7 +425,7 @@ class Neuron:
         The length of any of the unit's spike template waveforms (they are all the same length). Returns 0 if the
         templates have not yet been computed for this unit.
         """
-        return 0 if self.primary_channel else len(self._templates[self.primary_channel])
+        return 0 if (self.primary_channel is None) else len(self._templates[self.primary_channel])
 
     @property
     def template_channel_indices(self) -> List[int]:
