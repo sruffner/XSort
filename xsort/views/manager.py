@@ -109,6 +109,7 @@ class ViewManager(QObject):
         self.data_analyzer.focus_neurons_changed.connect(self.on_focus_neurons_changed)
         self.data_analyzer.channel_seg_start_changed.connect(self.on_channel_seg_start_changed)
         self.data_analyzer.neuron_label_updated.connect(self.on_neuron_label_updated)
+        self.data_analyzer.split_lasso_region_updated.connect(self._refresh_menus)
 
         self._main_window.setMinimumSize(800, 600)
         self._restore_from_settings()
@@ -387,8 +388,8 @@ class ViewManager(QObject):
         self.data_analyzer.merge_focus_neurons()
 
     def _split(self) -> None:
-        """ TODO: IMPLEMENT. """
-        pass
+        """ Handler for the 'Edit|Split menu command; invokes the :class:`Analyzer` method that does the split. """
+        self.data_analyzer.split_primary_neuron()
 
     def _refresh_menus(self) -> None:
         """ Update the enabled state and item text for selected menu items. """
@@ -402,7 +403,7 @@ class ViewManager(QObject):
 
         self._undo_all_action.setEnabled(self.data_analyzer.can_undo_all_edits())
 
-        can_delete = self.data_analyzer.can_delete_or_split_primary_neuron()
+        can_delete = self.data_analyzer.can_delete_primary_neuron()
         if can_delete:
             self._delete_action.setText(f"&Delete unit {self.data_analyzer.primary_neuron.uid}")
             self._delete_action.setEnabled(True)
@@ -419,9 +420,13 @@ class ViewManager(QObject):
             self._merge_action.setText(f"&Merge")
             self._merge_action.setEnabled(False)
 
-        # TODO: Refresh Split action
-        self._split_action.setText(f"&Split")
-        self._split_action.setEnabled(False)
+        can_split = self.data_analyzer.can_split_primary_neuron()
+        if can_split:
+            self._split_action.setText(f"&Split unit {self.data_analyzer.primary_neuron.uid}")
+            self._split_action.setEnabled(True)
+        else:
+            self._split_action.setText(f"&Split")
+            self._split_action.setEnabled(False)
 
     def _save_settings_and_exit(self) -> None:
         """ Save all user settings and exit the application without user prompt. """

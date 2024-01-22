@@ -1,6 +1,7 @@
 # Changelog
 
-## v0.1.3 (TBD)
+## v0.1.3 (01/22/2024)
+- Implemented the **Edit|Split** operation. All editing operations are now available.
 - Added modal progress dialog to block user input when waiting on a cancelled background task to stop. The dialog
 message reads "Please wait..." The time it takes for a background task to detect the cancel request and stop is highly
 variable, but will be less than 5 seconds in most cases. The dialog's progress bar animates 0-99% completion in 5 

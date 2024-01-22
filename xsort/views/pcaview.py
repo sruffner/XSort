@@ -2,8 +2,7 @@ from typing import List, Optional
 
 from PySide6.QtCore import Qt, Slot, QTimer, QObject, QEvent, QPointF
 from PySide6.QtGui import QColor, QPolygonF, QPainterPath
-from PySide6.QtWidgets import QVBoxLayout, QComboBox, QLabel, QHBoxLayout, QPushButton, QGraphicsPathItem, \
-    QProgressDialog
+from PySide6.QtWidgets import QVBoxLayout, QComboBox, QLabel, QHBoxLayout, QPushButton, QGraphicsPathItem
 import pyqtgraph as pg
 import numpy as np
 from pyqtgraph.GraphicsScene.mouseEvents import MouseClickEvent
@@ -85,18 +84,6 @@ class PCAView(BaseView):
         """ The low-level Qt graphics item rendering the currently defined "lasso" region. """
         self._lassoing = False
         """ Flag set when a lasso interaction is in progress. """
-        self._split_spike_indices: List[int] = list()
-        """ 
-        The indices (into neural unit's spike train) of those spikes that lie inside the lassoed region in the
-        PCA scatter plot. If the unit is split, these form the the spike train of one unit, while the remaining
-        spikes form the spike train of the other unit.
-        """
-        self._pca_split_res: pg.PlotDataItem
-        """
-        The plot data item that highlights those points in the PCA projection of the primary unit that have been
-        selected by the user via the "lasso" interaction. Initially empty, and reset each time a new lasso interaction
-        starts.
-        """
         self._downsample_combo = QComboBox()
         """ 
         Combo box selects the downsample factor (render every Nth point) for the view, since the PCA projections
@@ -138,13 +125,6 @@ class PCAView(BaseView):
             )
             self._pca_data[i].setDownsampling(ds=PCAView._DEF_DOWNSAMPLE, auto=False, method='subsample')
             self._pca_data[i].setZValue(i)   # from QGraphicsItem base class
-
-        # pre-create the plot data item that shows the subset of PCA points selected by the lasso interaction
-        self._pca_split_res = self._plot_item.plot(np.empty((0, 2)), pen=None, symbol='o',
-                                                   symbolPen=pg.mkPen(None), symbolSize=PCAView._SYMBOL_SIZE,
-                                                   symbolBrush=QColor.fromRgb(255, 255, 255, 128))
-        self._pca_split_res.setDownsampling(ds=PCAView._DEF_DOWNSAMPLE, auto=False, method='subsample')
-        self._pca_split_res.setZValue(Analyzer.MAX_NUM_FOCUS_NEURONS)
 
         # set up the combo box that selects downsample factor (note we have to convert to/from str)
         self._downsample_combo.addItems([str(k) for k in PCAView._DOWNSAMPLE_CHOICES])
@@ -227,7 +207,6 @@ class PCAView(BaseView):
         ds = int(self._downsample_combo.currentText())
         for i in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
             self._pca_data[i].setDownsampling(ds, False, 'subsample')
-        self._pca_split_res.setDownsampling(ds, False, 'subsample')
 
         # we have to fix lasso region AFTER the view has been updated as a result of the downsampling factor change
         if self._lasso_region_in_view_coords is not None:
@@ -327,30 +306,9 @@ class PCAView(BaseView):
                     self._lasso_item.setPath(path)
                     self._lassoing = False
 
-                    proj = self.data_manager.neurons_with_display_focus[0].cached_pca_projection()
-                    dlg = QProgressDialog("Please wait...", "", 0, len(proj), self._plot_widget)
-                    dlg.setMinimumDuration(100)
-                    dlg.setCancelButton(None)
-                    dlg.setModal(True)
-                    dlg.setAutoClose(False)
-                    dlg.show()
+                    # notify data manager that the lasso region is defined
                     xfm_region: QPolygonF = self._plot_item.getViewBox().mapSceneToView(self._lasso_region)
-                    pt = QPointF(0, 0)
-                    self._split_spike_indices.clear()
-                    selected_prj = np.zeros_like(proj)  # contains the subset of PCA points selected by lasso
-                    j = 0
-                    for i in range(len(proj)):
-                        pt.setX(proj[i, 0])
-                        pt.setY(proj[i, 1])
-                        if xfm_region.containsPoint(pt, Qt.FillRule.WindingFill):
-                            self._split_spike_indices.append(i)
-                            selected_prj[j, :] = proj[i, :]
-                            j = j + 1
-                        if i % 5000 == 0:
-                            dlg.setValue(i)
-                    selected_prj = selected_prj[0:j, :]
-                    self._pca_split_res.setData(selected_prj)
-                    dlg.close()
+                    self.data_manager.set_lasso_region_for_split(xfm_region)
                 else:
                     self._stop_lasso()
             else:
@@ -379,8 +337,4 @@ class PCAView(BaseView):
         if force or (self._lasso_region.count() < 3) or not self._lasso_region.isClosed():
             self._lasso_region.clear()
             self._lasso_item.setPath(QPainterPath())
-            if force:
-                # in this case, we could be refreshing the view bc the focus unit(s) changed or we could be starting a
-                # new lasso. Need to clear results of a previously completed lasso interaction.
-                self._split_spike_indices.clear()
-                self._pca_split_res.setData(np.empty((0, 2)))
+            self.data_manager.set_lasso_region_for_split(None)

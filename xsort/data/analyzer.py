@@ -2,8 +2,10 @@ import time
 from pathlib import Path
 from typing import Union, Optional, Dict, Any, List, Tuple
 
-from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer
+import numpy as np
+from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer, QPointF
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QPolygonF
 from PySide6.QtWidgets import QMainWindow, QProgressDialog
 
 from xsort.data import PL2
@@ -50,6 +52,11 @@ class Analyzer(QObject):
     """
     neuron_label_updated: Signal = Signal(str)
     """ Signals that a neural unit's label wwa successfully modified. Arg(str): UID of affected unit. """
+    split_lasso_region_updated: Signal = Signal()
+    """ 
+    Signals that the lasso region defining a split of the current primary neuron has changed -- so that UI can
+    enable menu action to trigger a split when possible.
+    """
 
     def __init__(self, main_window: QMainWindow):
         super().__init__()
@@ -86,6 +93,11 @@ class Analyzer(QObject):
         """
         self._focus_neurons: List[str] = list()
         """ The UIDs of the neural units currently selected for display focus, in selection order. """
+        self._lasso_for_split: Optional[QPolygonF] = None
+        """ 
+        The lasso region in PCA space used to split the current primary focus neuron into two separate units: one unit
+        includes all spikes inside the region, while the other includes all the remaining spikes. None if undefined.
+        """
         self._edit_history: List[UserEdit] = list()
         """ The edit history, a record of all user-initiated changes to the list of neural units, in chrono order. """
         self._thread_pool = QThreadPool()
@@ -466,16 +478,12 @@ class Analyzer(QObject):
             pass
         return False
 
-    def can_delete_or_split_primary_neuron(self) -> bool:
+    def can_delete_primary_neuron(self) -> bool:
         """
-        Can the unit currently selected as the 'primary neuron' be deleted or be split into two units with disjoint
-        spike trains? Deletion or splitting is permitted ONLY if: (1) there are no other units in the current display
-        focus list; and (2) the unit's internal cache file has already been generated. The latter requirement
-        facilitates quickly and reliably undoing a previous delete or split operation -- by simply reloading the unit
-        from that cache file.
-
-            NOTE: To perform a split, the user must select a subset of the unit's spikes to be assigned to one of the
-        new units, while the remaining are assigned to the other. This requirement is enforced by the view manager.
+        Can the unit currently selected as the 'primary neuron' be deleted? Deletion is permitted ONLY if: (1) there are
+        no other units in the current display focus list; and (2) the unit's internal cache file has already been
+        generated. The latter requirement facilitates quickly and reliably undoing a previous delete operation by simply
+        reloading the unit from that cache file.
         :return: True only if the above requirements are met.
         """
         primary: Optional[Neuron] = self.primary_neuron
@@ -492,7 +500,7 @@ class Analyzer(QObject):
         :param uid: The UID of a remaining unit that should become the 'primary neuron' after the deletion. If None or
             invalid, the display focus list will be empty after the deletion.
         """
-        if not self.can_delete_or_split_primary_neuron():
+        if not self.can_delete_primary_neuron():
             return
         deleted_idx = next((i for i in range(len(self._neurons))
                             if self._neurons[i].uid == self._focus_neurons[0]), None)
@@ -557,6 +565,118 @@ class Analyzer(QObject):
             self._neurons.remove(u)  # works bc neurons_with_display_focus contains units from this list
         self._neurons.append(merged_unit)
         self._focus_neurons.append(merged_unit.uid)
+        self._edit_history.append(edit_rec)
+        self._on_focus_list_changed()
+
+    def set_lasso_region_for_split(self, lasso_region: Optional[QPolygonF]) -> None:
+        """
+        Set or clear the lasso region that must be defined in the PCA space of the current primary neural unit in
+        order to split it into two disjoint units (one including the spikes that project inside the region, and the
+        other including the spike that don't). A signal is emitted so that the view manager can refresh the "split"
+        action accordingly.
+            The lasso region may only be set when a single unit occupies the display/focus list, and that unit's
+        metrics have been computed and cached in the XSort working directory.
+        :param lasso_region: The polygon defining the lasso region, in the same coordinates as the primary unit's
+            cached PCA projection. If None or not closed, the lasso region is set to None (undefined).
+        """
+        if self._lasso_for_split == lasso_region:
+            return
+        if (len(self._focus_neurons) == 1) and unit_cache_file_exists(self._working_directory, self._focus_neurons[0]):
+            if (lasso_region is None) or not lasso_region.isClosed():
+                self._lasso_for_split = None
+            else:
+                self._lasso_for_split = lasso_region
+            self.split_lasso_region_updated.emit()
+
+    def can_split_primary_neuron(self) -> bool:
+        """
+        Can the unit currently selected as the 'primary neuron' be split into two separate units? Splitting is permitted
+        ONLY if: (1) there are no other units in the current display focus list; (2) the unit's internal cache file has
+        already been generated (to quickly and reliably undo the split by reloading the unit from the cache); and (3)
+        a closed "split region" has been defined in the unit's PCA projection space. All spikes inside the region are
+        assigned to one new unit, while the remaining spikes are assigned to a second unit.
+        :return: True only if the above requirements are met.
+        """
+        focussed = self.neurons_with_display_focus
+        return ((len(focussed) == 1) and (focussed[0].num_spikes > 2) and
+                unit_cache_file_exists(self._working_directory, focussed[0].uid) and
+                focussed[0].is_pca_projection_cached and (self._lasso_for_split is not None))
+
+    def split_primary_neuron(self) -> None:
+        """
+        Split the single neural unit in the current focus list into two distinct units: all of the unit's spikes that
+        project inside the current "split region" in PCA space form the spike train for one unit, while the rest form
+        the spike train for the other. The newly derived units are appended to the neuron list, while the split unit
+        is removed. The two new units also get the display focus.
+
+            Splitting a unit with 100K spikes or more can take a noticeable amount of time, so a modal progress dialog
+        will block user input during this operation.
+
+            A background task is immediately spawned to cache the spike times and other metrics (per-channel template
+        waveforms, SNR, etc) for the two new units, then compute the various statistics (ISI/ACG/CCG/PCA) for them, as
+        they now occupy the focus list.
+
+            The unit cache file corresponding to the unit that was split remains in the XSort working directory so
+        that it may be quickly "recovered" if the split operation is later undone.
+        """
+        if not self.can_split_primary_neuron():
+            return
+
+        # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
+        # unit list while it is being altered here!
+        self._cancel_background_task(TaskType.COMPUTESTATS)
+
+        # do the split. This involves finding which spikes project inside the lasso region in PCA space, which can take
+        # a few seconds if there 100K spikes or more. So we block user input with the modal progress dialog
+        self._progress_dlg.show()
+        self._progress_dlg.setValue(0)
+
+        unit = self.neurons_with_display_focus[0]
+        split_units: List[Neuron] = list()
+
+        try:
+            proj = unit.cached_pca_projection()
+            inside_indices: List[int] = list()
+            outside_indices: List[int] = list()
+            pt = QPointF(0, 0)
+            for i in range(len(proj)):
+                pt.setX(proj[i, 0])
+                pt.setY(proj[i, 1])
+                if self._lasso_for_split.containsPoint(pt, Qt.FillRule.WindingFill):
+                    inside_indices.append(i)
+                else:
+                    outside_indices.append(i)
+                pct = int(95.0 * i / len(proj))
+                self._progress_dlg.setValue(pct)
+
+            if len(inside_indices) == 0 or len(outside_indices) == 0:
+                return
+
+            idx = self._find_next_assignable_unit_index()
+            inside_spikes = np.take(unit.spike_times, inside_indices)
+            inside_spikes.sort()
+            split_units.append(Neuron(idx, inside_spikes, suffix='x'))
+            self._progress_dlg.setValue(97)
+            outside_spikes = np.take(unit.spike_times, outside_indices)
+            outside_spikes.sort()
+            split_units.append(Neuron(idx + 1, outside_spikes, suffix='x'))
+            self._progress_dlg.setValue(99)
+
+            try:
+                for u in split_units:
+                    save_neural_unit_to_cache(self._working_directory, u, suppress=False)
+            except Exception as e:
+                print(f"Save to cache failed: {str(e)}")
+                return  # TODO: Should report reason operation failed
+        finally:
+            self._progress_dlg.close()
+
+        # success! Update edit history and neuron list and put focus on the two new units
+        edit_rec = UserEdit(op=UserEdit.SPLIT, params=[unit.uid, split_units[0].uid, split_units[1].uid])
+        self._focus_neurons.clear()
+        self._neurons.remove(unit)
+        self._neurons.extend(split_units)
+        self._focus_neurons.extend([u.uid for u in split_units])
         self._edit_history.append(edit_rec)
         self._on_focus_list_changed()
 
@@ -632,7 +752,24 @@ class Analyzer(QObject):
                 self._on_focus_list_changed()
                 return True
             return False
-        else:   # TODO: IMPLEMENT - SPLIT
+        else:   # SPLIT
+            split_uids = [uid for uid in edit_rec.result_uids]
+            unsplit_uid = edit_rec.affected_uids
+            restored_unit = load_neural_unit_from_cache(self._working_directory, unsplit_uid)
+            split_units: List[Neuron] = list()
+            for u in self._neurons:
+                if u.uid in split_uids:
+                    split_units.append(u)
+            if (len(split_units) == 2) and isinstance(restored_unit, Neuron):
+                # success: remove the component units, restore the unsplit unit, and put the focus on that unit
+                self._focus_neurons.clear()
+                for u in split_units:
+                    delete_unit_cache_file(self._working_directory, u.uid)
+                    self._neurons.remove(u)
+                self._neurons.append(restored_unit)
+                self._focus_neurons.append(restored_unit.uid)
+                self._on_focus_list_changed()
+                return True
             return False
 
     def can_undo_all_edits(self) -> bool:
