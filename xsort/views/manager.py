@@ -1,11 +1,11 @@
 from importlib import resources as impresources
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from PySide6.QtCore import Slot, QStandardPaths, QSettings, QCoreApplication, QByteArray, Qt, QObject, QSize
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QMainWindow, QMessageBox, QFileDialog, QMenu, QDockWidget, QDialog, QVBoxLayout, \
-    QDialogButtonBox, QTextBrowser
+    QDialogButtonBox, QTextBrowser, QComboBox, QHBoxLayout
 
 import xsort.assets as xsort_assets
 from xsort.data.analyzer import Analyzer, DataType
@@ -27,24 +27,58 @@ class _UserGuideView(BaseView):
     this in a view so the user can dock the guide like any other real data view.
     """
 
+    SECTIONS: Dict[str, str] = {
+        'Overview': 'overview.md', 'User Interface': 'ui.md', 'Neural Units Table': 'units_table.md',
+        'Views': 'views.md', 'Making Changes': 'edits.md'
+    }
+    """ The individual section markdown filenames, keyed by the user-facing section name. """
+    DEF_SECTION: str = 'Overview'
+    """ At startup this section of the user guide is displayed. """
+
     def __init__(self, data_manager: Analyzer) -> None:
         super().__init__('Help', None, data_manager)
         self._help_browser = QTextBrowser()
         """ The user guide content is displayed entirelyl in this widget. """
+        self._section_combo = QComboBox()
+        """ Combo box selects which section of the user's guide is displayed. """
 
-        # load the user guide contents
-        # noinspection PyTypeChecker
-        inp_file = (impresources.files(xsort_assets) / 'help.md')
-        with inp_file.open("rt") as f:
-            markdown = f.read()
+        # set up the combo box that selects which section of the user guide to view
+        self._section_combo.addItems([k for k in self.SECTIONS.keys()])
+        self._section_combo.setCurrentText(self.DEF_SECTION)
+        self._section_combo.currentTextChanged.connect(self._load_section)
+
+        # configure text brower, then load the default section initially
         self._help_browser.setReadOnly(True)
         self._help_browser.setOpenExternalLinks(True)
-        self._help_browser.setMarkdown(markdown)
+        self._load_section(self.DEF_SECTION)
 
         main_layout = QVBoxLayout()
+        control_line = QHBoxLayout()
+        control_line.addWidget(self._section_combo)
+        control_line.addStretch(1)
+        main_layout.addLayout(control_line)
         main_layout.addWidget(self._help_browser)
 
         self.view_container.setLayout(main_layout)
+
+    @Slot(str)
+    def _load_section(self, section_name: str) -> None:
+        """
+        Whenever the user selects a different section of the user's guide, load that section's markdown into the text
+        browser.
+        :param section_name: The name of the section selected
+        """
+        try:
+            filename = self.SECTIONS.get(section_name, None)
+            if filename is None:
+                return
+            # noinspection PyTypeChecker
+            inp_file = (impresources.files(xsort_assets) / filename)
+            with inp_file.open("rt") as f:
+                markdown = f.read()
+                self._help_browser.setMarkdown(markdown)
+        except Exception:
+            pass
 
 
 class ViewManager(QObject):
@@ -238,6 +272,7 @@ class ViewManager(QObject):
         for v in self._all_views:
             v.on_working_directory_changed()
         self._refresh_menus()
+        self._main_window.setWindowTitle(self.main_window_title)
 
     @Slot(str)
     def on_background_task_updated(self, msg: str) -> None:
