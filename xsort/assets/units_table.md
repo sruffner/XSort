@@ -9,7 +9,8 @@ Each row in the table corresponds to one neural unit, and the columns display nu
 1. **UID** - The unit ID, typically an integer **N**. For a Purkinje cell spike train extracted from the original spike 
 sorter file, two units are created -- '**Nc**' (complex spikes) and '**Ns**' (simple spikes). Any unit derived from a
 merge or split operation has the UID '**Nx**', where the 'x' suffix indicates it is a derived unit.
-2. **Label** - An optional, short label (typically used to specify the unit's putative neuron type).
+2. **Label** - An optional, short label (typically used to specify the unit's putative neuron type). See **Making
+Changes** chapter.
 3. **Channel** -- The unit's _primary channel_, ie, the analog channel on which the best signal-to-noise ratio was 
 measured.
 4. **#Spikes** -- The total number of spikes in the unit's spike train.

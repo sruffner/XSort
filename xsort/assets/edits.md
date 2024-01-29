@@ -7,6 +7,11 @@ train that clearly contains two distinct popluations of spikes. The **XSort** vi
 data visualizations to help you make these determinations. This section describes how you can edit the contents of the
 neural units table.
 
+### Editing a unit's label
+You may specify a descriptive label for any unit in the units table. To edit the label, simply double-click on the
+corresponding cell under the "Label" column in the table and edit the label string "in place". The label may be up to
+25 characters in length (any leading and trailing whitespace is removed) and cannot contain any commas.
+
 ### Delete
 Whenever a single unit (ie, a single row) is selected in the table, the **Edit | Delete** command is enabled. Selecting 
 this command will remove the unit from the table and move the selection to the next unit.

@@ -89,7 +89,7 @@ class UserEdit:
     def longer_description(self) -> str:
         """ A longer description of the edit record that includes the UIDs of the affected/created units. """
         if self._op == UserEdit.LABEL:
-            desc = f"Changed unit {self.affected_uids} label: '{self.previous_unit_label}' --> '{self.unit_label}"
+            desc = f"Changed unit {self.affected_uids} label: '{self.previous_unit_label}' --> '{self.unit_label}'"
         elif self._op == UserEdit.DELETE:
             desc = f"Deleted unit '{self.affected_uids}'"
         elif self._op == UserEdit.MERGE:
