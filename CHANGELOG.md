@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.1.4 (TBD)
+- Finished implementation of the **Help** view, which offers a small user guide for XSort. The guide is divided into
+five chapters. A dropdown combo box selects the chapter displayed in the read-only text browers. The chapter contents
+are maintained in Markdown files in the `assets` folder.
+- Minor changes to `CorrelogramView`: Added a horizontal line at zero correlation and a translucent white vertical band
+spanning the time range -1.5 to +1.5 milliseconds in each ACG or CCG plot. A checkbox at the bottom of the view lets
+the user toggle the visibility of the zero correlation lines.
+- Modified how user selects units for display in the neural units table. Clicking on any row in the table selects the
+corresponding unit for display while clearing any previous selection (single-selection behavior). To select multiple
+units for display (up to three), you must hold down the `Control` key (`Command` key on MacOS) while clicking on each 
+table row to select.
+
 ## v0.1.3 (01/22/2024)
 - Implemented the **Edit|Split** operation. All editing operations are now available.
 - Added modal progress dialog to block user input when waiting on a cancelled background task to stop. The dialog

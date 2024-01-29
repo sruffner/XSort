@@ -1,7 +1,7 @@
 from typing import List, Any, Optional
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings
-from PySide6.QtGui import QColor, QAction
+from PySide6.QtGui import QColor, QAction, QGuiApplication
 from PySide6.QtWidgets import QTableView, QHeaderView, QHBoxLayout, QSizePolicy, QMenu
 
 from xsort.data.analyzer import Analyzer
@@ -246,9 +246,10 @@ class NeuronView(BaseView):
         self._model.reload_table_data()
 
     def on_item_clicked(self, index: QModelIndex) -> None:
-        u = self._model.unit_uid_for_row(index.row())
-        if not (u is None):
-            self.data_manager.update_neurons_with_display_focus(u)
+        uid = self._model.unit_uid_for_row(index.row())
+        clear_previous_selection = (QGuiApplication.keyboardModifiers() == Qt.KeyboardModifier.NoModifier)
+        if isinstance(uid, str):
+            self.data_manager.update_neurons_with_display_focus(uid, clear_previous_selection)
 
     def _on_table_right_click(self, pos: QPoint) -> None:
         """ Handler raises the context menu by which user toggles the visiblity of selected columns in the table. """

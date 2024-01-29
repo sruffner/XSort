@@ -261,21 +261,38 @@ class Analyzer(QObject):
         except ValueError:
             return None
 
-    def update_neurons_with_display_focus(self, uid: str) -> None:
+    def update_neurons_with_display_focus(self, uid: str, clear_previous: bool = True) -> None:
         """
-        Update the list of neural units currently selected for display/comparison purposes. The specified unit is
-        removed from the selection list if it is already there; otherwise, it is appended to the end of the list unless
-        _MAX_NUM_FOCUS_NEURONS are already selected. **A signal is emitted whenever the neuron display list changes.**
+        Update the list of neural units currently selected for display/comparison purposes:
+         - If the specified unit is invalid and the clear flag is set, the display list is cleared.
+         - If the specified unit is valid and the clear flag is set, the display list is updated to contain only that
+           unit. Thus, setting the clear flag enforces "single selection" behavior on the list.
+         - If the specified unit is valid and the clear flag is unset, the unit is appended to the display list unless
+           it is already there or the display list is full.
 
-        :param uid: The UID of the neural unit to be added or removed from the selection list. If the UID is invalid, or
-            the current display list is full and does not contain the specified unit, no action is taken.
+        **A signal is emitted whenever the neuron display list changes.**
+
+        :param uid: The UID of the neural unit to be added to the selection list.
+        :param clear_previous: If True, the current display list is cleared and only the specified unit is selected. If
+            False, the specified unit is added to the current display list if it is not already there and fewer than
+            _MAX_NUM_FOCUS_NEURONS are already selected. Default is True.
         """
-        if uid in self._focus_neurons:
-            self._focus_neurons.remove(uid)
-        elif ((len(self._focus_neurons) == self.MAX_NUM_FOCUS_NEURONS) or not
-                (uid in [n.uid for n in self._neurons])):
+        uid_exists = (uid in [n.uid for n in self._neurons])
+        if not uid_exists:
+            if not clear_previous:
+                return
+            elif len(self._focus_neurons) == 0:
+                return
+            else:
+                self._focus_neurons.clear()
+        elif not clear_previous:
+            if (len(self._focus_neurons) == self.MAX_NUM_FOCUS_NEURONS) or (uid in self._focus_neurons):
+                return
+            self._focus_neurons.append(uid)
+        elif (len(self._focus_neurons) == 1) and (self._focus_neurons[0] == uid):
             return
         else:
+            self._focus_neurons.clear()
             self._focus_neurons.append(uid)
 
         self._on_focus_list_changed()

@@ -52,17 +52,16 @@ selection, red for the second, and yellow for the third. The same color is used 
 correlograms, and other statistics for each unit across the various views.
 
 When **XSort** initially loads the content of the current working directory, no units are selected, so most of the views
-contain nothing of interest. To select a unit, simply click anywhere on the corresponding row in the table. You will 
-notice that the views are updated -- sometimes after a noticeable delay -- to display the relevant metrics or statistics
-for the selected unit. Some statistics, once computed, are cached in memory and render quickly -- such as the 
-correlograms and spike templates. The principal component analyis, however, must be redone each time the display
+contain nothing of interest. To select a unit, simply click anywhere on the corresponding row in the table; the previous
+selection, if any, is cleared (single-selection behavior). To select multiple units (up to 3) for display, hold the 
+`Control` key (the `Command` key in MacOS) down while clicking on the relevant rows.
+
+You will notice that the views are updated -- sometimes after a noticeable delay -- to display the relevant metrics or 
+statistics for the selected unit(s). Some statistics, once computed, are cached in memory and render quickly -- such as 
+the correlograms and spike templates. The principal component analyis, however, must be redone each time the display
 list changes. 
 
 Whenever any statistics need to be computed, those calculations happen on a background thread and the views are updated
 as the background task delivers its results. If a background task is still running and you change the display list again 
 or actually edit the units table, that task is cancelled and a modal dialog blocks user input until that task stops,
 typically in a few seconds or less.
-
-
-
-
