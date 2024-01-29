@@ -27,6 +27,14 @@ The correlograms are computed once on a background task but then cached in-memor
 As with the **Templates** view, you can "zoom" in on the correlograms; use the slider at the bottom of the view to 
 adjust the correlogram span between 20 and 200 milliseconds (+/-10ms to +/-100ms).
 
+The plots include two annoations: a dashed white line at zero correlation and a translucent white vertical
+band spanning T=-1.5 to +1.5 milliseconds. These visual guides help the user quickly check whether or not there is 
+significant correlation in pairs of spikes occurring 1ms apart -- an indication that the neural unit's spike train
+is contaminated in some way. The "Show zero correlation" checkbox toggles the visibility of the zero correlation line.
+
+Both the visible state of the zero correlation marker and the current correlogram span are user preferences that are
+saved at application exit and restored the next time **XSort** launches.
+
 ### Interspike Interval Histograms
 
 This view plots, on the same axes, the interspike interval (ISI) histogram for each unit in the display list. The 

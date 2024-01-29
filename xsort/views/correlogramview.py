@@ -2,7 +2,7 @@ from typing import Optional
 
 from PySide6.QtCore import Qt, Slot, QSettings
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QSlider
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QSlider, QCheckBox
 import pyqtgraph as pg
 import numpy as np
 from pyqtgraph import ViewBox
@@ -27,8 +27,11 @@ class CorrelogramView(BaseView):
     indicating that "No neurons are selected".
         ACGs and CCGs are computed lazily as needed, then cached in the :class:`Neuron` instances. This view is
     refreshed whenever the ACG/CCGs of a unit in the current display list are updated.
-        Finally, a slider at the bottom of the view allows the user to change the visible span of all ACG/CCGs
-    currently drawn. A change in the slider position merely changes the X-axis range on all subplots.
+        The ACG/CCG plots include two annotations: a dashed white horizontal line at zero correlation, and a translucent
+    white vertical band spanning the range T=-1.5 to +1.5ms.
+        There are two controls at the bottom of the view that affect the appearance of the ACG/CCG plots. A slider lets
+    the user change the visible span of all ACG/CCGs currently drawn. A change in the slider position merely changes the
+    X-axis range on all subplots. A checkbox toggles the visibility of the zero correlation line.
     """
 
     _MIN_TSPAN_MS: int = 20
@@ -47,6 +50,8 @@ class CorrelogramView(BaseView):
         Slider sets the X-axis range for all plots, letting user adjust the displayed span of the ACG/CCGs (in 
         milliseconds). This will be some or all of the computed span, which is fixed.
         """
+        self._show_zero_cb = QCheckBox("Show zero correlation")
+        """ If checked, the plots include a horizontal dashed line at Y=0 (zero correlation). """
         self._scale_bar: Optional[pg.ScaleBar] = None
         """ Horizontal calibration bar indicating time scale in lieu of a visible X-axis. """
 
@@ -62,9 +67,12 @@ class CorrelogramView(BaseView):
         max_label = QLabel(f"{self._MAX_TSPAN_MS} ms")
         max_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
+        self._show_zero_cb.stateChanged.connect(self._reset)
+
         main_layout = QVBoxLayout()
         main_layout.addWidget(self._layout_widget)
         control_line = QHBoxLayout()
+        control_line.addWidget(self._show_zero_cb)
         control_line.addStretch(2)
         control_line.addWidget(min_label)
         control_line.addWidget(self._hist_span_slider, stretch=1)
@@ -115,10 +123,21 @@ class CorrelogramView(BaseView):
                 vb.setXRange(min=-visible_span, max=visible_span, padding=0.05)
                 pi.hideButtons()
                 pi.hideAxis('bottom')
+
+                # annotations: a horizontal line at zero correlation, and a linear vertical region spanning +/-1.5ms.
+                # The zero correlation line may be toggled on/off
+                if self._show_zero_cb.isChecked():
+                    pi.addItem(pg.InfiniteLine(
+                        pos=0, angle=0, movable=False,
+                        pen=pg.mkPen(color='w', style=Qt.PenStyle.DashLine, width=self._PEN_WIDTH)))
+                pi.addItem(pg.LinearRegionItem(values=(-1.5, 1.5), pen=pg.mkPen(None), brush=pg.mkBrush("#FFFFFF40"),
+                                               movable=False), ignoreBounds=True)
+
+                # put horizontal time scale bar in the bottom right plot
                 if (i == num_units - 1) and (j == num_units - 1):
-                    self._scale_bar = pg.ScaleBar(size=20, suffix='ms')
+                    self._scale_bar = pg.ScaleBar(size=10, suffix='ms')
                     self._scale_bar.setParentItem(pi.getViewBox())
-                    self._scale_bar.anchor(itemPos=(0, 1), parentPos=(0.75, 1), offset=(0, -20))
+                    self._scale_bar.anchor(itemPos=(0, 1), parentPos=(1, 1), offset=(-20, -30))
 
     def on_working_directory_changed(self) -> None:
         self._reset()
@@ -165,12 +184,20 @@ class CorrelogramView(BaseView):
                     plot_item.getViewBox().setXRange(min=-span, max=span, padding=0.05)
 
     def save_settings(self, settings: QSettings) -> None:
-        """ Overridden to preserve the current histogram span, which is user selectable between 20-200ms. """
+        """
+        Overridden to preserve view-specific settings: (1) the current histogram span, which is user selectable between
+        20-200ms; and (2) whether or not the zero-correlation line is shown.
+        """
         settings.setValue('correlogram_view_span', self._hist_span_slider.sliderPosition())
+        settings.setValue('correlogram_view_show_zero', self._show_zero_cb.isChecked())
 
     def restore_settings(self, settings: QSettings) -> None:
-        """ Overridden to restore the current histogram span from user settings. """
+        """
+        Overridden to restore the current histogram span and "show zero correlation line" flag from user settings.
+        """
         try:
+            shown: bool = (settings.value('correlogram_view_show_zero', defaultValue="true") == "true")
+            self._show_zero_cb.setChecked(shown)
             span = int(settings.value('correlogram_view_span'))
             self._hist_span_slider.setSliderPosition(span)
             self._on_hist_span_changed()

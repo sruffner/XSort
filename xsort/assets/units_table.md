@@ -18,7 +18,7 @@ measured.
 6. **SNR** -- Highest observed signal-to-noise ratio for the unit across all recorded Omniplex analog data channels.
 7. **Amp (uV)** -- Peak-to-peak amplitude of the unit's mean spike waveform (template) as measured on the primary
 channel.
-8. **%ISI<1** -- Fraction of interspike intervals (ISI) in this unit's spike train that are less than 1 millisecon. An 
+8. **%ISI<1** -- Fraction of interspike intervals (ISI) in this unit's spike train that are less than 1 millisecond. An 
 ISI less than the typical refractory period is an indication that some of the spike timestamps attributed to the unit 
 are simply noise or should be assigned to another unit.
 9. **Similarity** -- The degree of similarity of this unit to the first selected unit in the table -- the _primary 
