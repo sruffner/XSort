@@ -7,7 +7,7 @@ from typing import Tuple, Optional, List, Dict, Any
 
 import numpy as np
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QComboBox, QLineEdit, QCheckBox, QVBoxLayout, \
-    QGroupBox, QGridLayout, QMainWindow, QPushButton, QApplication, QSpacerItem
+    QGroupBox, QGridLayout, QMainWindow, QPushButton, QApplication
 
 from xsort.data import PL2
 from xsort.data.neuron import Neuron
@@ -196,13 +196,31 @@ class WorkingDirectory:
         self._unit_src = unit_src
         """ Name of spike-sorted neural unit data source file within the working directory. """
         self._sampling_rate: int = rate
-        """ Sampling rate in Hz for analog data streams in flat binary file. Ignored for PL2 source file. """
+        """ 
+        Sampling rate in Hz for analog data streams. Specified by user if analog source is a flat binary file; extracted
+        from Omniplex PL2 file.
+        """
         self._num_channels: int = num_channels
-        """ Number of analog data channels stored in flat binary file. Ignored for Pl2 source file. """
+        """ 
+        Number of analog data channels recorded. Specified by user if analog source is a flat binary file; extracted
+        from Omniplex Pl2 file. 
+        """
+        self._analog_channel_indices: List[int] = list()
+        """ 
+        List of analog channel indices. For a flat binary file, this is always [0..N-1], where N is the number of
+        channels specified by user. For an Omniplex source, it depends on which wideband and/or narrowband channels
+        were used during the recording session.
+        """
         self._interleaved: bool = interleaved
         """ Are analog data channel samples interleaved in flat binary file? Ignored for PL2 source file. """
         self._prefiltered: bool = prefiltered
         """ Is analog data in flat binary file prefiltered? Ignored for PL2 source file."""
+        self._recording_dur_seconds: float = 0
+        """ 
+        Analog channel recording duration. For a flat binary file, this is based on file size, the number of 
+        analog channels recorded, and the sampling rate specified by user. For a PL2 file, the duration is extracted
+        from metadata stored in the file.
+        """
         self._pl2_info: Optional[Dict[str, Any]] = None
         """ 
         Metadata extracted from the Omniplex PL2 file if that is the analog data source. Ignored if the analog data 
@@ -222,6 +240,9 @@ class WorkingDirectory:
          - The spike-sorted neural units source file must exist. The list of neural units is loaded from the file to
            verify its correctness.
 
+        This method is called at construction time and computes or retrieves several parameters including analog
+        sampling rate, analog recording duration, and number of analog channels.
+
         :return: A brief error description if a problem is detected, else None.
         """
         if not (isinstance(self._folder, Path) and self._folder.is_dir()):
@@ -233,12 +254,31 @@ class WorkingDirectory:
 
         if self.analog_source.suffix.lower() == '.pl2':
             try:
-                with open(self.analog_source, 'rb') as fp:
+                with (open(self.analog_source, 'rb') as fp):
                     self._pl2_info = PL2.load_file_information(fp)
+                    channel_list = self._pl2_info['analog_channels']
+                    for i in range(len(channel_list)):
+                        if channel_list[i]['num_values'] > 0:
+                            if channel_list[i]['source'] in [PL2.PL2_ANALOG_TYPE_WB, PL2.PL2_ANALOG_TYPE_SPKC]:
+                                self._analog_channel_indices.append(i)
+                    ch_indices = self._analog_channel_indices
+                    self._num_channels = len(ch_indices)
+                    self._sampling_rate = \
+                        int(self._pl2_info['analog_channels'][ch_indices[0]]['samples_per_second'])
+                    if self._sampling_rate > 0:
+                        dur = max([self._pl2_info['analog_channels'][idx]['num_values'] for idx in ch_indices])
+                        self._recording_dur_seconds = dur / self._sampling_rate
+
             except Exception as e:
                 return f"Unable to read Ommniplex (PL2) file: {str(e)}"
         elif (self._num_channels <= 0) or ((self.analog_source.stat().st_size % (self._num_channels * 2)) != 0):
             return "Flat binary analog data source file is not consistent with # of channels specified"
+        else:
+            # compute analog recording duration based on flat binary file's size and user-specifed sampling rate and
+            # number of channels
+            num_scans = self.unit_source.stat().st_size / (2 * self._num_channels)
+            self._recording_dur_seconds = num_scans / float(self._sampling_rate)
+            self._analog_channel_indices = [k for k in range(self._num_channels)]
 
         emsg, units = self.load_neural_units()
         if len(emsg) > 0:
@@ -416,16 +456,43 @@ class WorkingDirectory:
     @property
     def analog_channel_indices(self) -> List[int]:
         """ List of analog channel indices on which electrophysiological data was recorded. """
+        return self._analog_channel_indices.copy()
+
+    def label_for_analog_channel(self, idx: int) -> str:
+        """
+        A short label for the specified analog channel. If the analog source is Omniplex, then the label has the
+        form "WB<N>" for a wideband channel and "SPKC<N>" for a narrowband channel, where N is the channel's ordinal
+        position in the bank of available wideband ar narrowband channels on the Omniplex system (it is NOT the
+        channel index). If the analog source is a flat binary file, then the label is simply "Ch<X>", where X is the
+        channel index.
+        :param idx: The channel index.
+        :return: The channel label, or an empty string if the index is invalid.
+        """
         if self._pl2_info is None:
-            return [k for k in range(self._num_channels)]
+            return f"Ch{idx}" if 0 <= idx < self._num_channels else ""
         else:
-            out: List[int] = list()
-            channel_list = self._pl2_info['analog_channels']
-            for i in range(len(channel_list)):
-                if channel_list[i]['num_values'] > 0:
-                    if channel_list[i]['source'] in [PL2.PL2_ANALOG_TYPE_WB, PL2.PL2_ANALOG_TYPE_SPKC]:
-                        out.append(i)
-            return out
+            if idx in self._analog_channel_indices:
+                ch_dict = self._pl2_info['analog_channels'][idx]
+                src = "WB" if ch_dict['source'] == PL2.PL2_ANALOG_TYPE_WB else "SPKC"
+                return f"{src}{str(ch_dict['channel'])}"
+            else:
+                return ""
+
+    @property
+    def analog_sampling_rate(self) -> int:
+        """ The analog channel sampling rate in Hz. """
+        return self._sampling_rate
+
+    @property
+    def analog_channel_recording_duration_seconds(self) -> float:
+        """
+        Duration of analog channel recording in seconds.
+
+        If the analog source is the Omniplex, this method reports the maximum observed recording duration (total number
+        of samples) across the relevant channels, but typically the duration is the same for all. If the source is a
+        flat binary file, then the duration is determined by the file size and the user-specified sampling rate.
+        """
+        return self._recording_dur_seconds
 
     @property
     def unit_source(self) -> Path:
@@ -437,6 +504,12 @@ class WorkingDirectory:
         Load all neural units stored in the unit data source file in this working directory. This Python pickle file
         contains the results of spike sorting as a list of Python dictionaries, where each dictionary represents one
         neural unit.
+
+        **NOTE**: Immediately after the working directory is loaded, this method is guaranteed to succeed because the
+        neural units are loaded from the pickle file to verify the directory contains the required files. The units are
+        cached until the first time this method is invoked after the :class:`WorkingDirectory` object is loaded, then
+        cleared. Further invocatios of the method could fail.
+
         :return: On success, a tuple ("", L), where L is a list of :class:`Neuron` objects encapsulating the neural
             units found in the file. Certain derived unit metrics -- mean spike waveforms, SNR, primary analog channel
             -- will be undefined. On failure, returns ('error description', None).

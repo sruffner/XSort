@@ -1,6 +1,6 @@
 import time
 from pathlib import Path
-from typing import Union, Optional, Dict, Any, List, Tuple
+from typing import Union, Optional, Dict, List, Tuple
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer, QPointF
@@ -8,13 +8,12 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPolygonF
 from PySide6.QtWidgets import QMainWindow, QProgressDialog
 
-from xsort.data import PL2
 from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
 from xsort.data.tasks import (Task, TaskType)
-from xsort.data.files import get_required_data_files, load_spike_sorter_results, unit_cache_file_exists, \
+from xsort.data.files import unit_cache_file_exists, \
     delete_unit_cache_file, delete_all_derived_unit_cache_files_from, save_neural_unit_to_cache, \
-    load_neural_unit_from_cache
+    load_neural_unit_from_cache, WorkingDirectory
 
 
 class Analyzer(QObject):
@@ -66,27 +65,20 @@ class Analyzer(QObject):
         The main application window. Need this in order to block the UI with a modal progress dialog whenever we need to
         prevent further user interaction while waiting for some long-running task to finish.
         """
-        self._working_directory: Optional[Path] = None
-        """ The current working directory. """
-        self._pl2_file: Optional[Path] = None
-        """ The Omniplex mulit-channel electrode recording file (PL2). """
-        self._pl2_info: Optional[Dict[str, Any]] = None
-        """ Metadata extracted from the Omniplex data file. """
+        self._working_directory: Optional[WorkingDirectory] = None
+        """ The current working directory with configuration information. """
         self._channel_segments: Dict[int, Optional[ChannelTraceSegment]] = dict()
         """ 
-        Maps the index of a recorded analog channel in the Omniplex file to a one-second segment of the data stream 
-        from that channel. Only includes analog wideband and narrowband channels that were actually recorded. Since the
-        Omniplex file is very large and the analog data streams must be extracted, bandpass-filtered if necessary, and
-        cached in separate files for faster lookup, the channel trace segments will not be ready upon changing the
-        working directory.
+        Maps the index of a recorded analog channel to a one-second segment of the data stream from that channel. Since 
+        the analog data source is very large, and each channel's data stream must be extracted, bandpass-filtered if
+        necessary, and cached in separate files for faster lookup, the channel trace segments will not be ready upon 
+        changing the working directory.
         """
         self._channel_seg_start: int = 0
         """ 
-        Current elapsed time, in seconds relative to the start of the Omniplex recording, at which all one-second analog
-        channel trace segments begin (once they are loaded from internal cache).
+        Current elapsed time, in seconds relative to the start of the electrophysiological recording, at which all 
+        one-second analog channel trace segments begin (once they are loaded from internal cache).
         """
-        self._pkl_file: Optional[Path] = None
-        """ The original spike sorter results file (for now, must be a Python Pickle file). """
         self._neurons: List[Neuron] = list()
         """ 
         List of defined neural units. When a valid working directory is set, this will contain information on the neural
@@ -123,18 +115,18 @@ class Analyzer(QObject):
     @property
     def working_directory(self) -> Optional[Path]:
         """ The analyzer's current working directory. None if no valid working directory has been set. """
-        return self._working_directory
+        return self._working_directory.path if isinstance(self._working_directory, WorkingDirectory) else None
 
     @property
     def is_valid_working_directory(self) -> bool:
         """ True if analyzer's working directory is set and contains the data files XSort requires. """
-        return isinstance(self._working_directory, Path)
+        return isinstance(self._working_directory, WorkingDirectory)
 
     @property
     def channel_indices(self) -> List[int]:
         """
-        The indices of the wideband ("WB") and narrowband ("SPKC") analog channels available in the Omniplex
-        multielectrode recording. Will be empty if no valid working directory has been set. In ascending order.
+        The indices of the analog channels available in the multielectrode recording. Will be empty if no valid working
+        directory has been set. In ascending order.
         """
         indices = [k for k in self._channel_segments.keys()]
         indices.sort()
@@ -142,18 +134,15 @@ class Analyzer(QObject):
 
     def channel_label(self, idx: int) -> str:
         """
-        Get the channel label for the specified Omniplex analog channel. XSort only exposes the wideband and narrowband
-        nalog channels with labels "WB<N>" or "SPKC<N>, respectively, where N is the channel number (NOT the channel
-        index, but the ordinal position of the channel within the set of available wide or narrow band channels).
-        :param idx: Index of an Omminplex analog channel
-        :return: The channel label. Returns an empty string if specified channel index is not one of the channel
-            indices returned by :method:`Analyzer.channel_indices`.
+        Get the channel label for the specified analog channel. If the analog source is the Omniplex system, XSort only
+        exposes the wideband and narrowband analog channels with labels "WB<N>" or "SPKC<N>, respectively, where N is
+        the channel number (NOT the channel index, but the ordinal position of the channel within the set of available
+        wide or narrow band channels). If the analog source is a flat binary final, then the channel label is merely
+        "Ch<N>, where N is the channel index (starting from 0).
+        :param idx: Index of the analog channel
+        :return: The channel's label. Returns an empty string if specified channel index is invalid.
         """
-        if (self._pl2_info is None) or not (idx in self._channel_segments.keys()):
-            return ""
-        ch_dict = self._pl2_info['analog_channels'][idx]
-        src = "WB" if ch_dict['source'] == PL2.PL2_ANALOG_TYPE_WB else "SPKC"
-        return f"{src}{str(ch_dict['channel'])}"
+        return "" if self._working_directory is None else self._working_directory.label_for_analog_channel(idx)
 
     def channel_trace(self, idx: int) -> Optional[ChannelTraceSegment]:
         """
@@ -169,11 +158,7 @@ class Analyzer(QObject):
         Analog channel sampling rate in Hz -- same for all channels we care about. Will be 0 if current working
         directory is invalid.
         """
-        if (self._pl2_info is None) or (len(self._channel_segments) == 0):
-            return 0
-        else:
-            idx = next(iter(self._channel_segments))
-            return int(self._pl2_info['analog_channels'][idx]['samples_per_second'])
+        return 0 if self._working_directory is None else self._working_directory.analog_sampling_rate
 
     @property
     def channel_recording_duration_seconds(self) -> float:
@@ -182,12 +167,8 @@ class Analyzer(QObject):
         (total number of samples) across the channels we care about, but typically the duration is the same for all
         channels. Will be 0 if current working directory is invalid.
         """
-        rate = self.channel_samples_per_sec
-        if rate > 0:
-            dur = max([self._pl2_info['analog_channels'][idx]['num_values'] for idx in self._channel_segments.keys()])
-            return dur / rate
-        else:
-            return 0
+        return 0 if self._working_directory is None else \
+            self._working_directory.analog_channel_recording_duration_seconds
 
     @property
     def channel_trace_seg_start(self) -> int:
@@ -337,16 +318,18 @@ class Analyzer(QObject):
         """
         self._cancel_background_task(t)
 
+        # TODO: For now, leaving tasks.py alone -- but we should really give it WorkingDirectory, which already
+        #   contains the PL2 Info
         if t == TaskType.BUILDCACHE:
-            task = Task(TaskType.BUILDCACHE, self._working_directory)
+            task = Task(TaskType.BUILDCACHE, self._working_directory.path)
         elif t == TaskType.COMPUTESTATS:
             focus_list = self.neurons_with_display_focus
             if len(focus_list) == 0:
                 return
-            task = Task(TaskType.COMPUTESTATS, self._working_directory, units=focus_list)
+            task = Task(TaskType.COMPUTESTATS, self._working_directory.path, units=focus_list)
         elif t == TaskType.GETCHANNELS:
             t0 = self._channel_seg_start
-            task = Task(TaskType.GETCHANNELS, self._working_directory, start=t0 * self.channel_samples_per_sec,
+            task = Task(TaskType.GETCHANNELS, self._working_directory.path, start=t0 * self.channel_samples_per_sec,
                         count=self.channel_samples_per_sec)
         else:
             return
@@ -374,8 +357,8 @@ class Analyzer(QObject):
         Save the edit history for the current XSort working directory. Be sure to call this method prior to
         application shutdown.
         """
-        if isinstance(self._working_directory, Path) and self._working_directory.is_dir():
-            UserEdit.save_edit_history(self._working_directory, self._edit_history)
+        if isinstance(self._working_directory, WorkingDirectory):
+            UserEdit.save_edit_history(self._working_directory.path, self._edit_history)
 
     def change_working_directory(self, p: Union[str, Path]) -> Optional[str]:
         """
@@ -396,34 +379,14 @@ class Analyzer(QObject):
         _p = Path(p) if isinstance(p, str) else p
         if not isinstance(_p, Path):
             return "Invalid directory path"
-        elif _p == self._working_directory:
+        elif isinstance(self._working_directory, WorkingDirectory) and (_p == self._working_directory.path):
             return None
         elif not _p.is_dir():
             return "Directory not found"
 
-        # check for required data files. For now, we expect exactly one PL2 and one PKL file
-        pl2_file, pkl_file, emsg = get_required_data_files(_p)
-        if len(emsg) > 0:
-            return emsg
-
-        # load metadata from the PL2 file.
-        pl2_info: Dict[str, Any]
-        channel_map: Dict[int, Optional[ChannelTraceSegment]] = dict()
-        try:
-            with open(pl2_file, 'rb') as fp:
-                pl2_info = PL2.load_file_information(fp)
-                channel_list = pl2_info['analog_channels']
-                for i in range(len(channel_list)):
-                    if channel_list[i]['num_values'] > 0:
-                        if channel_list[i]['source'] in [PL2.PL2_ANALOG_TYPE_WB, PL2.PL2_ANALOG_TYPE_SPKC]:
-                            channel_map[i] = None
-        except Exception as e:
-            return f"Unable to read Ommniplex (PL2) file: {str(e)}"
-
-        # load neural units (spike train timestamps) from the spike sorter results file (PKL)
-        emsg, neurons = load_spike_sorter_results(pkl_file)
-        if len(emsg) > 0:
-            return f"Unable to read spike sorter results from PKL file: {emsg}"
+        emsg, work_dir = WorkingDirectory.load_working_directory(_p, self._main_window)
+        if work_dir is None:
+            return emsg if len(emsg) > 0 else "User cancelled"
 
         # load edit history file (if present)
         emsg, edit_history = UserEdit.load_edit_history(_p)
@@ -431,13 +394,10 @@ class Analyzer(QObject):
             return f"Error reading edit history: {emsg}"
 
         # success
-        self._working_directory = _p
-        self._pl2_file = pl2_file
-        self._pl2_info = pl2_info
-        self._channel_segments = channel_map
+        self._working_directory = work_dir
+        self._channel_segments = {k: None for k in work_dir.analog_channel_indices}
         self._channel_seg_start = 0
-        self._pkl_file = pkl_file
-        self._neurons = neurons
+        _, self._neurons = work_dir.load_neural_units()
         self._edit_history = edit_history
         self._focus_neurons.clear()
 
@@ -505,7 +465,7 @@ class Analyzer(QObject):
         :return: True only if the above requirements are met.
         """
         primary: Optional[Neuron] = self.primary_neuron
-        return (len(self._focus_neurons) == 1) and unit_cache_file_exists(self._working_directory, primary.uid)
+        return (len(self._focus_neurons) == 1) and unit_cache_file_exists(self._working_directory.path, primary.uid)
 
     def delete_primary_neuron(self, uid: Optional[str] = None) -> None:
         """
@@ -547,7 +507,7 @@ class Analyzer(QObject):
 
         :return: True only if the above requirements are met.
         """
-        return (len(self._focus_neurons) == 2) and all([unit_cache_file_exists(self._working_directory, uid)
+        return (len(self._focus_neurons) == 2) and all([unit_cache_file_exists(self._working_directory.path, uid)
                                                         for uid in self._focus_neurons])
 
     def merge_focus_neurons(self) -> None:
@@ -568,7 +528,7 @@ class Analyzer(QObject):
         units = self.neurons_with_display_focus
         merged_unit = Neuron.merge(units[0], units[1], self._find_next_assignable_unit_index())
         try:
-            save_neural_unit_to_cache(self._working_directory, merged_unit, suppress=False)
+            save_neural_unit_to_cache(self._working_directory.path, merged_unit, suppress=False)
         except Exception as e:
             print(f"Save to cache failed: {str(e)}")
             return  # TODO: Should report reason operation failed
@@ -599,7 +559,8 @@ class Analyzer(QObject):
         """
         if self._lasso_for_split == lasso_region:
             return
-        if (len(self._focus_neurons) == 1) and unit_cache_file_exists(self._working_directory, self._focus_neurons[0]):
+        if ((len(self._focus_neurons) == 1) and
+                unit_cache_file_exists(self._working_directory.path, self._focus_neurons[0])):
             if (lasso_region is None) or not lasso_region.isClosed():
                 self._lasso_for_split = None
             else:
@@ -617,7 +578,7 @@ class Analyzer(QObject):
         """
         focussed = self.neurons_with_display_focus
         return ((len(focussed) == 1) and (focussed[0].num_spikes > 2) and
-                unit_cache_file_exists(self._working_directory, focussed[0].uid) and
+                unit_cache_file_exists(self._working_directory.path, focussed[0].uid) and
                 focussed[0].is_pca_projection_cached and (self._lasso_for_split is not None))
 
     def split_primary_neuron(self) -> None:
@@ -682,7 +643,7 @@ class Analyzer(QObject):
 
             try:
                 for u in split_units:
-                    save_neural_unit_to_cache(self._working_directory, u, suppress=False)
+                    save_neural_unit_to_cache(self._working_directory.path, u, suppress=False)
             except Exception as e:
                 print(f"Save to cache failed: {str(e)}")
                 return  # TODO: Should report reason operation failed
@@ -744,7 +705,7 @@ class Analyzer(QObject):
             return False
         elif edit_rec.operation == UserEdit.DELETE:
             uid = edit_rec.affected_uids
-            u = load_neural_unit_from_cache(self._working_directory, uid)
+            u = load_neural_unit_from_cache(self._working_directory.path, uid)
             if isinstance(u, Neuron):
                 # success: make undeleted neuron the one and only neuron in the current display list
                 self._neurons.append(u)
@@ -758,12 +719,12 @@ class Analyzer(QObject):
             merged_idx = next((i for i in range(len(self._neurons)) if self._neurons[i].uid == merged_uid), None)
             restored_units = list()
             for uid in edit_rec.affected_uids:
-                restored_units.append(load_neural_unit_from_cache(self._working_directory, uid))
+                restored_units.append(load_neural_unit_from_cache(self._working_directory.path, uid))
             if isinstance(merged_idx, int) and all([isinstance(u, Neuron) for u in restored_units]):
                 # success: remove the merged unit (including cache file), restore component units, and put them in the
                 # focus list
                 self._neurons.pop(merged_idx)
-                delete_unit_cache_file(self._working_directory, merged_uid)
+                delete_unit_cache_file(self._working_directory.path, merged_uid)
                 self._neurons.extend(restored_units)
                 self._focus_neurons.clear()
                 self._focus_neurons.extend([u.uid for u in restored_units])
@@ -773,7 +734,7 @@ class Analyzer(QObject):
         else:   # SPLIT
             split_uids = [uid for uid in edit_rec.result_uids]
             unsplit_uid = edit_rec.affected_uids
-            restored_unit = load_neural_unit_from_cache(self._working_directory, unsplit_uid)
+            restored_unit = load_neural_unit_from_cache(self._working_directory.path, unsplit_uid)
             split_units: List[Neuron] = list()
             for u in self._neurons:
                 if u.uid in split_uids:
@@ -782,7 +743,7 @@ class Analyzer(QObject):
                 # success: remove the component units, restore the unsplit unit, and put the focus on that unit
                 self._focus_neurons.clear()
                 for u in split_units:
-                    delete_unit_cache_file(self._working_directory, u.uid)
+                    delete_unit_cache_file(self._working_directory.path, u.uid)
                     self._neurons.remove(u)
                 self._neurons.append(restored_unit)
                 self._focus_neurons.append(restored_unit.uid)
@@ -820,7 +781,7 @@ class Analyzer(QObject):
             return
 
         # reload all "original" neural units from the spike sorter results file (PKL)
-        emsg, neurons = load_spike_sorter_results(self._pkl_file)
+        emsg, neurons = self._working_directory.load_neural_units()
         if len(emsg) > 0:
             return
 
@@ -841,7 +802,7 @@ class Analyzer(QObject):
         # for each "original unit" that is NOT in the current list, attempt to load its full metrics from internal
         # cache file if we can, then put it back in the unit list
         for u in neurons:
-            unit = load_neural_unit_from_cache(self._working_directory, u.uid)
+            unit = load_neural_unit_from_cache(self._working_directory.path, u.uid)
             self._neurons.append(unit if isinstance(unit, Neuron) else u)
 
         self._focus_neurons.clear()
@@ -849,7 +810,7 @@ class Analyzer(QObject):
         # clear edit history and remove any derived unit cache files
         self._edit_history.clear()
         self.save_edit_history()
-        delete_all_derived_unit_cache_files_from(self._working_directory)
+        delete_all_derived_unit_cache_files_from(self._working_directory.path)
 
         # signal views
         self._on_focus_list_changed()
