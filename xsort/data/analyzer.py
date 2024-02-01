@@ -11,9 +11,10 @@ from PySide6.QtWidgets import QMainWindow, QProgressDialog
 from xsort.data import PL2
 from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
-from xsort.data.tasks import (Task, TaskType, get_required_data_files, load_spike_sorter_results,
-                              unit_cache_file_exists, load_neural_unit_from_cache, delete_unit_cache_file,
-                              delete_all_derived_unit_cache_files_from, save_neural_unit_to_cache)
+from xsort.data.tasks import (Task, TaskType)
+from xsort.data.files import get_required_data_files, load_spike_sorter_results, unit_cache_file_exists, \
+    delete_unit_cache_file, delete_all_derived_unit_cache_files_from, save_neural_unit_to_cache, \
+    load_neural_unit_from_cache
 
 
 class Analyzer(QObject):
