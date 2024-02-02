@@ -11,9 +11,7 @@ from PySide6.QtWidgets import QMainWindow, QProgressDialog
 from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
 from xsort.data.tasks import (Task, TaskType)
-from xsort.data.files import unit_cache_file_exists, \
-    delete_unit_cache_file, delete_all_derived_unit_cache_files_from, save_neural_unit_to_cache, \
-    load_neural_unit_from_cache, WorkingDirectory
+from xsort.data.files import WorkingDirectory
 
 
 class Analyzer(QObject):
@@ -465,7 +463,7 @@ class Analyzer(QObject):
         :return: True only if the above requirements are met.
         """
         primary: Optional[Neuron] = self.primary_neuron
-        return (len(self._focus_neurons) == 1) and unit_cache_file_exists(self._working_directory.path, primary.uid)
+        return (len(self._focus_neurons) == 1) and self._working_directory.unit_cache_file_exists(primary.uid)
 
     def delete_primary_neuron(self, uid: Optional[str] = None) -> None:
         """
@@ -507,7 +505,7 @@ class Analyzer(QObject):
 
         :return: True only if the above requirements are met.
         """
-        return (len(self._focus_neurons) == 2) and all([unit_cache_file_exists(self._working_directory.path, uid)
+        return (len(self._focus_neurons) == 2) and all([self._working_directory.unit_cache_file_exists(uid)
                                                         for uid in self._focus_neurons])
 
     def merge_focus_neurons(self) -> None:
@@ -527,10 +525,8 @@ class Analyzer(QObject):
             return
         units = self.neurons_with_display_focus
         merged_unit = Neuron.merge(units[0], units[1], self._find_next_assignable_unit_index())
-        try:
-            save_neural_unit_to_cache(self._working_directory.path, merged_unit, suppress=False)
-        except Exception as e:
-            print(f"Save to cache failed: {str(e)}")
+        if not self._working_directory.save_neural_unit_to_cache(merged_unit):
+            print(f"Unable to save merged unit to internal cache file!")
             return  # TODO: Should report reason operation failed
 
         # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
@@ -560,7 +556,7 @@ class Analyzer(QObject):
         if self._lasso_for_split == lasso_region:
             return
         if ((len(self._focus_neurons) == 1) and
-                unit_cache_file_exists(self._working_directory.path, self._focus_neurons[0])):
+                self._working_directory.unit_cache_file_exists(self._focus_neurons[0])):
             if (lasso_region is None) or not lasso_region.isClosed():
                 self._lasso_for_split = None
             else:
@@ -578,7 +574,7 @@ class Analyzer(QObject):
         """
         focussed = self.neurons_with_display_focus
         return ((len(focussed) == 1) and (focussed[0].num_spikes > 2) and
-                unit_cache_file_exists(self._working_directory.path, focussed[0].uid) and
+                self._working_directory.unit_cache_file_exists(focussed[0].uid) and
                 focussed[0].is_pca_projection_cached and (self._lasso_for_split is not None))
 
     def split_primary_neuron(self) -> None:
@@ -641,11 +637,14 @@ class Analyzer(QObject):
             split_units.append(Neuron(idx + 1, outside_spikes, suffix='x'))
             self._progress_dlg.setValue(99)
 
-            try:
+            cached = True
+            for u in split_units:
+                if not self._working_directory.save_neural_unit_to_cache(u):
+                    cached = False
+            if not cached:
                 for u in split_units:
-                    save_neural_unit_to_cache(self._working_directory.path, u, suppress=False)
-            except Exception as e:
-                print(f"Save to cache failed: {str(e)}")
+                    self._working_directory.delete_unit_cache_file(u.uid)
+                print("Unable to save one or both split units to internal cache!")
                 return  # TODO: Should report reason operation failed
         finally:
             self._progress_dlg.close()
@@ -705,7 +704,7 @@ class Analyzer(QObject):
             return False
         elif edit_rec.operation == UserEdit.DELETE:
             uid = edit_rec.affected_uids
-            u = load_neural_unit_from_cache(self._working_directory.path, uid)
+            u = self._working_directory.load_neural_unit_from_cache(uid)
             if isinstance(u, Neuron):
                 # success: make undeleted neuron the one and only neuron in the current display list
                 self._neurons.append(u)
@@ -719,12 +718,12 @@ class Analyzer(QObject):
             merged_idx = next((i for i in range(len(self._neurons)) if self._neurons[i].uid == merged_uid), None)
             restored_units = list()
             for uid in edit_rec.affected_uids:
-                restored_units.append(load_neural_unit_from_cache(self._working_directory.path, uid))
+                restored_units.append(self._working_directory.load_neural_unit_from_cache(uid))
             if isinstance(merged_idx, int) and all([isinstance(u, Neuron) for u in restored_units]):
                 # success: remove the merged unit (including cache file), restore component units, and put them in the
                 # focus list
                 self._neurons.pop(merged_idx)
-                delete_unit_cache_file(self._working_directory.path, merged_uid)
+                self._working_directory.delete_unit_cache_file(merged_uid)
                 self._neurons.extend(restored_units)
                 self._focus_neurons.clear()
                 self._focus_neurons.extend([u.uid for u in restored_units])
@@ -734,7 +733,7 @@ class Analyzer(QObject):
         else:   # SPLIT
             split_uids = [uid for uid in edit_rec.result_uids]
             unsplit_uid = edit_rec.affected_uids
-            restored_unit = load_neural_unit_from_cache(self._working_directory.path, unsplit_uid)
+            restored_unit = self._working_directory.load_neural_unit_from_cache(unsplit_uid)
             split_units: List[Neuron] = list()
             for u in self._neurons:
                 if u.uid in split_uids:
@@ -743,7 +742,7 @@ class Analyzer(QObject):
                 # success: remove the component units, restore the unsplit unit, and put the focus on that unit
                 self._focus_neurons.clear()
                 for u in split_units:
-                    delete_unit_cache_file(self._working_directory.path, u.uid)
+                    self._working_directory.delete_unit_cache_file(u.uid)
                     self._neurons.remove(u)
                 self._neurons.append(restored_unit)
                 self._focus_neurons.append(restored_unit.uid)
@@ -802,7 +801,7 @@ class Analyzer(QObject):
         # for each "original unit" that is NOT in the current list, attempt to load its full metrics from internal
         # cache file if we can, then put it back in the unit list
         for u in neurons:
-            unit = load_neural_unit_from_cache(self._working_directory.path, u.uid)
+            unit = self._working_directory.load_neural_unit_from_cache(u.uid)
             self._neurons.append(unit if isinstance(unit, Neuron) else u)
 
         self._focus_neurons.clear()
@@ -810,7 +809,7 @@ class Analyzer(QObject):
         # clear edit history and remove any derived unit cache files
         self._edit_history.clear()
         self.save_edit_history()
-        delete_all_derived_unit_cache_files_from(self._working_directory.path)
+        self._working_directory.delete_all_derived_unit_cache_files()
 
         # signal views
         self._on_focus_list_changed()
