@@ -55,6 +55,12 @@ plugin "xcb" in "" even though it was found. This application failed to start be
 could be initialized. Reinstalling the application may fix this problem. Available platform plugins are: 
 minimalegl, minimal, wayland-egl, vkkhrdisplay, offscreen, eglfs, vnc, linuxfb, xcb, wayland.` If so, try
 reinstalling XCB platform plugin with `sudo apt-get install '*libxcb*'`
+- The XSort wheel file is configured to require Python 3.9 or later. You may want to avoid the "latest and
+greatest" Python release as issues may arise. Eg, `pip` could not install Numpy <= 1.25 when the installed
+Python version was 3.12. The Numpy developers released 1.26 to address the problem. A change in the wheel configuration 
+as of XSort 0.1.4 should address the conflict and ensure that the right version of Numpy is installed if the Python 
+version is 3.12 or later.
+
 
 ## License
 `XSort` was created by [Scott Ruffner](mailto:sruffner@srscicomp.com). It is

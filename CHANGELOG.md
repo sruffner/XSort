@@ -11,6 +11,18 @@ the user toggle the visibility of the zero correlation lines.
 corresponding unit for display while clearing any previous selection (single-selection behavior). To select multiple
 units for display (up to three), you must hold down the `Control` key (`Command` key on MacOS) while clicking on each 
 table row to select.
+- Updated `setup.cfg` to use ">=" rather than "==" in the `install_requires` section. This is needed for Numpy, in 
+particular, as `pip` won't install Numpy <= 1.25 if the Python version is 3.12, as changes made in the 3.12 elease were 
+incompatible with Numpy versions prior to 1.26.
+- Introduce support for an alternative working directory configuration. Instead of the Omniplex PL2 file, a flat
+binary file (extensions `.bin` or `.dat`) can serve as the analog source file. This file contains the analog channel
+streams as raw 16-bit signed integer samples. The streams may be stored one after the other or interleaved, and the
+raw data may be prefiltered or not. In addition, XSort now handles situations in which the specified working directory
+contains multiple Python pickle files and multiple `.pl2/.bin/.dat` files. Whenever the identity of the neural unit
+and analog channel data source files is ambiguous, or the analog source requires additional configuration from the
+user, XSort raises a modal dialog to request this information from the user.
+- Note that, if the analog source is a pre-filtered flat binary file, there is no need to generate the individual
+internal analog channel cache files.
 
 ## v0.1.3 (01/22/2024)
 - Implemented the **Edit|Split** operation. All editing operations are now available.

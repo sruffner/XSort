@@ -1,16 +1,16 @@
 import csv
 import pickle
 import struct
-import sys
 from pathlib import Path
 from typing import Tuple, Optional, List, Dict, Any
 
 import numpy as np
+from PySide6.QtGui import QIntValidator, QDoubleValidator, QFont
 from PySide6.QtWidgets import QDialog, QDialogButtonBox, QLabel, QComboBox, QLineEdit, QCheckBox, QVBoxLayout, \
-    QGroupBox, QGridLayout, QMainWindow, QPushButton, QApplication
+    QGroupBox, QGridLayout, QMainWindow
 
 from xsort.data import PL2
-from xsort.data.neuron import Neuron
+from xsort.data.neuron import Neuron, ChannelTraceSegment
 
 DIRINFO_FILE: str = '.xs.directory.txt'
 """
@@ -35,6 +35,7 @@ class _QueryDialog(QDialog):
         self._work_dir_path = folder
         self._analog_input_paths = analog_input_files
         self._unit_input_paths = unit_input_files
+        self._valid_config = False
 
         self.setWindowTitle(f"Select input files: {folder.name}")
 
@@ -69,21 +70,36 @@ class _QueryDialog(QDialog):
         # the "Flat Binary File Configuration" group
         nchan_label = QLabel("#Analog channels")
         self._nchannels_edit = QLineEdit()
-        self._nchannels_edit.setInputMask('09')
-        self._nchannels_edit.setText('4')
+        self._nchannels_edit.setValidator(QIntValidator(1, 99, self._nchannels_edit))
+        self._nchannels_edit.setText('16')
+        self._nchannels_edit.setToolTip("Enter number of recorded channels in [1..99].")
+        self._nchannels_edit.textEdited.connect(lambda _: self._refresh())
 
         rate_label = QLabel("Sampling rate (Hz)")
         self._rate_edit = QLineEdit()
-        self._rate_edit.setInputMask('00999')
+        self._rate_edit.setValidator(QIntValidator(1000, 99999, self._rate_edit))
         self._rate_edit.setText('40000')
+        self._rate_edit.textEdited.connect(lambda _: self._refresh())
+        self._rate_edit.setToolTip("Enter sampling rate in [1000 .. 99999] Hz; same for all channels.")
+
+        scale_label = QLabel("Voltage scaling (*1e-7):")
+        self._scale_edit = QLineEdit()
+        self._scale_edit.setValidator(QDoubleValidator(0.1, 99, 5, self._scale_edit))
+        self._scale_edit.setText('1.52588')
+        self._scale_edit.setToolTip('Multiply each 16-bit signed integer sample by '
+                                    'this factor to convert it to volts. Range: [0.1 .. 99] x 1e-7')
+        self._scale_edit.textEdited.connect(lambda _: self._refresh())
 
         self._interleaved_cb = QCheckBox('Interleaved?')
+        self._interleaved_cb.setToolTip('Check this box if the analog data channel samples are interleaved in the file')
         self._interleaved_cb.setChecked(False)
 
         self._prefiltered_cb = QCheckBox('Prefiltered?')
-        self._prefiltered_cb.setChecked(False)
+        self._prefiltered_cb.setToolTip("Check this box if the analog data has already been bandpass-filtered")
+        self._prefiltered_cb.setChecked(True)
 
-        self._warning_label = QLabel("Binary file size in bytes must be a multiple of 2 x #channels!")
+        self._warning_label = QLabel("Binary file consistent with number of channels specifed.")
+        self._warning_label.setFont(QFont(self._warning_label.font().family(), weight=QFont.Weight.Bold))
 
         config_grp = QGroupBox("Flat Binary File Configuration")
         config_grp_layout = QGridLayout()
@@ -93,7 +109,9 @@ class _QueryDialog(QDialog):
         config_grp_layout.addWidget(rate_label, 1, 0)
         config_grp_layout.addWidget(self._rate_edit, 1, 1)
         config_grp_layout.addWidget(self._prefiltered_cb, 1, 2)
-        config_grp_layout.addWidget(self._warning_label, 2, 0, 1, 3)
+        config_grp_layout.addWidget(scale_label, 2, 0)
+        config_grp_layout.addWidget(self._scale_edit, 2, 1)
+        config_grp_layout.addWidget(self._warning_label, 3, 0, 1, 3)
         config_grp.setLayout(config_grp_layout)
 
         # set initial state of the various widgets
@@ -122,23 +140,41 @@ class _QueryDialog(QDialog):
         the parameter widges are disabled and the warning label hidden.
         """
         sel_path = self._analog_input_paths[self._analog_input_combo.currentIndex()]
-        n_channels = int(self._nchannels_edit.text())
         enable_params = (sel_path.suffix.lower() != '.pl2')
-        warn = enable_params and (n_channels > 0) and ((sel_path.stat().st_size % (2 * n_channels)) != 0)
-
         self._nchannels_edit.setEnabled(enable_params)
         self._rate_edit.setEnabled(enable_params)
+        self._scale_edit.setEnabled(enable_params)
         self._interleaved_cb.setEnabled(enable_params)
         self._prefiltered_cb.setEnabled(enable_params)
-        if warn:
-            if n_channels <= 0:
-                self._warning_label.setText("Number of analog channels must be > 0!")
-            else:
-                self._warning_label.setText(f"Binary file size ({sel_path.stat().st_size} bytes) "
-                                            f"must be a multiple of {2 * n_channels}!")
-            self._warning_label.setVisible(True)
-        else:
+        if not enable_params:
             self._warning_label.setVisible(False)
+            self._valid_config = True
+            return
+
+        self._valid_config = False
+        msg: Optional[str] = None
+        n_channels, rate, scale = 0, 0, 0
+        try:
+            n_channels = int(self._nchannels_edit.text())
+            rate = int(self._rate_edit.text())
+            scale = float(self._scale_edit.text())
+            if not ((1 <= n_channels < 99) and (0.1 <= scale <= 99) and (1000 <= rate <= 99999)):
+                raise Exception()
+        except Exception:
+            msg = "!!! Incomplete or invalid binary file configuration"
+
+        if msg is None:
+            file_size = sel_path.stat().st_size
+            if file_size % (2 * n_channels) != 0:
+                msg = f"!!! File size ({file_size} bytes) must be a multiple of {2 * n_channels}!"
+            else:
+                dur_sec = file_size / (2 * n_channels * rate)
+                dur_min = int(dur_sec / 60)
+                msg = f"Ok. Estimated recording duration is {dur_min} min, {dur_sec - (dur_min * 60):.3f} sec."
+                self._valid_config = True
+
+        self._warning_label.setText(msg)
+        self._warning_label.setVisible(True)
 
     def _validate_before_accept(self) -> None:
         """
@@ -147,7 +183,7 @@ class _QueryDialog(QDialog):
         accepting the user entries.
         """
         self._refresh()
-        if not self._warning_label.isVisible():
+        if self._valid_config:
             self.accept()
 
     @property
@@ -171,6 +207,14 @@ class _QueryDialog(QDialog):
         return int(self._rate_edit.text())
 
     @property
+    def voltage_scale_factor(self) -> float:
+        """
+        Multiplicative scale factor converts 16-bit analog data sample to volts. Applicable only if the analog
+        data source is a flat binary file.
+        """
+        return float(self._scale_edit.text()) * 1e-7
+
+    @property
     def interleaved(self) -> bool:
         """ Is analog data interleaved? Applicable only if analog data source is a flat binary file. """
         return self._interleaved_cb.isChecked()
@@ -188,7 +232,7 @@ class WorkingDirectory:
     XSort itself.
     """
     def __init__(self, folder: Path, analog_src: str, unit_src: str, rate: int = 0, num_channels: int = 0,
-                 interleaved: bool = False, prefiltered: bool = False):
+                 scale: float = 1.52588e-7, interleaved: bool = False, prefiltered: bool = False):
         self._folder = folder
         """ The working directory file system path. """
         self._analog_src = analog_src
@@ -205,13 +249,19 @@ class WorkingDirectory:
         Number of analog data channels recorded. Specified by user if analog source is a flat binary file; extracted
         from Omniplex Pl2 file. 
         """
+        self._to_microvolts: float = scale * 1.0e6
+        """ 
+        Multiplicative scale factor converts a raw 16-bit analog data sample to microvolts. Applies to all available
+        analog channels in the flat binary file. Ignored for PL2 source file, which includes per-channel scaling
+        factors.
+        """
         self._analog_channel_indices: List[int] = list()
         """ 
         List of analog channel indices. For a flat binary file, this is always [0..N-1], where N is the number of
         channels specified by user. For an Omniplex source, it depends on which wideband and/or narrowband channels
         were used during the recording session.
         """
-        self._interleaved: bool = interleaved
+        self._interleaved: bool = interleaved and (num_channels > 1)
         """ Are analog data channel samples interleaved in flat binary file? Ignored for PL2 source file. """
         self._prefiltered: bool = prefiltered
         """ Is analog data in flat binary file prefiltered? Ignored for PL2 source file."""
@@ -268,6 +318,10 @@ class WorkingDirectory:
                     if self._sampling_rate > 0:
                         dur = max([self._pl2_info['analog_channels'][idx]['num_values'] for idx in ch_indices])
                         self._recording_dur_seconds = dur / self._sampling_rate
+                        # verify all channels are sampled at the same rate
+                        for k in ch_indices:
+                            if self._sampling_rate != int(self._pl2_info['analog_channels'][k]['samples_per_second']):
+                                raise Exception("Found different sampling rates among the analog channels!")
 
             except Exception as e:
                 return f"Unable to read Ommniplex (PL2) file: {str(e)}"
@@ -276,7 +330,7 @@ class WorkingDirectory:
         else:
             # compute analog recording duration based on flat binary file's size and user-specifed sampling rate and
             # number of channels
-            num_scans = self.unit_source.stat().st_size / (2 * self._num_channels)
+            num_scans = self.analog_source.stat().st_size / (2 * self._num_channels)
             self._recording_dur_seconds = num_scans / float(self._sampling_rate)
             self._analog_channel_indices = [k for k in range(self._num_channels)]
 
@@ -333,8 +387,9 @@ class WorkingDirectory:
         dlg = _QueryDialog(folder, analog_sources, unit_sources, parent=window)
         dlg.exec()
         if dlg.result() == QDialog.DialogCode.Accepted:
-            work_dir = WorkingDirectory(folder, dlg.analog_data_source.name, dlg.unit_data_source.name,
-                                        dlg.sampling_rate, dlg.num_analog_channels, dlg.interleaved, dlg.prefiltered)
+            work_dir = WorkingDirectory(
+                folder, dlg.analog_data_source.name, dlg.unit_data_source.name, dlg.sampling_rate,
+                dlg.num_analog_channels, dlg.voltage_scale_factor, dlg.interleaved, dlg.prefiltered)
             if work_dir.is_valid:
                 work_dir._to_cfg_file()
                 return "", work_dir
@@ -384,9 +439,10 @@ class WorkingDirectory:
         a single-line text file with at least 2 comma-separated string token, in order:
          - The source file name for the recorded analog data channel streams (.pl2, .bin, or .dat).
          - The source file name for the spike-sorted neural units (.pkl or .pickle).
-        If the analog source is a flat binary file (.bin or .dat), then there are an additional 4 string tokens:
+        If the analog source is a flat binary file (.bin or .dat), then there are an additional 5 string tokens:
          - Sampling rate in Hz (integer string).
          - Number of analog channels (integer string).
+         - Multiplicative factor N such that S * N * 1e-7 converts raw 16-bit sample S to microvolts (float string).
          - Whether or not analog channel data is interleaved ("true"/"false").
          - Whether or not analog channel data is prefiltered ("true"/"false").
 
@@ -399,10 +455,10 @@ class WorkingDirectory:
                 for line in reader:
                     if len(line) == 2:
                         return WorkingDirectory(cfg_path.parent, line[0], line[1])
-                    elif len(line) == 6:
-                        rate, n_channels = int(line[2]), int(line[3])
-                        interleaved, prefiltered = (line[4] == "true"), (line[5] == "true")
-                        return WorkingDirectory(cfg_path.parent, line[0], line[1], rate, n_channels,
+                    elif len(line) == 7:
+                        rate, n_channels, scale = int(line[2]), int(line[3]), float(line[4]) * 1e-7
+                        interleaved, prefiltered = (line[5] == "true"), (line[6] == "true")
+                        return WorkingDirectory(cfg_path.parent, line[0], line[1], rate, n_channels, scale,
                                                 interleaved, prefiltered)
                     else:
                         return None
@@ -423,7 +479,8 @@ class WorkingDirectory:
                         writer.writerow((self._analog_src, self._unit_src))
                     else:
                         writer.writerow((self._analog_src, self._unit_src, str(self._sampling_rate),
-                                         str(self._num_channels), "true" if self._interleaved else "false",
+                                         str(self._num_channels), f"{self._to_microvolts * 1.0e7:.5f}",
+                                         "true" if self._interleaved else "false",
                                          "true" if self._prefiltered else "false"))
             except Exception:
                 cfg.unlink(missing_ok=True)
@@ -449,9 +506,30 @@ class WorkingDirectory:
         return self.is_valid and (self.analog_source.suffix.lower() == '.pl2')
 
     @property
+    def is_analog_data_prefiltered(self) -> bool:
+        """
+        True if the analog data source is a flat binary file AND the analog data therein has been prefiltered.
+        Returns False if the data source is an Omniplex PL2 file.
+        """
+        return (not self.uses_omniplex_as_analog_source) and self._prefiltered
+
+    @property
+    def is_analog_data_interleaved(self) -> bool:
+        """
+        True if the analog data source is a flat binary file AND the analog data channel streams are stored in an
+        interleaved fashion: ch0 at t0, ch1 at t0, ..., chN at t0, ch0 at t1, ... Returns False if the data source is
+        an Omniplex PL2 file.
+        """
+        return (not self.uses_omniplex_as_analog_source) and self._interleaved
+
+    @property
     def analog_source(self) -> Path:
         """ File system path for the original analog channel data source file in working directory. """
         return Path(self._folder, self._analog_src)
+
+    def num_analog_channels(self) -> int:
+        """ Number of analog channels stored in the original analog source file in this XSort working directory. """
+        return self._num_channels
 
     @property
     def analog_channel_indices(self) -> List[int]:
@@ -483,6 +561,20 @@ class WorkingDirectory:
         """ The analog channel sampling rate in Hz. """
         return self._sampling_rate
 
+    def analog_channel_sample_to_uv(self, idx: int) -> float:
+        """
+        The multiplicative factor converting a raw int16 analog sample on the specified channel to **microvolts**.
+        :param idx: The channel index
+        :return: The conversion factor, or 0 if channel index is invalid.
+        """
+        factor = 0
+        if self.is_valid and (idx in self._analog_channel_indices):
+            if self.uses_omniplex_as_analog_source:
+                factor = self._pl2_info['analog_channels'][idx]['coeff_to_convert_to_units'] * 1.0e6
+            else:
+                factor = self._to_microvolts
+        return factor
+
     @property
     def analog_channel_recording_duration_seconds(self) -> float:
         """
@@ -493,6 +585,14 @@ class WorkingDirectory:
         flat binary file, then the duration is determined by the file size and the user-specified sampling rate.
         """
         return self._recording_dur_seconds
+
+    @property
+    def omniplex_file_info(self) -> Optional[Dict[str, Any]]:
+        """
+        Metdata extracted from the Omniplex PL2 file as the analog data source for this XSort working directory.
+        Returns None if the analog source is a flat binary file. **NOT A COPY. DO NOT MODIFY.**
+        """
+        return self._pl2_info if self.is_valid else None
 
     @property
     def unit_source(self) -> Path:
@@ -555,6 +655,22 @@ class WorkingDirectory:
 
         return "", neurons
 
+    @property
+    def need_analog_cache(self) -> bool:
+        """
+        Are per-channel internal cache files needed for the analog data source in this XSort working directory?
+
+            For performant retrieval of any portion of an analog data channel's bandpass-filtered stream, that channel's
+        samples are extracted from the analog data source file, filtered, and stored in a dedicated internal cache file
+        in the working directory. This is the case whenever the analog data sourc in an Omniplex PL2 file, or a flat
+        binary file containing raw **unfiltered** channel data. However, if the analog source is a prefiltered flat
+        binary file, then there is no need to cache the analog channel streams.
+
+        :return: False unless the analog data source is a flat binary file containing prefiltered channel data.
+        """
+        return self.uses_omniplex_as_analog_source or (not self.is_analog_data_prefiltered)
+
+    @property
     def analog_channel_cache_files_exist(self) -> bool:
         """
         Have all analog data channels recorded in this XSort working directory's original analog source file been
@@ -572,6 +688,68 @@ class WorkingDirectory:
                     return False
             ok = True
         return ok
+
+    def retrieve_cached_channel_trace(
+            self, idx: int, start: int, count: int, suppress: bool = False) -> Optional[ChannelTraceSegment]:
+        """
+        Retrieve a small portion of a recorded analog data channel trace from the corresponding channel cache file
+        in this XSort working directory.
+            **NOTE**: When the analog data source is a flat binary file containing prefiltered analog data, there is
+        no need to extract and cache the individual analog data channels to separate files. In this case, this method
+        reads the channel trace segment from the binary file directly!
+
+        :param idx: The analog channel index.
+        :param start: Index of the first sample to retrieve.
+        :param count: The number of samples to retrieve.
+        :param suppress: If True, any exception (file not found, file IO error) is suppressed. Default is False.
+        :return: The requested channel trace segment, or None if an error occurred and exceptions are suppressed.
+        """
+        try:
+            to_microvolts = self.analog_channel_sample_to_uv(idx)
+            samples_per_sec = self._sampling_rate
+
+            # SPECIAL CASE: per-channel cache files not needed when the source is a prefiltered flat binary file
+            if not self.need_analog_cache:
+                n_ch = self.num_analog_channels()
+                file_size = self.analog_source.stat().st_size
+                if file_size % (2 * n_ch) != 0:
+                    raise Exception(f'Flat binary file size inconsistent with specified number of channels ({n_ch})')
+                n_samples = int(file_size / (2 * n_ch))
+                n_bytes_per_sample = n_ch * 2 if self.is_analog_data_interleaved else 2
+
+                with open(self.analog_source, 'rb') as src:
+                    # calc offset to the first sample
+                    if not self.is_analog_data_interleaved:
+                        ofs = (idx * n_samples + start) * n_bytes_per_sample
+                    else:
+                        ofs = start * n_bytes_per_sample
+                    src.seek(ofs)
+
+                    # read in the samples. If interleaved, we have to subsample the block read.
+                    samples = np.frombuffer(src.read(count * n_bytes_per_sample), dtype='<h')
+                    if self.is_analog_data_interleaved:
+                        samples = samples[idx::n_ch].copy()
+                    return ChannelTraceSegment(idx, start, samples_per_sec, to_microvolts, samples)
+
+            cache_file = Path(self._folder, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
+            if not cache_file.is_file():
+                raise Exception(f"Channel cache file missing for analog channel {str(idx)}")
+
+            num_samples = int(cache_file.stat().st_size / 2)
+            if (start < 0) or (count <= 0) or (start + count > num_samples):
+                raise Exception("Invalid trace segment bounds")
+
+            offset = struct.calcsize("<{:d}h".format(start))
+            n_bytes = struct.calcsize("<{:d}h".format(count))
+            with open(cache_file, 'rb') as fp:
+                fp.seek(offset)
+                samples = np.frombuffer(fp.read(n_bytes), dtype='<h')
+                return ChannelTraceSegment(idx, start, samples_per_sec, to_microvolts, samples)
+        except Exception:
+            if not suppress:
+                raise
+            else:
+                return None
 
     def save_neural_unit_to_cache(self, unit: Neuron) -> bool:
         """
@@ -693,233 +871,3 @@ class WorkingDirectory:
         for child in self._folder.iterdir():
             if child.is_file() and child.name.startswith(UNIT_CACHE_FILE_PREFIX) and child.name.endswith('x'):
                 child.unlink(missing_ok=True)
-
-
-# TODO: Get rid of all functions below this once I've moved background task functionality into WorkingDirectory object
-
-def get_required_data_files(folder: Path) -> Tuple[Optional[Path], Optional[Path], str]:
-    """
-    Scan the specified folder for the data source files required by XSort: an Omniplex PL2 file containing the
-    multi-channel electrode recording, and a Python pickle file containing the original spike sorter results. Enforce
-    the requirement that the folder contain only ONE file of each type.
-
-    :param folder: File system path for the current XSort working directory.
-    :return: On success, returns (pl2_file, pkl_file, ""), where the first two elements are the paths of the PL2 and
-    pickle files, respectively. On failure, returns (None, None, emsg) -- where the last element is a brief description
-    of the error encountered.
-    """
-    if not isinstance(folder, Path):
-        return None, None, "Invalid directory path"
-    elif not folder.is_dir():
-        return None, None, "Directory not found"
-    pl2_file: Optional[Path] = None
-    pkl_file: Optional[Path] = None
-    for child in folder.iterdir():
-        if child.is_file():
-            ext = child.suffix.lower()
-            if ext in ['.pkl', '.pickle']:
-                if pkl_file is None:
-                    pkl_file = child
-                else:
-                    return None, None, "Multiple spike sorter results files (PKL) found"
-            elif ext == '.pl2':
-                if pl2_file is None:
-                    pl2_file = child
-                else:
-                    return None, None, "Multiple Omniplex files (PL2) found"
-    if pl2_file is None:
-        return None, None, "No Omniplex file (PL2) found in directory"
-    if pkl_file is None:
-        return None, None, "No spike sorter results file (PKL) found in directory"
-
-    return pl2_file, pkl_file, ""
-
-
-def load_spike_sorter_results(sorter_file: Path) -> Tuple[str, Optional[List[Neuron]]]:
-    """
-    Load the contents of the spike sorter results file specified. **This method strictly applies to the spike sorter
-    program utilized in the Lisberger lab, which outputs the sorting algorithm's results to a Python pickle file.**
-
-    :param sorter_file: File system path for the spike sorter results file.
-    :return: On success, a tuple ("", L), where L is a list of **Neuron** objects encapsulating the neural units found
-    in the file. Certain derived unit metrics -- mean spike waveforms, SNR, primary analog channel -- will be undefined.
-    On failure, returns ('error description', None).
-    """
-    neurons: List[Neuron] = list()
-    purkinje_neurons: List[Neuron] = list()  # sublist of Purkinje complex-spike neurons
-    try:
-        with open(sorter_file, 'rb') as f:
-            res = pickle.load(f)
-            ok = isinstance(res, list) and all([isinstance(k, dict) for k in res])
-            if not ok:
-                raise Exception("Unexpected content found")
-            for i, u in enumerate(res):
-                if u['type__'] == 'PurkinjeCell':
-                    neurons.append(Neuron(i + 1, u['spike_indices__'] / u['sampling_rate__'], suffix='s'))
-                    neurons.append(Neuron(i + 1, u['cs_spike_indices__'] / u['sampling_rate__'], suffix='c'))
-                    purkinje_neurons.append(neurons[-1])
-                else:
-                    neurons.append(Neuron(i + 1, u['spike_indices__'] / u['sampling_rate__']))
-    except Exception as e:
-        return f"Unable to read spike sorter results from PKL file: {str(e)}", None
-
-    # the spike sorter algorithm generating the PKL file copies the 'cs_spike_indices__' of a 'PurkinjeCell' type
-    # into the 'spike_indices__' of a separate 'Neuron' type. Above, we split the simple and complex spike trains of
-    # the sorter's 'PurkinjeCell' into two neural units. We need to remove the 'Neuron' records that duplicate any
-    # 'PurkinjeCell' complex spike trains...
-    removal_list: List[int] = list()
-    for purkinje in purkinje_neurons:
-        n: Neuron
-        for i, n in enumerate(neurons):
-            if (not n.is_purkinje) and purkinje.matching_spike_trains(n):
-                removal_list.append(i)
-                break
-    for idx in sorted(removal_list, reverse=True):
-        neurons.pop(idx)
-
-    return "", neurons
-
-
-def save_neural_unit_to_cache(folder: Path, unit: Neuron, suppress: bool = True) -> bool:
-    """
-    Save the spike train and other computed metrics for the specified unit to an internal cache file in the specified
-    XSort working directory. If a cache file already exists for the unit, it will be overwritten.
-
-    All unit cache files in the working directory start with the same prefix (UNIT_CACHE_FILE_PREFIX) and end with the
-    UID of the neural unit. The unit spike times and metrics are written to the binary file as follows:
-     - A 20-byte header: [best SNR (f32), primary channel index (U32), total number of spikes in unit's spike times
-       array (U32), number of per-channel spike templates (U32), template length (U32)].
-     - The byte sequence encoding the spike times array, as generated by np.ndarray.tobytes().
-     - For each template: Source channel index (U32) followed by the byte sequence from np.ndarray.tobytes().
-
-    Computing the best SNR (and thereby identifying the unit's "primary channel") and the per-channel mean spike
-    template waveforms takes a considerable amount of time. When a derived unit is created by the user via a "merge" or
-    "split" operation, it is important to cache the spike times for the new unit immediately (the spike train is not
-    persisted anywhere else!); we cannot wait for the metrics to be computed. To this end, the unit cache file can come
-    in either of two forms:
-     - The "complete" version as described above.
-     - The "incomplete" version which stores only the spike train. In this version, the header is [-1.0, 0, N, 0, 0],
-       where N is the number of spikes.
-
-
-    :param folder: File system path for the XSort working directory.
-    :param unit: The neural unit object.
-    :param suppress: If True, any exception (bad working directory, file IO error) is suppressed. Default is True.
-    :return: True if successful, else False.
-    :raises Exception: If an error occurs and exceptions are not suppressed.
-    """
-    unit_cache_file = Path(folder, f"{UNIT_CACHE_FILE_PREFIX}{unit.uid}")
-    try:
-        # TODO: If unit cache file exists, really should write to temp file first...
-        with open(unit_cache_file, 'wb') as dst:
-            best_snr = -1.0 if (unit.primary_channel is None) else unit.snr
-            primary_channel_idx = 0 if (unit.primary_channel is None) else unit.primary_channel
-            dst.write(struct.pack('<f4I', best_snr, primary_channel_idx, unit.num_spikes,
-                                  unit.num_templates, unit.template_length))
-
-            dst.write(unit.spike_times.tobytes())
-
-            for k in unit.template_channel_indices:
-                template = unit.get_template_for_channel(k)
-                dst.write(struct.pack('<I', k))
-                dst.write(template.tobytes())
-        return True
-    except Exception as e:
-        unit_cache_file.unlink(missing_ok=True)
-        if not suppress:
-            raise e
-        else:
-            return False
-
-
-def load_neural_unit_from_cache(folder: Path, uid: str, suppress: bool = True) -> Optional[Neuron]:
-    """
-    Load the specified neural unit from the corresponding internal cache file in the specified working directory. The
-    cache file may contain only the unit's spike train (the "incomplete" version) or the spike train along with SNR,
-    primary channel index and per-channel mean spike template waveforms (the "complete" version). See
-    :method:`save_neural_unit_to_cache` for file format details.
-
-    :param folder: File system path for the XSort working directory.
-    :param uid: The neural unit's UID.
-    :param suppress: If True, any exception (file not found, file IO error) is suppressed. Default is True.
-    :return: A **Neuron** object encapsulating the spike train and any cached metrics for the specified neural unit, or
-        None if an error occurred and exceptions are suppressed.
-    :raises Exception: If an error occurs and exceptions are not suppressed. However, an exception is thrown
-        regardless if the unit label is invalid.
-    """
-    # validate unit label and extract unit index. Exception thrown if invalid
-    unit_idx, unit_suffix = Neuron.dissect_uid(uid)
-
-    try:
-        unit_cache_file = Path(folder, f"{UNIT_CACHE_FILE_PREFIX}{uid}")
-        if not unit_cache_file.is_file():
-            raise Exception(f"Unit metrics cache file missing for neural unit {uid}")
-
-        with open(unit_cache_file, 'rb') as fp:
-            hdr = struct.unpack_from('<f4I', fp.read(struct.calcsize('<f4I')))
-            if len(hdr) != 5:
-                raise Exception(f"Invalid header in unit metrics cache file for neural unit {uid}")
-            incomplete = hdr[0] < 0
-            n_bytes = struct.calcsize("<{:d}f".format(hdr[2]))
-            spike_times = np.frombuffer(fp.read(n_bytes), dtype='<f')
-            template_dict: Dict[int, np.ndarray] = dict()
-            if not incomplete:
-                template_len = struct.calcsize("<{:d}f".format(hdr[4]))
-                for i in range(hdr[3]):
-                    channel_index: int = struct.unpack_from('<I', fp.read(struct.calcsize('<I')))[0]
-                    template = np.frombuffer(fp.read(template_len), dtype='<f')
-                    template_dict[channel_index] = template
-
-            unit = Neuron(unit_idx, spike_times, suffix=unit_suffix)
-            if not incomplete:
-                unit.update_metrics(hdr[1], hdr[0], template_dict)
-            return unit
-    except Exception:
-        if not suppress:
-            raise
-        else:
-            return None
-
-
-if __name__ == "__main__":
-    class MainWindow(QMainWindow):
-        def __init__(self):
-            super().__init__()
-
-            self.setWindowTitle("Testing WorkingDirectory")
-
-            dir_label = QLabel("Directory:")
-            self._dir_edit = QLineEdit()
-            button = QPushButton("Load")
-            button.clicked.connect(self.button_clicked)
-            self._result_label = QLabel("<enter directory and press button to test>")
-
-            control_grp = QGroupBox("Hello")
-            control_grp_layout = QGridLayout()
-            control_grp_layout.addWidget(dir_label, 0, 0)
-            control_grp_layout.addWidget(self._dir_edit, 0, 1)
-            control_grp_layout.addWidget(button, 1, 1)
-            control_grp_layout.addWidget(self._result_label, 2, 0, 1, 2)
-            control_grp.setLayout(control_grp_layout)
-            self.setCentralWidget(control_grp)
-            self.setMinimumWidth(600)
-
-        def button_clicked(self, _: bool):
-            folder = Path(self._dir_edit.text())
-            if not folder.exists():
-                self._result_label.setText('Specified path does not exist')
-            elif not folder.is_dir():
-                self._result_label.setText('Specified path is not a directory')
-            else:
-                emsg, work_dir = WorkingDirectory.load_working_directory(folder)
-                if len(emsg) > 0:
-                    self._result_label.setText(f"Error: {emsg}")
-                elif work_dir is None:
-                    self._result_label.setText(f"User cancelled")
-                else:
-                    self._result_label.setText(f"Success! Working directory is valid.")
-
-    app = QApplication(sys.argv)
-    main_window = MainWindow()
-    main_window.show()
-    app.exec()

@@ -1,11 +1,10 @@
 import math
 import random
-import struct
 import time
 import traceback
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Optional, List, IO, Any
+from typing import Dict, Optional, List, IO
 
 import numpy as np
 import scipy
@@ -13,8 +12,7 @@ from PySide6.QtCore import QObject, Slot, Signal, QRunnable
 
 from xsort.data import PL2, stats
 from xsort.data.edits import UserEdit
-from xsort.data.files import CHANNEL_CACHE_FILE_PREFIX, get_required_data_files, \
-    load_spike_sorter_results, save_neural_unit_to_cache, load_neural_unit_from_cache
+from xsort.data.files import CHANNEL_CACHE_FILE_PREFIX, WorkingDirectory
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
 
 
@@ -62,13 +60,13 @@ class TaskSignals(QObject):
 class Task(QRunnable):
     """ A background runnable that handles a specific data analysis or retrieval task. """
 
-    def __init__(self, task_type: TaskType, working_dir: Path, **kwargs):
+    def __init__(self, task_type: TaskType, working_dir: WorkingDirectory, **kwargs):
         """
         Initialize, but do not start, a background task runnoble.
 
         :param task_type: Which type of background task to execute.
         :param working_dir: The XSort working directory on which to operate.
-        :param kwargs: Dictionary of keywaord argyments, varying IAW task type. For the TaskType.GETCHANNELS task,
+        :param kwargs: Dictionary of keyword argyments, varying IAW task type. For the TaskType.GETCHANNELS task,
             kwargs['start'] >= 0 and kwargs['count'] > 0 must be integers defining the starting index and size of the
             contigous channel trace segment to be extracted. For the TaskType.COMPUTESTATS task, kw_args['units'] is the
             list of :class:`Neuron` instances in the current focus list. Various statistics are cached in these
@@ -79,7 +77,7 @@ class Task(QRunnable):
         self._task_type = task_type
         """ The type of background task executed. """
         self._working_dir = working_dir
-        """ The working directory in which required data files and internal XSort cache files are located. """
+        """ The XSort working directory in which required source files and internal cache files are located. """
         self._start: int = kwargs.get('start', -1)
         """ For the GETCHANNELS task, the index of the first analog sample to retrieve. """
         self._count: int = kwargs.get('count', 0)
@@ -95,8 +93,6 @@ class Task(QRunnable):
         """
         self.signals = TaskSignals()
         """ The signals emitted by this task. """
-        self._info: Optional[Dict[str, Any]] = None
-        """ Omniplex PL2 file information. """
         self._cancelled = False
         """ Flag set to cancel the task. """
 
@@ -133,21 +129,22 @@ class Task(QRunnable):
         """
         Scans working directory contents and builds any missing internal cache files. In the process, delivers cached
         data needed by the application's view controller on the GUI thread: the first second's worth of samples on each
-        recorded Omniplex analog channe; complete metrics for all identified neural units.
+        recorded analog data channel; complete metrics for all identified neural units.
         
-        In the first phase, the task extracts all recorded analog wideband and narrowband data streams from the 
-        Omniplex PL2 file in the working directory and stores each stream sequentially (int16) in a separate cache
-        file named f'{CHANNEL_CACHE_FILE_PREFIX}{N}', where N is the analog channel index. For each recorded analog
-        channel:
+        In the first phase, the task extracts all recorded analog data streams from the analog source file (either an
+        Omniplex PL2 file or a flat binary file) in the working directory and stores each stream sequentially (int16) in
+        a separate cache file named f'{CHANNEL_CACHE_FILE_PREFIX}{N}', where N is the analog channel index. For each
+        recorded analog channel:
             - If the cache file already exists, it reads in the first one second's worth of analog samples and delivers
               it to any receivers via a dedicated signal.
             - If the file does not exist, the data stream is extracted and cached, then the first second of data is
               delivered. If the file exists but has the wrong size or the read fails, the file is recreated.
 
-        In the second phase, the task loads neural unit information from the spike sorter results file (.PKL) in the
-        working directory. It then applies the edit history, if any, to bring the list of neural units "up to date". It
-        then uses the analog channel caches to compute the per-channel mean spike waveforms, aka 'templates', and other
-        metrics for each unit, then stores the unit spike train, templates, and other metadata in a cache file named
+        In the second phase, the task loads neural unit information from the neural unit data source file (a Python
+        pickle containing the results generated by a spike sorter on the analog data) in the working directory. It then
+        applies the edit history, if any, to bring the list of neural units "up to date". It then uses the analog
+        channel caches to compute the per-channel mean spike waveforms, aka 'templates', and other metrics for each
+        unit, and stores the unit spike train, templates, and other metadata in a cache file named
         f'{UNIT_CACHE_FILE_PREFIX}{U}', where U is a UID uniquely identifying the unit. For each unit:
             - If the corresponding cache file already exists, it loads the unit record and delivers it to any receivers
               via a dedicated signal.
@@ -162,38 +159,14 @@ class Task(QRunnable):
         """
         self.signals.progress.emit("Scanning working directory for source files and internal cache files...", 0)
 
-        # check for required data files in working directory
-        omniplex_file, sorter_file, emsg = get_required_data_files(self._working_dir)
-        if len(emsg) > 0:
-            raise Exception(emsg)
-
-        # PHASE 1: Build Omniplex analog channel cache
-        channel_list: List[int] = list()
-        with open(omniplex_file, 'rb', buffering=65536*2) as src:
-            # load Omniplex file info and get list of analog channels we care about
-            self._info = PL2.load_file_information(src)
-            all_channels = self._info['analog_channels']
-            for i in range(len(all_channels)):
-                if all_channels[i]['num_values'] > 0 and \
-                        (all_channels[i]['source'] in [PL2.PL2_ANALOG_TYPE_WB, PL2.PL2_ANALOG_TYPE_SPKC]):
-                    channel_list.append(i)
-
-            if self._cancelled:
-                raise Exception("Operation cancelled")
-
-            if len(channel_list) == 0:
-                raise Exception("No recorded analog channels found in Omniplex file")
-
-            # verify that sampling rate is the same for all the analog channels
-            samples_per_sec = self._info['analog_channels'][channel_list[0]]['samples_per_second']
-            for idx in channel_list:
-                if self._info['analog_channels'][idx]['samples_per_second'] != samples_per_sec:
-                    raise Exception('Found at least one analog channel sampled at a different rate in Omniplex file!')
-
+        # PHASE 1: Build analog data channel cache
+        channel_list = self._working_dir.analog_channel_indices
+        with open(self._working_dir.analog_source, 'rb', buffering=65536*2) as src:
             # cache the (possibly filtered) data stream for each recorded analog channel, if not already cached
             for k, idx in enumerate(channel_list):
                 self.signals.progress.emit("Caching/retrieving analog channel data", int(100 * k / len(channel_list)))
-                channel_trace = self._retrieve_channel_trace(idx, 0, int(samples_per_sec), suppress=True)
+                channel_trace = self._working_dir.retrieve_cached_channel_trace(
+                    idx, 0, self._working_dir.analog_sampling_rate, suppress=True)
                 if channel_trace is None:
                     channel_trace = self._cache_analog_channel(idx, src)
                 if self._cancelled:
@@ -201,25 +174,27 @@ class Task(QRunnable):
                 self.signals.data_available.emit(DataType.CHANNELTRACE, channel_trace)
 
         # PHASE 2: Build the neural unit metrics cache
-        emsg, neurons = load_spike_sorter_results(sorter_file)
+        emsg, neurons = self._working_dir.load_neural_units()
         if len(emsg) > 0:
             raise Exception(emsg)
         if self._cancelled:
             raise Exception("Operation cancelled")
 
         # load and apply edit history to bring the neuron list "up to date"
-        emsg, edit_history = UserEdit.load_edit_history(self._working_dir)
+        emsg, edit_history = UserEdit.load_edit_history(self._working_dir.path)
         if len(emsg) > 0:
             raise Exception(f"Error reading edit history: {emsg}")
         for edit_rec in edit_history:
             edit_rec.apply_to(neurons)
+        if self._cancelled:
+            raise Exception("Operation cancelled")
 
         n_units = len(neurons)
         while len(neurons) > 0:
             self.signals.progress.emit("Caching/retrieving neural unit metrics",
                                        int(100 * (n_units - len(neurons))/n_units))
             neuron = neurons.pop(0)
-            updated_neuron = load_neural_unit_from_cache(self._working_dir, neuron.uid)
+            updated_neuron = self._working_dir.load_neural_unit_from_cache(neuron.uid)
             # if cache file missing OR incomplete (spike times only), then we need to generate it
             if (updated_neuron is None) or (updated_neuron.primary_channel is None):
                 self._cache_neural_unit(neuron)
@@ -230,152 +205,141 @@ class Task(QRunnable):
 
     def _get_channel_traces(self) -> None:
         """
-        Retrieve the specified trace segment for each wideband or narrowband analog channel recorded in the Omniplex
-        file in the working directory.
+        Retrieve the specified trace segment for each recorded analog data channel stream cached in the working
+        directory.
             This method assumes that a cache file already exists holding the the entire data stream for each analog
-        channel of interest. It reads the Omniplex PL2 file to prepare the list of relevant channel indices, then
-        extracts the trace segment from each channel cache file and delivers it to any receivers via a task signal.
-
-        :raises Exception: If unable to read Omniplex file, if a channel cache file is missing, or if a file IO
-            error occurs.
+        channel of interest.
+        :raises Exception: If a channel cache file is missing, or if a file IO error occurs.
         """
         self.signals.progress.emit("Retrieving trace segments from channel caches...", 0)
 
-        # get indices of analog channels recorded from Omniplex file
-        omniplex_file, _, emsg = get_required_data_files(self._working_dir)
-        if len(emsg) > 0:
-            raise Exception(emsg)
-
-        channel_list: List[int] = list()
-        with open(omniplex_file, 'rb', buffering=65536 * 2) as src:
-            # load Omniplex file info and get list of analog channels we care about
-            self._info = PL2.load_file_information(src)
-            all_channels = self._info['analog_channels']
-            for i in range(len(all_channels)):
-                if all_channels[i]['num_values'] > 0 and \
-                        (all_channels[i]['source'] in [PL2.PL2_ANALOG_TYPE_WB, PL2.PL2_ANALOG_TYPE_SPKC]):
-                    channel_list.append(i)
-
-        if self._cancelled:
-            raise Exception("Operation cancelled")
-        if len(channel_list) == 0:
-            raise Exception("No recorded analog channels found in Omniplex file")
-
         # retrieve all the trace segments
-        for idx in channel_list:
-            segment = self._retrieve_channel_trace(idx, self._start, self._count)
+        for idx in self._working_dir.analog_channel_indices:
+            segment = self._working_dir.retrieve_cached_channel_trace(idx, self._start, self._count)
             if self._cancelled:
                 raise Exception("Operation cancelled")
             self.signals.data_available.emit(DataType.CHANNELTRACE, segment)
 
-    def _retrieve_channel_trace(
-            self, idx: int, start: int, count: int, suppress: bool = False) -> Optional[ChannelTraceSegment]:
-        """
-        Retrieve a small portion of a recorded Omniplex analog channel trace from the corresponding channel cache file
-        in the working directory.
-
-        :param idx: The analog channel index.
-        :param start: Index of the first sample to retrieve.
-        :param count: The number of samples to retrieve.
-        :param suppress: If True, any exception (file not found, file IO error) is suppressed. Default is False.
-        :return: The requested channel trace segment, or None if an error occurred and exceptions are suppressed.
-        """
-        try:
-            cache_file = Path(self._working_dir, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
-            if not cache_file.is_file():
-                raise Exception(f"Channel cache file missing for analog channel {str(idx)}")
-
-            # check file size
-            ch_dict = self._info['analog_channels'][idx]
-            expected_size = struct.calcsize("<{:d}h".format(ch_dict['num_values']))
-            if cache_file.stat().st_size != expected_size:
-                raise Exception(f"Incorrect cache file size for analog channel {str(idx)}: was "
-                                f"{cache_file.stat().st_size}, expected {expected_size}")
-
-            if (start < 0) or (count <= 0) or (start + count > ch_dict['num_values']):
-                raise Exception("Invalid trace segment bounds")
-
-            samples_per_sec = ch_dict['samples_per_second']
-            to_microvolts = ch_dict['coeff_to_convert_to_units'] * 1.0e6
-            offset = struct.calcsize("<{:d}h".format(start))
-            n_bytes = struct.calcsize("<{:d}h".format(count))
-            with open(cache_file, 'rb') as fp:
-                fp.seek(offset)
-                samples = np.frombuffer(fp.read(n_bytes), dtype='<h')
-                return ChannelTraceSegment(idx, start, samples_per_sec, to_microvolts, samples)
-        except Exception:
-            if not suppress:
-                raise
-            else:
-                return None
-
     def _cache_analog_channel(self, idx: int, src: IO) -> ChannelTraceSegment:
         """
-        Extract the entire data stream for one Omniplex analog channel and store the raw ADC samples (16-bit signed
-        integers) sequentially in a dedicated cache file within the XSort working directory. If the specified analog
-        channel is wideband, the data trace is bandpass-filtered between 300-8000Hz using a second-order Butterworth
-        filter prior to being cached (SciPy package).
+        Extract the entire data stream for one analog data channel and store the raw ADC samples (16-bit signed ints)
+        sequentially in a dedicated cache file within the XSort working directory. If the specified analog channel is
+        wideband, the data trace is bandpass-filtered between 300-8000Hz using a second-order Butterworth filter prior
+        to being cached (SciPy package).
 
-            Since the Omniplex analog data is recorded at 40KHz for typically an hour or more, an analog channel data
-        stream is quite large. Cacheing the entire stream sequentially allows faster access to smaller chunks (say 1-5
-        seconds worth) of the stream.
+            Since the multielectrode data is recorded at relatively high sampling rate (40KHz for Omniplex, eg) for
+        typically an hour or more, an analog channel data stream is quite large. Cacheing the entire stream sequentially
+        allows faster access to smaller chunks (say 1-5 seconds worth) of the stream.
 
             Reading, possibly filtering, and writing a multi-MB sequence will take a noticeable amount of time. The
         method will deliver a progress update signal roughly once per second.
 
-        :param idx: Omniplex channel index.
-        :param src: The Omniplex file object. The file must be open and is NOT closed on return.
+        :param idx: Analog channel index.
+        :param src: Open file stream to analog data source - either an Omniplex PL2 file or a flat binary file. The file
+            stream must be open and is NOT closed on return.
         :returns: A data container holding the channel index and the first second's worth of samples recorded.
         :raises: IO or other exception. Raises a generic exception if task cancelled.
         """
-        cache_file = Path(self._working_dir, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
+        cache_file = Path(self._working_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
         if cache_file.is_file():
             cache_file.unlink(missing_ok=True)
 
-        channel_dict = self._info['analog_channels'][idx]
-        num_blocks = len(channel_dict['block_num_items'])
-        samples_per_sec: float = channel_dict['samples_per_second']
-        block_idx = 0
-        is_wideband = (channel_dict['source'] == PL2.PL2_ANALOG_TYPE_WB)
-        channel_label = f"{'WB' if is_wideband else 'SPKC'}{channel_dict['channel']:03d}"
+        # This will hold first second's worth of channel samples, which we need to return
+        first_second: np.ndarray
+        samples_per_sec = self._working_dir.analog_sampling_rate
+
+        channel_label = self._working_dir.label_for_analog_channel(idx)
 
         # prepare bandpass filter in case analog signal is wide-band. The filter delays are initialized with zero-vector
         # initial condition and the delays are updated as each block is filtered...
         [b, a] = scipy.signal.butter(2, [2 * 300 / samples_per_sec, 2 * 8000 / samples_per_sec], btype='bandpass')
         filter_ic = scipy.signal.lfiltic(b, a, np.zeros(max(len(b), len(a)) - 1))
 
-        first_second: np.ndarray   # This will hold first second's worth of channel samples
-        with open(cache_file, 'wb', buffering=1024*1024) as dst:
-            t0 = time.time()
-            while block_idx < num_blocks:
-                # read in next block of samples and bandpass-filter it if signal is wide-band. Filtering converts the
-                # block of samples from int16 to float32, so we need to convert back!
-                curr_block: np.ndarray = PL2.load_analog_channel_block_faster(src, idx, block_idx, self._info)
-                if is_wideband:
-                    curr_block, filter_ic = scipy.signal.lfilter(b, a, curr_block, axis=-1, zi=filter_ic)
-                    curr_block = curr_block.astype(np.int16)
+        if self._working_dir.uses_omniplex_as_analog_source:
+            info = self._working_dir.omniplex_file_info
+            channel_dict = info['analog_channels'][idx]
+            num_blocks = len(channel_dict['block_num_items'])
+            block_idx = 0
+            is_wideband = (channel_dict['source'] == PL2.PL2_ANALOG_TYPE_WB)
 
-                # save the first second's worth of samples
-                # TODO: NOTE - We're assuming here that block size > samples_per_sec!!!
-                if block_idx == 0:
-                    first_second = curr_block[0:int(samples_per_sec)]
+            with open(cache_file, 'wb', buffering=1024*1024) as dst:
+                t0 = time.time()
+                while block_idx < num_blocks:
+                    # read in next block of samples and bandpass-filter if signal is wide-band. Filtering converts the
+                    # block of samples from int16 to float32, so we need to convert back!
+                    curr_block: np.ndarray = PL2.load_analog_channel_block_faster(src, idx, block_idx, info)
+                    if is_wideband:
+                        curr_block, filter_ic = scipy.signal.lfilter(b, a, curr_block, axis=-1, zi=filter_ic)
+                        curr_block = curr_block.astype(np.int16)
 
-                # then write that block to the cache file. NOTE that the blocks are 1D 16-bit signed integer arrays
-                dst.write(curr_block.tobytes())
+                    # save the first second's worth of samples. NOTE - We assume block size > samples_per_sec!!!
+                    if block_idx == 0:
+                        first_second = curr_block[0:int(samples_per_sec)]
 
-                # update progress roughly once per second. Also check for cancellation
-                block_idx += 1
-                if (time.time() - t0) > 1:
-                    self.signals.progress.emit(f"Cacheing data stream for analog channel {channel_label}...",
-                                               int(100.0 * block_idx / num_blocks))
-                    t0 = time.time()
-                if self._cancelled:
-                    dst.close()
-                    cache_file.unlink(missing_ok=True)
-                    raise Exception("Operation cancelled")
+                    # then write that block to the cache file. NOTE that the blocks are 1D 16-bit signed integer arrays
+                    dst.write(curr_block.tobytes())
 
-        return ChannelTraceSegment(idx, 0, samples_per_sec,
-                                   channel_dict['coeff_to_convert_to_units'] * 1.0e6, first_second)
+                    # update progress roughly once per second. Also check for cancellation
+                    block_idx += 1
+                    if (time.time() - t0) > 1:
+                        self.signals.progress.emit(f"Cacheing data stream for analog channel {channel_label}...",
+                                                   int(100.0 * block_idx / num_blocks))
+                        t0 = time.time()
+                    if self._cancelled:
+                        dst.close()
+                        cache_file.unlink(missing_ok=True)
+                        raise Exception("Operation cancelled")
+        else:
+            # how many samples are stored for each analog channel
+            n_ch = self._working_dir.num_analog_channels()
+            file_size = self._working_dir.analog_source.stat().st_size
+            if file_size % (2 * n_ch) != 0:
+                raise Exception(f'Flat binary file size inconsistent with specified number of channels ({n_ch})')
+            n_samples = int(file_size / (2 * n_ch))
+
+            interleaved = self._working_dir.is_analog_data_interleaved
+            prefiltered = self._working_dir.is_analog_data_prefiltered
+
+            with open(cache_file, 'wb', buffering=1024 * 1024) as dst:
+                t0 = time.time()
+
+                # if not interleaved, seek to start of stream for specified channel
+                if not interleaved:
+                    src.seek(idx * n_samples * 2)
+                n_bytes_per_sample = n_ch * 2 if interleaved else 2
+                num_samples_read = 0
+                while num_samples_read < n_samples:
+                    n_samples_to_read = min(samples_per_sec, n_samples - num_samples_read)
+                    curr_block = np.frombuffer(src.read(n_samples_to_read * n_bytes_per_sample), dtype='<h')
+
+                    # if interleaved, extract the samples for the channel we're cacheing
+                    if interleaved:
+                        curr_block = curr_block[idx::n_ch].copy()
+
+                    if not prefiltered:
+                        curr_block, filter_ic = scipy.signal.lfilter(b, a, curr_block, axis=-1, zi=filter_ic)
+                        curr_block = curr_block.astype(np.int16)
+
+                    # save the first second's worth of samples
+                    if num_samples_read == 0:
+                        first_second = curr_block
+
+                    # write block to cache file
+                    dst.write(curr_block.tobytes())
+
+                    # update progress roughly once per second. Also check for cancellation
+                    num_samples_read += n_samples_to_read
+                    if (time.time() - t0) > 1:
+                        self.signals.progress.emit(f"Cacheing data stream for analog channel {channel_label}...",
+                                                   int(100.0 * num_samples_read / n_samples))
+                        t0 = time.time()
+                    if self._cancelled:
+                        dst.close()
+                        cache_file.unlink(missing_ok=True)
+                        raise Exception("Operation cancelled")
+
+        return ChannelTraceSegment(idx, 0, samples_per_sec, self._working_dir.analog_channel_sample_to_uv(idx),
+                                   first_second)
 
     def _cache_neural_unit(self, unit: Neuron) -> None:
         """
@@ -383,15 +347,17 @@ class Task(QRunnable):
         store the waveforms, spike train and other metadata in a dedicated cache file in the XSort working directory.
             The Lisberger lab's spike sorter algorithm outputs a spike train for each identified neural unit, but it
         does not generate any other metrics. XSort needs to compute the unit's mean spike waveform, or "template", on
-        each recorded Omniplex channel, measure SNR, etc.
-            A unit's spike template on a given Omniplex analog source channel is calculated by averaging all of the
-        10-ms clips [T-1 .. T+9] from the channel data stream surrounding each spike time T. At the same time,
-        background noise is measured on that channel to calculate a signal-to-noise ratio (SNR) for that unit on that
-        analog channel. The channel for which SNR is greatest is considered the "primary channel" for that unit.
-            Since the recorded Omniplex analog data streams are quite long, the template and SNR computations can take
-        a while. For efficiency's sake, this work is not done until after the analog data streams have been extracted
-        from the Ominplex source file, bandpass-filtered if necessary, and stored sequentially in dedicated cache files
-        named IAW the channel index. This method expects the channel cache files to be present, or it fails.
+        each recorded analog data channel, measure SNR, etc.
+            A unit's spike template on a given analog data channel is calculated by averaging all of the 10-ms clips
+        [T-1 .. T+9] from the channel data stream surrounding each spike time T. At the same time, background noise is
+        measured on that channel to calculate a signal-to-noise ratio (SNR) for that unit on that analog channel. The
+        channel for which SNR is greatest is considered the "primary channel" for that unit.
+            Since the recorded analog data streams are quite long, the template and SNR computations can take a while.
+        For efficiency's sake, this work is not done until after the analog data streams have been extracted from the
+        analog source file, bandpass-filtered if necessary, and stored sequentially in dedicated cache files named IAW
+        the channel index. This method will fail if any channel cache file is missing. **However**, if the analog source
+        is a flat binary file containing prefiltered analog data, then the per-channel cache files are not needed, and
+        the analog data streams are read directly from the original binary source file.
             Progress messages are delivered roughly once per second.
 
         :param unit: The neural unit record to be cached. This will be an incomplete **Neuron** object, lacking the
@@ -402,97 +368,256 @@ class Task(QRunnable):
         """
         self.signals.progress.emit(f"Computing and cacheing metrics for unit {unit.uid} ...", 0)
 
-        # get indices of recorded analog channels in ascending order
-        channel_list: List[int] = list()
-        all_channels = self._info['analog_channels']
-        for i in range(len(all_channels)):
-            if all_channels[i]['num_values'] > 0 and \
-                    (all_channels[i]['source'] in [PL2.PL2_ANALOG_TYPE_WB, PL2.PL2_ANALOG_TYPE_SPKC]):
-                channel_list.append(i)
-        if len(channel_list) == 0:
-            raise Exception("No recorded analog channels found in Omniplex file.")
+        channel_list = self._working_dir.analog_channel_indices
 
         # expect the analog sample rate to be the same on all recorded channels we care about. Below we throw an
         # exception if this is not the case...
-        samples_per_sec: float = all_channels[channel_list[0]]['samples_per_second']
+        samples_per_sec = self._working_dir.analog_sampling_rate
         samples_in_template = int(samples_per_sec * 0.01)
 
-        # compute mean spike waveform for unit on each recorded analog channel. The analog data stream is read from the
-        # corresponding channel cache file, which should be present in the working directory.
+        # compute mean spike waveform for unit on each recorded analog channel and determine primary channel on which
+        # best SNR is observed
         template_dict: Dict[int, np.ndarray] = dict()
         primary_channel_idx = -1
         best_snr: float = 0.0
-        block_size = 256 * 1024
-        for idx in channel_list:
-            ch_dict = self._info['analog_channels'][idx]
-            ch_file = Path(self._working_dir, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
-            if not ch_file.is_file():
-                raise Exception(f"Missing internal cache file for recorded data on Omniplex channel {str(idx)}.")
-            if ch_dict['samples_per_second'] != samples_per_sec:
-                raise Exception('Found at least one analog channel sampled at a different rate in Omniplex file!')
 
-            template = np.zeros(samples_in_template, dtype='<f')
-            to_volts: float = ch_dict['coeff_to_convert_to_units']
+        # CASE 1: The analog data stream is read from the corresponding channel cache file, which must be present.
+        if self._working_dir.need_analog_cache:
+            block_size = 256 * 1024
+            for idx in channel_list:
+                ch_file = Path(self._working_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
+                if not ch_file.is_file():
+                    raise Exception(f"Missing internal cache file for recorded data on analog channel {str(idx)}.")
+
+                template = np.zeros(samples_in_template, dtype='<f')
+                t0 = time.time()
+                file_size = ch_file.stat().st_size
+                num_blocks = math.ceil(file_size / block_size)
+                block_medians: List[float] = list()
+                with open(ch_file, 'rb', buffering=1024 * 1024) as src:
+                    sample_idx = 0
+                    spike_idx = num_clips = 0
+                    prev_block: Optional[np.ndarray] = None
+                    for i in range(num_blocks):
+                        curr_block = np.frombuffer(src.read(block_size), dtype='<h')
+                        block_medians.append(np.median(np.abs(curr_block)))  # for later SNR calc
+
+                        # accumulate all spike template clips that are fully contained in the current block OR straddle
+                        # the previous and current block
+                        num_samples_in_block = len(curr_block)
+                        while spike_idx < unit.num_spikes:
+                            # clip start and end indices with respect to the current block
+                            start = int((unit.spike_times[spike_idx] - 0.001) * samples_per_sec) - sample_idx
+                            end = start + samples_in_template
+                            if end >= num_samples_in_block:
+                                break  # no more spikes fully contained in current block
+                            elif start >= 0:
+                                np.add(template, curr_block[start:end], out=template)
+                                num_clips += 1
+                            elif isinstance(prev_block, np.ndarray):
+                                np.add(template, np.concatenate((prev_block[start:], curr_block[0:end])), out=template)
+                                num_clips += 1
+                            spike_idx += 1
+
+                        # get ready for next block; update progress roughly once per second
+                        prev_block = curr_block
+                        sample_idx += num_samples_in_block
+                        if (time.time() - t0) > 1:
+                            channel_progress_delta = 1 / len(channel_list)
+                            total_progress_frac = idx / len(channel_list)
+                            total_progress_frac += channel_progress_delta * (i + 1) / num_blocks
+                            self.signals.progress.emit(
+                                f"Calculating metrics for unit {unit.uid} on Omniplex channel {str(idx)} ... ",
+                                int(100.0 * total_progress_frac))
+                            t0 = time.time()
+                        if self._cancelled:
+                            raise Exception("Operation cancelled")
+
+                # prepare mean spike waveform template and compute SNR for this channel. The unit's SNR is the highest
+                # recorded per-channel SNR, and the "primary channel" is the one with the highest SNR.
+                noise = np.median(block_medians) * 1.4826
+                if num_clips > 0:
+                    template /= num_clips
+                snr = (np.max(template) - np.min(template)) / (1.96 * noise)
+                if snr > best_snr:
+                    best_snr = snr
+                    primary_channel_idx = idx
+                template *= self._working_dir.analog_channel_sample_to_uv(idx)
+                template_dict[idx] = template
+
+                if self._cancelled:
+                    raise Exception("Operation cancelled")
+
+        # CASE 2: Read directly from non-interleaved, prefiltered flat binary file. Channel indices are 0..N-1 and
+        # are stored in that order in the file.
+        elif not self._working_dir.is_analog_data_interleaved:
+            n_ch = self._working_dir.num_analog_channels()
+            file_size = self._working_dir.analog_source.stat().st_size
+            if file_size % (2 * n_ch) != 0:
+                raise Exception(f'Flat binary file size inconsistent with specified number of channels ({n_ch})')
+            n_samples = int(file_size / (2 * n_ch))
+            n_bytes_per_sample = 2
+
+            # want to read up to 256KB at a time
+            n_secs_per_read = 0
+            while (n_secs_per_read * samples_per_sec * n_bytes_per_sample) < 256 * 1024:
+                n_secs_per_read += 1
+
+            # read the file sequentially from beginning to end. Since the channel data streams are not interleaved,
+            # channel 0's data stream comes first, then channnel 1, and so on...
             t0 = time.time()
-            file_size = ch_file.stat().st_size
-            num_blocks = math.ceil(file_size / block_size)
-            block_medians = np.zeros(num_blocks)
-            with open(ch_file, 'rb', buffering=1024 * 1024) as src:
-                sample_idx = 0
-                spike_idx = num_clips = 0
-                prev_block: Optional[np.ndarray] = None
-                for i in range(num_blocks):
-                    curr_block = np.frombuffer(src.read(block_size), dtype='<h')
-                    block_medians[i] = np.median(np.abs(curr_block))  # for later SNR calc
+            with open(self._working_dir.analog_source, 'rb', buffering=1024 * 1024) as src:
+                for idx in range(n_ch):
+                    template = np.zeros(samples_in_template, dtype='<f')
+                    block_medians: List[float] = list()
+                    num_samples_read = 0
+                    spike_idx = num_clips = 0
+                    prev_block: Optional[np.ndarray] = None
+                    while num_samples_read < n_samples:
+                        n_samples_to_read = min(n_secs_per_read*samples_per_sec, n_samples - num_samples_read)
+                        curr_block = np.frombuffer(src.read(n_samples_to_read * n_bytes_per_sample), dtype='<h')
 
-                    # accumulate all spike template clips that are fully contained in the current block OR straddle the
-                    # previous and current block
-                    num_samples_in_block = len(curr_block)
-                    while spike_idx < unit.num_spikes:
-                        # clip start and end indices with respect to the current block
-                        start = int((unit.spike_times[spike_idx] - 0.001) * samples_per_sec) - sample_idx
-                        end = start + samples_in_template
-                        if end >= num_samples_in_block:
-                            break  # no more spikes fully contained in current block
-                        elif start >= 0:
-                            template = np.add(template, curr_block[start:end])
-                            num_clips += 1
-                        elif isinstance(prev_block, np.ndarray):
-                            template = np.add(template, np.concatenate((prev_block[start:], curr_block[0:end])))
-                            num_clips += 1
-                        spike_idx += 1
+                        block_medians.append(np.median(np.abs(curr_block)))  # for later SNR calc
 
-                    # get ready for next block; update progress roughly once per second
-                    prev_block = curr_block
-                    sample_idx += num_samples_in_block
+                        # accumulate all spike template clips that are fully contained in the current block OR straddle
+                        # the previous and current block
+                        while spike_idx < unit.num_spikes:
+                            # clip start and end indices with respect to the current block
+                            start = int((unit.spike_times[spike_idx] - 0.001) * samples_per_sec) - num_samples_read
+                            end = start + samples_in_template
+                            if end >= n_samples_to_read:
+                                break  # no more spikes fully contained in current block
+                            elif start >= 0:
+                                np.add(template, curr_block[start:end], out=template)
+                                num_clips += 1
+                            elif isinstance(prev_block, np.ndarray):
+                                np.add(template, np.concatenate((prev_block[start:], curr_block[0:end])), out=template)
+                                num_clips += 1
+                            spike_idx += 1
+
+                        # get ready for next block; update progress roughly once per second
+                        prev_block = curr_block
+                        num_samples_read += n_samples_to_read
+                        if (time.time() - t0) > 1:
+                            channel_progress_delta = 1 / n_ch
+                            total_progress_frac = idx / n_ch + channel_progress_delta * (num_samples_read / n_samples)
+                            self.signals.progress.emit(
+                                f"Calculating metrics for unit {unit.uid} on analog channel {str(idx)} ... ",
+                                int(100.0 * total_progress_frac))
+                            t0 = time.time()
+                        if self._cancelled:
+                            raise Exception("Operation cancelled")
+
+                    # prepare mean spike waveform template and compute SNR for channel. The unit's SNR is the highest
+                    # recorded per-channel SNR, and the "primary channel" is the one with the highest SNR.
+                    noise = np.median(block_medians) * 1.4826
+                    if num_clips > 0:
+                        template /= num_clips
+                    snr = (np.max(template) - np.min(template)) / (1.96 * noise)
+                    if snr > best_snr:
+                        best_snr = snr
+                        primary_channel_idx = idx
+                    template *= self._working_dir.analog_channel_sample_to_uv(idx)
+                    template_dict[idx] = template
+
+                    if self._cancelled:
+                        raise Exception("Operation cancelled")
+
+        # CASE 3: Read directly from interleaved, prefiltered flat binary file. Because the channels are interleaved,
+        # we have to accumulate the templates and noise measures for all channels as we read through the file ONCE. We
+        # DON'T want to read through the file N times, where N is the number of channels.
+        else:
+            n_ch = self._working_dir.num_analog_channels()
+            file_size = self._working_dir.analog_source.stat().st_size
+            if file_size % (2 * n_ch) != 0:
+                raise Exception(f'Flat binary file size inconsistent with specified number of channels ({n_ch})')
+            n_samples = int(file_size / (2 * n_ch))
+            n_bytes_per_sample = 2 * n_ch   # <== one "sample" in the interleaved case is one scan of the N channels!
+
+            # because we're processing all channels simultaneously, we have to maintain various accumulators/counters
+            # for all of the channels at once
+            block_medians_dict: Dict[int, List[float]] = dict()
+            prev_block_dict: Dict[int, Optional[np.ndarray]] = dict()
+            spike_index_dict: Dict[int, int] = dict()
+            num_clips_dict: Dict[int, int] = dict()
+            for idx in range(n_ch):
+                template_dict[idx] = np.zeros(samples_in_template, dtype='<f')
+                block_medians_dict[idx] = list()
+                prev_block_dict[idx] = None
+                spike_index_dict[idx] = 0
+                num_clips_dict[idx] = 0
+
+            # want to read up to 256KB at a time
+            n_secs_per_read = 0
+            while (n_secs_per_read * samples_per_sec * n_bytes_per_sample) < 256 * 1024:
+                n_secs_per_read += 1
+
+            t0 = time.time()
+            with open(self._working_dir.analog_source, 'rb', buffering=1024 * 1024) as src:
+                num_samples_read = 0
+                while num_samples_read < n_samples:
+                    n_samples_to_read = min(n_secs_per_read*samples_per_sec, n_samples - num_samples_read)
+                    curr_block = np.frombuffer(src.read(n_samples_to_read * n_bytes_per_sample), dtype='<h')
+                    # curr_block has the next N seconds's worth of interleaved channel samples!
+
+                    for idx in range(n_ch):
+                        # extract the interleaved samples for the current channel index
+                        block = curr_block[idx::n_ch].copy()
+                        block_medians_dict[idx].append(np.median(np.abs(block)))  # for later SNR calc
+
+                        template = template_dict[idx]
+                        spike_idx = spike_index_dict[idx]
+                        num_clips = num_clips_dict[idx]
+                        prev_block = prev_block_dict[idx]
+                        while spike_idx < unit.num_spikes:
+                            # clip start and end indices with respect to the current block
+                            start = int((unit.spike_times[spike_idx] - 0.001) * samples_per_sec) - num_samples_read
+                            end = start + samples_in_template
+                            if end >= n_samples_to_read:
+                                break  # no more spikes fully contained in current block
+                            elif start >= 0:
+                                np.add(template, block[start:end], out=template)
+                                num_clips += 1
+                            elif isinstance(prev_block, np.ndarray):
+                                np.add(template, np.concatenate((prev_block[start:], block[0:end])), out=template)
+                                num_clips += 1
+                            spike_idx += 1
+
+                        # remember stuff needed to continue processing with next block
+                        prev_block_dict[idx] = block
+                        spike_index_dict[idx] = spike_idx
+                        num_clips_dict[idx] = num_clips
+
+                    # update progress roughly once per second
+                    num_samples_read += n_samples_to_read
                     if (time.time() - t0) > 1:
-                        channel_progress_delta = 1 / len(channel_list)
-                        total_progress_frac = idx / len(channel_list) + channel_progress_delta * (i + 1) / num_blocks
                         self.signals.progress.emit(
-                            f"Calculating metrics for unit {unit.uid} on Omniplex channel {str(idx)} ... ",
-                            int(100.0 * total_progress_frac))
+                            f"Calculating metrics for unit {unit.uid} across {n_ch} interleaved channels ... ",
+                            int(100.0 * num_samples_read / n_samples))
                         t0 = time.time()
                     if self._cancelled:
                         raise Exception("Operation cancelled")
 
-            # prepare mean spike waveform template and compute SNR for this channel. The unit's SNR is the highest
+            # prepare mean spike waveform template and compute SNR for each channel. The unit's SNR is the highest
             # recorded per-channel SNR, and the "primary channel" is the one with the highest SNR.
-            noise = np.median(block_medians) * 1.4826
-            if num_clips > 0:
-                template /= num_clips
-            snr = (np.max(template) - np.min(template)) / (1.96 * noise)
-            if snr > best_snr:
-                best_snr = snr
-                primary_channel_idx = idx
-            template *= to_volts * 1.0e6
-            template_dict[idx] = template
+            for idx in range(n_ch):
+                template = template_dict[idx]
+                noise = np.median(block_medians_dict[idx]) * 1.4826
+                if num_clips_dict[idx] > 0:
+                    template /= num_clips_dict[idx]
+                snr = (np.max(template) - np.min(template)) / (1.96 * noise)
+                if snr > best_snr:
+                    best_snr = snr
+                    primary_channel_idx = idx
+                template *= self._working_dir.analog_channel_sample_to_uv(idx)
 
-            if self._cancelled:
-                raise Exception("Operation cancelled")
+                if self._cancelled:
+                    raise Exception("Operation cancelled")
 
         # update neural unit record in place and store in cache file
         unit.update_metrics(primary_channel_idx, best_snr, template_dict)
-        save_neural_unit_to_cache(self._working_dir, unit, suppress=False)
+        if not self._working_dir.save_neural_unit_to_cache(unit):
+            raise Exception(f"Error occurred while writing unit metrics to internal cache: uid={unit.uid}")
 
     def _compute_statistics(self) -> None:
         """
@@ -504,7 +629,7 @@ class Task(QRunnable):
               the PCA projection of each unit's spike train.
 
         The list of neural units are supplied in the task constructor and are actually references to the
-        :class:`Neuron` objects live on the main GUI thread. :class:`Neuron` instance methods compute the various
+        :class:`Neuron` objects living on the main GUI thread. :class:`Neuron` instance methods compute the various
         histograms and cache them internally, but these should only be invoked on a background thread because they can
         take a significant amount of time to execute. Only histograms that have not been cached already are computed.
 
@@ -531,19 +656,12 @@ class Task(QRunnable):
         if len(self._units) == 0:
             return
 
-        # read in information from Omniplex file. We need the Omniplex information to perform this task...
-        omniplex_file, _, emsg = get_required_data_files(self._working_dir)
-        if len(emsg) > 0:
-            raise Exception(emsg)
-        with open(omniplex_file, 'rb', buffering=65536 * 2) as src:
-            self._info = PL2.load_file_information(src)
-
         # if any unit is missing the standard metrics (like template waveforms), either load them from the corresponding
         # cache file (if it's there) or calculate the metrics and generate the cache.
         u: Neuron
         for i, u in enumerate(self._units):
             if u.primary_channel is None:
-                updated_unit = load_neural_unit_from_cache(self._working_dir, u.uid)
+                updated_unit = self._working_dir.load_neural_unit_from_cache(u.uid)
                 if (updated_unit is None) or (updated_unit.primary_channel is None):
                     self._cache_neural_unit(u)
                 else:
@@ -614,7 +732,7 @@ class Task(QRunnable):
     change, as this is the pre-spike interval used to compute all mean spike template waveforms.**
     """
 
-    SAMPLES_PER_CHUNK: int = 65536
+    SAMPLES_PER_CHUNK: int = 256 * 1024
     """ Number analog samples read in one go while extracting spike clips from an analog channel cache file. """
 
     SPIKES_PER_BATCH: int = 20000
@@ -660,22 +778,14 @@ class Task(QRunnable):
             raise Exception(f"PCA projection requires 1-3 units, not {len(self._units)}!")
         for u in self._units:
             if u.primary_channel is None:
-                raise Exception(f"Mean spike templates missing for unit {u.uid}; cannot do PC analaysis.")
+                raise Exception(f"Mean spike templates missing for unit {u.uid}; cannot do PC analysis.")
 
         self.signals.progress.emit(f"Computing PCA projections for {len(self._units)} units: "
                                    f"{','.join([u.uid for u in self._units])} ...", -1)
 
         # the analog channel list. All analog channel cache files should already exist.
-        channel_list: List[int] = list()
-        all_channels = self._info['analog_channels']
-        for i in range(len(all_channels)):
-            if all_channels[i]['num_values'] > 0 and \
-                    (all_channels[i]['source'] in [PL2.PL2_ANALOG_TYPE_WB, PL2.PL2_ANALOG_TYPE_SPKC]):
-                channel_list.append(i)
-        if len(channel_list) == 0:
-            raise Exception("No recorded analog channels found in Omniplex file")
-
-        samples_per_sec: float = all_channels[channel_list[0]]['samples_per_second']
+        channel_list = self._working_dir.analog_channel_indices
+        samples_per_sec = self._working_dir.analog_sampling_rate
 
         # phase 1: compute 2 highest-variance principal components
         time.sleep(0.2)
@@ -754,56 +864,87 @@ class Task(QRunnable):
 
     def _retrieve_channel_clips(self, ch_idx: int, clip_starts: List[int], clip_dur: int) -> np.ndarray:
         """
-        Retrieve a series of short "clips" from a recorded Omniplex analog channel trace as stored in the corresponding
+        Retrieve a series of short "clips" from a recorded analog data channel trace as stored in the corresponding
         channel cache file in the working directory.
 
+        :param ch_idx: The analog channel index.
         :param clip_starts: A Nx1 array containing the start index for each clip; MUST be in ascending order!
         :param clip_dur: The duration of each clip in # of analog samples, M.
         :return: An NxM Numpy array of 16-bit integers containing the clips, one per row.
         :raises Exception if an error occurs (channel cache file missing or invalid, IO error).
         """
-        cache_file = Path(self._working_dir, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
-        if not cache_file.is_file():
-            raise Exception(f"Channel cache file missing for analog channel {str(ch_idx)}")
-
-        # check file size
-        ch_dict = self._info['analog_channels'][ch_idx]
-        total_samples: int = ch_dict['num_values']
-        expected_size = struct.calcsize("<{:d}h".format(total_samples))
-        if cache_file.stat().st_size != expected_size:
-            raise Exception(f"Incorrect cache file size for analog channel {str(ch_idx)}: was "
-                            f"{cache_file.stat().st_size}, expected {expected_size}")
-
         n_clips = len(clip_starts)
         n_clips_so_far = 0
         out = np.zeros((len(clip_starts), clip_dur), dtype='<h')
-        with (open(cache_file, 'rb') as fp):
+
+        # When the original analog source is a prefiltered flat binary file -- either interleaved or not --, there is
+        # no reason to create per-channel cache files. Thus, the clips must be extracted from 3 possible source file
+        # formats, two of which are non-interleaved.
+        src_path: Path
+        interleaved = False
+        num_samples: int
+        n_ch = self._working_dir.num_analog_channels()
+        n_bytes_per_sample = 2
+        ch_offset = 0   # byte offset to start of specified channel's stream (non-interleaved flat binary file only)
+        n_samples_per_chunk_read = Task.SAMPLES_PER_CHUNK
+
+        if self._working_dir.need_analog_cache:
+            src_path = Path(self._working_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
+            if not src_path.is_file():
+                raise Exception(f"Channel cache file missing for analog channel {str(ch_idx)}")
+            num_samples = int(src_path.stat().st_size / n_bytes_per_sample)
+        else:
+            src_path = self._working_dir.analog_source
+            if not src_path.is_file():
+                raise Exception(f"Original flat binary analog source file is missing!")
+            file_size = self._working_dir.analog_source.stat().st_size
+            if file_size % (2 * n_ch) != 0:
+                raise Exception(f'Flat binary file size inconsistent with specified number of channels ({n_ch})')
+            num_samples = int(file_size / (2 * n_ch))
+            interleaved = self._working_dir.is_analog_data_interleaved
+            if not interleaved:
+                ch_offset = (ch_idx * num_samples) * n_bytes_per_sample
+            else:
+                # for interleaved case, one "sample" is actually one scan of all N channels
+                n_bytes_per_sample = 2 * n_ch
+                n_samples_per_chunk_read = int(n_samples_per_chunk_read / n_ch)
+
+        with open(src_path, 'rb', buffering=1024 * 1024) as fp:
             # special case: check for a spike clip that starts before recording began or ends after. For these, the
-            # portion of the clip that wasn't sampled is set to zeros.
+            # portion of the clip that wasn't sampled is set to zeros. We assume that NO clips ever end before the
+            # recording began or start after!!!
             if clip_starts[0] < 0:
-                chunk = np.frombuffer(fp.read(struct.calcsize(f"<{clip_dur+clip_starts[0]}h")))
+                fp.seek(ch_offset)
+                chunk = np.frombuffer(fp.read(n_bytes_per_sample * (clip_dur + clip_starts[0])), dtype='<h')
+                if interleaved:
+                    chunk = chunk[ch_idx::n_ch].copy()
                 out[0, -clip_starts[0]:] = chunk
                 n_clips_so_far += 1
-            if (clip_starts[-1] + clip_dur) > total_samples:
-                fp.seek(struct.calcsize(f"<{clip_starts[-1]}h"))
-                chunk = np.frombuffer(fp.read(struct.calcsize(f"<{total_samples-clip_starts[-1]}")))
-                out[n_clips-1, 0:len(chunk)] = chunk
+            if (clip_starts[-1] + clip_dur) > num_samples:
+                fp.seek(ch_offset + clip_starts[-1] * n_bytes_per_sample)
+                chunk = np.frombuffer(fp.read((num_samples - clip_starts[-1]) * n_bytes_per_sample), dtype='<h')
+                if interleaved:
+                    chunk = chunk[ch_idx::n_ch].copy()
+                out[n_clips - 1, 0:len(chunk)] = chunk
                 n_clips -= 1
 
             while n_clips_so_far < n_clips:
                 if self._cancelled:
                     raise Exception("Operation cancelled")
                 chunk_start = clip_starts[n_clips_so_far]
-                fp.seek(struct.calcsize(f"<{chunk_start}h"))
-                n_chunk_samples = min(Task.SAMPLES_PER_CHUNK, total_samples - chunk_start)
-                chunk = np.frombuffer(fp.read(struct.calcsize(f"<{n_chunk_samples}h")), dtype='<h')
+                fp.seek(ch_offset + chunk_start * n_bytes_per_sample)
+
+                n_chunk_samples = min(n_samples_per_chunk_read, num_samples - chunk_start)
+                chunk = np.frombuffer(fp.read(n_chunk_samples * n_bytes_per_sample), dtype='<h')
+                if interleaved:
+                    chunk = chunk[ch_idx::n_ch].copy()
                 n_clips_in_chunk = 0
                 while (n_clips_so_far + n_clips_in_chunk < n_clips) and \
                         (clip_starts[n_clips_so_far + n_clips_in_chunk] - chunk_start + clip_dur < n_chunk_samples):
                     n_clips_in_chunk += 1
                 for k in range(n_clips_in_chunk):
                     chunk_idx = clip_starts[n_clips_so_far + k] - chunk_start
-                    out[n_clips_so_far + k, :] = chunk[chunk_idx:chunk_idx+clip_dur]
+                    out[n_clips_so_far + k, :] = chunk[chunk_idx:chunk_idx + clip_dur]
                 n_clips_so_far += n_clips_in_chunk
 
         return out

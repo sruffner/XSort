@@ -316,18 +316,16 @@ class Analyzer(QObject):
         """
         self._cancel_background_task(t)
 
-        # TODO: For now, leaving tasks.py alone -- but we should really give it WorkingDirectory, which already
-        #   contains the PL2 Info
         if t == TaskType.BUILDCACHE:
-            task = Task(TaskType.BUILDCACHE, self._working_directory.path)
+            task = Task(TaskType.BUILDCACHE, self._working_directory)
         elif t == TaskType.COMPUTESTATS:
             focus_list = self.neurons_with_display_focus
             if len(focus_list) == 0:
                 return
-            task = Task(TaskType.COMPUTESTATS, self._working_directory.path, units=focus_list)
+            task = Task(TaskType.COMPUTESTATS, self._working_directory, units=focus_list)
         elif t == TaskType.GETCHANNELS:
             t0 = self._channel_seg_start
-            task = Task(TaskType.GETCHANNELS, self._working_directory.path, start=t0 * self.channel_samples_per_sec,
+            task = Task(TaskType.GETCHANNELS, self._working_directory, start=t0 * self.channel_samples_per_sec,
                         count=self.channel_samples_per_sec)
         else:
             return
