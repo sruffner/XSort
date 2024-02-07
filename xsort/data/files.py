@@ -249,9 +249,9 @@ class WorkingDirectory:
         Number of analog data channels recorded. Specified by user if analog source is a flat binary file; extracted
         from Omniplex Pl2 file. 
         """
-        self._to_microvolts: float = scale * 1.0e6
+        self._to_volts: float = scale
         """ 
-        Multiplicative scale factor converts a raw 16-bit analog data sample to microvolts. Applies to all available
+        Multiplicative scale factor converts a raw 16-bit analog data sample to volts. Applies to all available
         analog channels in the flat binary file. Ignored for PL2 source file, which includes per-channel scaling
         factors.
         """
@@ -479,7 +479,7 @@ class WorkingDirectory:
                         writer.writerow((self._analog_src, self._unit_src))
                     else:
                         writer.writerow((self._analog_src, self._unit_src, str(self._sampling_rate),
-                                         str(self._num_channels), f"{self._to_microvolts * 1.0e7:.5f}",
+                                         str(self._num_channels), f"{self._to_volts * 1.0e7:.5f}",
                                          "true" if self._interleaved else "false",
                                          "true" if self._prefiltered else "false"))
             except Exception:
@@ -572,7 +572,7 @@ class WorkingDirectory:
             if self.uses_omniplex_as_analog_source:
                 factor = self._pl2_info['analog_channels'][idx]['coeff_to_convert_to_units'] * 1.0e6
             else:
-                factor = self._to_microvolts
+                factor = self._to_volts * 1.0e6
         return factor
 
     @property

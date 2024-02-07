@@ -32,13 +32,16 @@ class TemplateView(BaseView):
     """ Number of per-channel templates plotted per 'row' in the plot widget. """
     _H_OFFSET_REL: float = 1.2
     """ Multiply current template span by this factor to get horizontal offset between adjacent templates in a row. """
-    _V_OFFSET_UV: int = 150
-    """ Vertical offset between the rows of templates, in microvolts. """
     _MIN_TSPAN_MS: int = 3
     """ Minimum template span in milliseconds. """
     _MAX_TSPAN_MS: int = 10
     """ Maximum template span in milliseconds. """
-
+    _MIN_VSPAN_UV: int = 30
+    """ Minimum +/- voltage range for templates, in microvolts. """
+    _MAX_VSPAN_UV: int = 250
+    """ Msximum +/- voltage range for templates, in microvolts. """
+    _DEF_VSPAN_UV: int = 75
+    """ Default +/- voltage range for templates, in microvolts. """
     def __init__(self, data_manager: Analyzer) -> None:
         super().__init__('Templates', None, data_manager)
 
@@ -63,6 +66,9 @@ class TemplateView(BaseView):
         """
         self._tspan_slider = QSlider(orientation=Qt.Orientation.Horizontal)
         """ Slider controls the displayed span of each template in milliseconds. """
+        self._vspan_slider = QSlider(orientation=Qt.Orientation.Horizontal)
+        """ Slider controls the displayed height of each template in microvolts. """
+        self._vspan_readout = QLabel(f"+/-{self._DEF_VSPAN_UV} \u00b5v")
 
         # one-time only configuration of the plot: disable the context menu; hide axes; position message
         # label centered over the plot (to indicate when no data is available); use a scale bar to indicate timescale.
@@ -82,17 +88,24 @@ class TemplateView(BaseView):
         self._tspan_slider.setRange(self._MIN_TSPAN_MS, self._MAX_TSPAN_MS)
         self._tspan_slider.setTickInterval(1)
         self._tspan_slider.setSliderPosition(self._MAX_TSPAN_MS)
-        self._tspan_slider.valueChanged.connect(self.on_template_span_change)
+        self._tspan_slider.valueChanged.connect(self._on_template_span_change)
 
         min_label = QLabel(f"{self._MIN_TSPAN_MS} ms")
         min_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         max_label = QLabel(f"{self._MAX_TSPAN_MS} ms")
         max_label.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
+        self._vspan_slider.setTickPosition(QSlider.TickPosition.NoTicks)
+        self._vspan_slider.setRange(self._MIN_VSPAN_UV, self._MAX_VSPAN_UV)
+        self._vspan_slider.setSliderPosition(self._DEF_VSPAN_UV)
+        self._vspan_slider.valueChanged.connect(self._on_voltage_range_change)
+
         main_layout = QVBoxLayout()
         main_layout.addWidget(self._plot_widget)
         control_line = QHBoxLayout()
-        control_line.addStretch(2)
+        control_line.addWidget(self._vspan_readout)
+        control_line.addWidget(self._vspan_slider, stretch=1)
+        control_line.addStretch(1)
         control_line.addWidget(min_label)
         control_line.addWidget(self._tspan_slider, stretch=1)
         control_line.addWidget(max_label)
@@ -127,11 +140,12 @@ class TemplateView(BaseView):
                 pen_colors.append(color)
 
             t_span_ms = self._tspan_slider.sliderPosition()
+            v_span_uv = self._vspan_slider.sliderPosition()
             row: int = 0
             col: int = 0
             for idx in self.data_manager.channel_indices:
                 x = col * (t_span_ms * self._H_OFFSET_REL)
-                y = row * self._V_OFFSET_UV
+                y = row * (v_span_uv * 2)
                 for k in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
                     pen = pg.mkPen(pen_colors[k], width=self.trace_pen_width)
                     self._spike_templates[k][idx] = self._plot_item.plot(x=[], y=[], pen=pen)
@@ -152,7 +166,7 @@ class TemplateView(BaseView):
             num_channels = len(self.data_manager.channel_indices)
             num_rows = (int(num_channels/self._NUM_TEMPLATES_PER_ROW) +
                         (0 if (num_channels % self._NUM_TEMPLATES_PER_ROW == 0) else 1))
-            self._plot_item.setYRange(-self._V_OFFSET_UV/2, (num_rows - 0.5) * self._V_OFFSET_UV)
+            self._plot_item.setYRange(-v_span_uv, (num_rows - 0.5) * (2 * v_span_uv))
 
     def on_working_directory_changed(self) -> None:
         """
@@ -169,21 +183,28 @@ class TemplateView(BaseView):
 
         :param uid: Label identifying the updated neural unit.
         """
-        self._refresh(template_span_changed=False, uid_updated=uid)
+        self._refresh(uid_updated=uid)
 
     def on_focus_neurons_changed(self) -> None:
         """
         Whenever the subset of neural units holding the display focus changes, update the plot to show the spike
         templates for each unit in the focus set that across all available analog channels.
         """
-        self._refresh(template_span_changed=False)
+        self._refresh()
 
     @Slot()
-    def on_template_span_change(self) -> None:
+    def _on_template_span_change(self) -> None:
         """ Refresh the entire view whenever the user changes the template span. """
-        self._refresh(template_span_changed=True)
+        self._refresh(tspan_changed=True)
 
-    def _refresh(self, template_span_changed: bool, uid_updated: Optional[str] = None) -> None:
+    @Slot()
+    def _on_voltage_range_change(self) -> None:
+        """ Refresh the entire view whenever the user changes the voltage range for the templates. """
+        self._vspan_readout.setText(f"+/-{self._vspan_slider.sliderPosition()} \u00b5v")
+        self._refresh(vspan_changed=True)
+
+    def _refresh(self, tspan_changed: bool = False, vspan_changed: bool = False,
+                 uid_updated: Optional[str] = None) -> None:
         """
         Refresh the view in response to a change in the set of displayed neurons, a change in the template span, or
         upon retrieval of the metrics for a neuron.
@@ -194,14 +215,16 @@ class TemplateView(BaseView):
         for display. If it is, then only the plot data items associated with that unit's templates are refreshed.
         Note that only one of these changes will occur at a time.
 
-        :param template_span_changed: True if template span was changed.
+        :param tspan_changed: True if template time (X) span was changed. Default is False.
+        :param vspan_changed: True if template voltage (Y) span was changed. Default is False.
         :param uid_updated: UID  identifying the neural unit for which metrics have just been retrieved from the
-            application cache; otherwise None.
+            application cache; otherwise None. Default is None
         """
         if len(self.data_manager.channel_indices) == 0:
             return
         t_span_ms = self._tspan_slider.sliderPosition()
         t_span_ticks = int(self.data_manager.channel_samples_per_sec * t_span_ms * 0.001)
+        v_span_uv = self._vspan_slider.sliderPosition()
         displayed = self.data_manager.neurons_with_display_focus
 
         # if refresh is because a unit's metrics were updated, but that unit is not displayed, there's nothing to do.
@@ -216,7 +239,7 @@ class TemplateView(BaseView):
             col: int = 0
             for idx in self.data_manager.channel_indices:
                 t0 = col * (t_span_ms * self._H_OFFSET_REL)
-                y0 = row * self._V_OFFSET_UV
+                y0 = row * (2 * v_span_uv)
                 pdi = template_dict[idx]
                 template = displayed[k].get_template_for_channel(idx) if (k < len(displayed)) else None
                 if template is None:
@@ -226,8 +249,8 @@ class TemplateView(BaseView):
                     pdi.setData(x=np.linspace(start=t0, stop=t0+t_span_ms, num=len(template)),
                                 y=y0 + template)
 
-                # fix corresponding channel label when template span changes
-                if template_span_changed and (k == 0):
+                # fix corresponding channel label when template time or voltage span changes
+                if (tspan_changed or vspan_changed) and (k == 0):
                     label = self._channel_labels[idx]
                     label.setPos(t0 + t_span_ms, y0 + 5)
 
@@ -236,8 +259,13 @@ class TemplateView(BaseView):
                     col = 0
                     row = row + 1
 
+        num_channels = len(self.data_manager.channel_indices)
+        num_rows = (int(num_channels / self._NUM_TEMPLATES_PER_ROW) +
+                    (0 if (num_channels % self._NUM_TEMPLATES_PER_ROW == 0) else 1))
+        self._plot_item.setYRange(-v_span_uv, (num_rows - 0.5) * (2 * v_span_uv))
+
         # fix x-axis range and scale bar when template span changes
-        if template_span_changed:
+        if tspan_changed:
             self._scale_bar.size = t_span_ms
             self._scale_bar.text.setText(f"{t_span_ms} ms")
             self._scale_bar.updateBar()
@@ -246,16 +274,25 @@ class TemplateView(BaseView):
         self._message_label.setText("" if len(displayed) > 0 else "No units selected for display")
 
     def save_settings(self, settings: QSettings) -> None:
-        """ Overridden to preserve the current template span, which is user selectable between 3-10ms. """
+        """ Overridden to preserve the current template time and voltage spans, which are user selectable. """
         settings.setValue('template_view_span', self._tspan_slider.sliderPosition())
+        settings.setValue('template_view_voltage_span', self._vspan_slider.sliderPosition())
 
     def restore_settings(self, settings: QSettings) -> None:
-        """ Overridden to restore the template span from user settings. """
+        """ Overridden to restore the template time and voltage spans from user settings. """
         try:
-            t_span_ms = int(settings.value('template_view_span'))
-            if self._MIN_TSPAN_MS <= t_span_ms <= self._MAX_TSPAN_MS:
-                self._plot_item.setXRange(0, self._NUM_TEMPLATES_PER_ROW * (t_span_ms * self._H_OFFSET_REL))
+            t_span_ms = int(settings.value('template_view_span', self._MAX_TSPAN_MS))
+            v_span_uv = int(settings.value('template_view_voltage_span', self._DEF_VSPAN_UV))
+            t_span_ms = max(self._MIN_TSPAN_MS, min(t_span_ms, self._MAX_TSPAN_MS))
+            v_span_uv = max(self._MIN_VSPAN_UV, min(v_span_uv, self._MAX_VSPAN_UV))
+
+            # don't need to fix view if voltage span is not the default, since no templates are displayed when
+            # this method is invoked.
+            if v_span_uv != self._DEF_VSPAN_UV:
+                self._vspan_slider.setSliderPosition(v_span_uv)
+            if t_span_ms != self._MAX_TSPAN_MS:
                 self._tspan_slider.setSliderPosition(t_span_ms)
+                self._plot_item.setXRange(0, self._NUM_TEMPLATES_PER_ROW * (t_span_ms * self._H_OFFSET_REL))
                 self._scale_bar.size = t_span_ms
                 self._scale_bar.text.setText(f"{t_span_ms} ms")
                 self._scale_bar.updateBar()
