@@ -9,6 +9,8 @@ spanning the time range -1.5 to +1.5 milliseconds in each ACG or CCG plot. A che
 the user toggle the visibility of the zero correlation lines.
 - The `TemplateView` now includes a slider to set the voltage range (Y-axis) for the templates, between +/-30 and +/-250
 microvolts. The voltage span is a user preference that is saved at application exit and restored on startup.
+- The `ChannelView` now includes a slider to set the vertical separation between channel traces, between +/-50 and 
++/-150 microvolts. This parameter is NOT saved as a user preference and defaults to 100 microvolts at startup.
 - Modified how user selects units for display in the neural units table. Clicking on any row in the table selects the
 corresponding unit for display while clearing any previous selection (single-selection behavior). To select multiple
 units for display (up to three), you must hold down the `Control` key (`Command` key on MacOS) while clicking on each 

@@ -79,6 +79,10 @@ class ChannelView(BaseView):
         Readout displays current elapsed recording time at the right side of the plot, in MM:SS:mmm format. It reflects
         the current X-axis range of the plot, which changes as user scales/pans the plot.
         """
+        self._vspan_slider = QSlider(orientation=Qt.Orientation.Horizontal)
+        """ Slider controls vertical separation between channel traces in microvolts. """
+        self._vspan_readout = QLabel(f"+/-{int(self._trace_offset / 2)} \u00b5v")
+        """ Readout display +/- range for each channel trace, in microvolts (same for all). """
 
         # one-time only configuration of the plot: disable the context menu, don't draw y-axis line; position a message
         # label centered over the plot; x-axis is hidden; use a scale bar instead. initially: plot is empty with no axes
@@ -104,20 +108,32 @@ class ChannelView(BaseView):
         self._t0_readout.setFrameStyle(QFrame.Shadow.Sunken | QFrame.Shape.Panel)
         self._t1_readout.setAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
         self._t1_readout.setFrameStyle(QFrame.Shadow.Sunken | QFrame.Shape.Panel)
-        self._t0_slider.setTickPosition(QSlider.TickPosition.TicksBelow)
+        self._t0_slider.setTickPosition(QSlider.TickPosition.NoTicks)
         self._t0_slider.setTracking(False)
         self._t0_slider.valueChanged.connect(self.on_t0_slider_value_changed)
         self._t0_slider.sliderMoved.connect(self._on_t0_slider_moved)
+
+        self._vspan_slider.setRange(100, 300)
+        self._vspan_slider.setSliderPosition(self._trace_offset)
+        self._vspan_slider.setTickPosition(QSlider.TickPosition.NoTicks)
+        self._vspan_slider.setTracking(False)
+        self._vspan_slider.valueChanged.connect(self._on_vspan_slider_changed)
+        self._vspan_slider.sliderMoved.connect(lambda x: self._vspan_readout.setText(f"+/-{int(x/2)} \u00b5v"))
 
         self._reset()
 
         main_layout = QVBoxLayout()
         main_layout.addWidget(self._plot_widget)
+
         control_line = QHBoxLayout()
         control_line.addWidget(self._t0_readout)
-        control_line.addWidget(self._t0_slider)
+        control_line.addWidget(self._t0_slider, stretch=4)
         control_line.addWidget(self._t1_readout)
+        control_line.addStretch(1)
+        control_line.addWidget(self._vspan_slider, stretch=2)
+        control_line.addWidget(self._vspan_readout)
         main_layout.addLayout(control_line)
+
         self.view_container.setLayout(main_layout)
 
     def _reset(self) -> None:
@@ -151,7 +167,8 @@ class ChannelView(BaseView):
 
             self._plot_item.getViewBox().setLimits(
                 xMin=0, xMax=1, minXRange=0.1, maxXRange=1, yMin=-self._trace_offset, yMax=offset,
-                minYRange=2*self._trace_offset, maxYRange=max(self._trace_offset, offset+self._trace_offset))
+                minYRange=2*self._trace_offset, maxYRange=offset + 2*self._trace_offset)
+            self._plot_item.getViewBox().enableAutoRange()  # resets the zoom (if user previously zoomed in on view)
 
             # initialize list of plot data items that render spike clips for neurons in display list. Configured so
             # that NaN introduces a gap in the trace, and configured with a semi-transparent version of the color
@@ -324,7 +341,7 @@ class ChannelView(BaseView):
     @Slot(int)
     def on_t0_slider_value_changed(self, t0: int) -> None:
         """
-        Handler called when the slider controlling teh channel trace segment start time is released. The data manager is
+        Handler called when the slider controlling the channel trace segment start time is released. The data manager is
         informed of the change in the segment start time, which will trigger a background task to retrieve the
         channel trace segments for all analog source channels.
         :param t0: The new slider position = the elapsed recording time in seconds.
@@ -355,3 +372,49 @@ class ChannelView(BaseView):
         seconds = int(t - 60 * int(t/60))
         msecs = int(1000 * (t - int(t)))
         return f"{minutes:02d}:{seconds:02d}.{msecs:03d}" if with_msecs else f"{minutes:02d}:{seconds:02d}"
+
+    @Slot(int)
+    def _on_vspan_slider_changed(self, ofs: int) -> None:
+        """
+        Handler called when the slider controlling the separation between channel traces is released. It updates the
+        corresponding readout label, lays out all traces (and any unit clips if the neural unit display list is not
+        empty), and fixes the Y-axis limits of the view IAW the new trace offset.
+        :param ofs: The new slider position = the offset between consecutive channel traces in microvolts.
+        """
+
+        self._trace_offset = ofs
+        self._vspan_readout.setText(f"+/-{int(ofs/2)} \u00b5v")
+        ticks = []
+        offset = 0
+        for k, pdi in self._trace_segments.items():
+            seg = self.data_manager.channel_trace(k)
+            if seg is None:
+                pdi.setData(x=[0, 1], y=[offset, offset])
+            else:
+                pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
+                            y=offset + seg.trace_in_microvolts)
+            ticks.append((offset, str(k)))
+            offset += self._trace_offset
+
+        self._plot_item.getAxis('left').setTicks([ticks])
+        self._plot_item.getViewBox().setLimits(
+            xMin=0, xMax=1, minXRange=0.1, maxXRange=1, yMin=-self._trace_offset, yMax=offset,
+            minYRange=2 * self._trace_offset, maxYRange=offset + 2*self._trace_offset)
+
+        displayed = self.data_manager.neurons_with_display_focus
+        for k, pdi in enumerate(self._unit_spike_clips):
+            unit: Optional[Neuron] = displayed[k] if k < len(displayed) else None
+            ch_idx = -1
+            offset = 0
+            if unit and isinstance(unit.primary_channel, int):
+                try:
+                    ch_idx = unit.primary_channel
+                    offset = self._trace_offset * self.data_manager.channel_indices.index(ch_idx)
+                except Exception:
+                    continue
+            seg = self.data_manager.channel_trace(ch_idx)
+            if seg is None:
+                pdi.setData(x=[], y=[])
+            else:
+                x, y = self._prepare_clip_data(unit, seg, offset)
+                pdi.setData(x=x, y=y)
