@@ -85,7 +85,13 @@ class ViewManager(QObject):
     """
     TODO: UNDER DEV -- This is essentially the view + controller for XSort. It builds the UI in the main application
         window and responds to signals from the Analyzer, which serves as the master data model.
+    TODO: Avoided native settings format so I can examine INI file during development. Can stick with INI or
+        eventually switch to native format:  'settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)'
     """
+
+    _MRU_DIR_MAX_SIZE: int = 5
+    """ Maximum number of entries in the list of most recently visited XSort working directories. """
+
     def __init__(self, main_window: QMainWindow):
         super().__init__(None)
         self._main_window = main_window
@@ -100,6 +106,8 @@ class ViewManager(QObject):
         File system path of the XSort working directory as obtained from user settings during startup. Once the
         main application window is visible, we make this the current working directory if it is still valid.
         """
+        self._mru_dirs: List[Path] = list()
+        """ List of most recently visited working directories, most recent first. """
         self._about_dlg = self._create_about_dialog()
         """ The application's 'About' dialog. """
 
@@ -130,6 +138,8 @@ class ViewManager(QObject):
         self._split_action: Optional[QAction] = None
 
         self._file_menu: Optional[QMenu] = None
+        self._open_recent_submenu: Optional[QMenu] = None
+        self._recent_dir_actions: List[QAction] = list()   # store dir path in action data as Optional[Path]
         self._edit_menu: Optional[QMenu] = None
         self._view_menu: Optional[QMenu] = None
         self._help_menu: Optional[QMenu] = None
@@ -188,6 +198,7 @@ class ViewManager(QObject):
         # action's text reflects the operation to be undone. See _refresh_menus().
         self._file_menu = self._main_window.menuBar().addMenu("&File")
         self._file_menu.addAction(self._open_action)
+        self._open_recent_submenu = self._file_menu.addMenu("Open &Recent")
         self._file_menu.addSeparator()
         self._file_menu.addAction(self._quit_action)
         self._edit_menu = self._main_window.menuBar().addMenu("&Edit")
@@ -197,6 +208,16 @@ class ViewManager(QObject):
         self._edit_menu.addAction(self._delete_action)
         self._edit_menu.addAction(self._merge_action)
         self._edit_menu.addAction(self._split_action)
+
+        # the Open Recent submenu contains the 5 most recently visited working directories. The corresponding action
+        # items are invisible until populated with actual directories.
+        for i in range(self._MRU_DIR_MAX_SIZE):
+            a = QAction(f"mru{i}", self._main_window, visible=False)
+            a.setData(None)
+            a.setCheckable(True)
+            a.triggered.connect(lambda checked=False, k=i: self._open_recent_working_directory(k))
+            self._recent_dir_actions.append(a)
+            self._open_recent_submenu.addAction(a)
 
         # the View menu controls the visibility of all dockable views
         self._view_menu = self._main_window.menuBar().addMenu("&View")
@@ -332,10 +353,12 @@ class ViewManager(QObject):
         for v in self._all_views:
             v.on_channel_trace_segment_start_changed()
 
-    def select_working_directory(self, starting_up: bool = False) -> None:
+    def select_working_directory(self, starting_up: bool = False, open_recent: int = -1) -> None:
         """
         Raise a modal file dialog by which user can change the current working directory for XSort. On startup, raise
         the dialog only if a valid working directory is not already specified (in user application settings).
+            On opening a recently visited working directory, only raise the dialog if the requested directory is no
+        longer valid, and the current directory is not valid either; else leave the working directory unchanged.
             XSort requires a working directory containing the data source files it reads and analyzes; it also writes
         internal cache files to the directory while preprocessing those data files.
 
@@ -343,10 +366,27 @@ class ViewManager(QObject):
         specified in the user's application settings, the user must choose such a directory before the application can
         continue. In this scenario, an explanatory message dialog notifies the user and offers the option to quit the
         application if no valid working directory exists.
+        :param open_recent: If this is a valid index into the list of most recently visited directories, then attempt
+            to select that directory. Raise modal dialog to select another directory only if necessary. Default = -1.
         """
         if starting_up and isinstance(self._working_dir_path_at_startup, str):
             if self.data_analyzer.change_working_directory(self._working_dir_path_at_startup) is None:
+                if len(self._mru_dirs) == 0 or self.data_analyzer.working_directory != self._mru_dirs[0]:
+                    self._add_to_most_recently_visited(self.data_analyzer.working_directory)
                 return
+
+        # special case: Open a recently visited directory.
+        if not starting_up and (0 <= open_recent < len(self._mru_dirs)):
+            if self._mru_dirs[open_recent] == self.data_analyzer.working_directory:
+                return
+            if self.data_analyzer.change_working_directory(self._mru_dirs[open_recent]) is None:
+                self._add_to_most_recently_visited(self.data_analyzer.working_directory)
+                return
+            else:
+                self._mru_dirs.pop(open_recent)
+                self._refresh_open_recent_menu()
+                if self.data_analyzer.is_valid_working_directory:
+                    return
 
         curr_dir = self.data_analyzer.working_directory
         ok = False
@@ -377,8 +417,46 @@ class ViewManager(QObject):
             else:
                 err_msg = self.data_analyzer.change_working_directory(work_dir)
                 ok = (err_msg is None)
+                if ok:
+                    self._add_to_most_recently_visited(Path(work_dir))
 
         self._main_window.setWindowTitle(self.main_window_title)
+
+    def _open_recent_working_directory(self, idx: int) -> None:
+        """
+        Opens a working directory in the recently visited list.
+        :param idx: Index into the list of recently visited directories.
+        """
+        if 0 <= idx < len(self._mru_dirs):
+            self.select_working_directory(starting_up=False, open_recent=idx)
+
+    def _add_to_most_recently_visited(self, p: Path) -> None:
+        if p.is_dir():
+            if p in self._mru_dirs:
+                self._mru_dirs.remove(p)
+            elif len(self._mru_dirs) == self._MRU_DIR_MAX_SIZE:
+                self._mru_dirs.pop()
+            self._mru_dirs.insert(0, p)
+
+        # clear out entry from the MRU list that no longer exists
+        i = 0
+        while i < len(self._mru_dirs):
+            if not self._mru_dirs[i].is_dir():
+                self._mru_dirs.pop(i)
+            else:
+                i = i + 1
+
+        self._refresh_open_recent_menu()
+
+    def _refresh_open_recent_menu(self) -> None:
+        """ Refresh the items in the File|Open Recent menu to reflect the content of the MRU directories list. """
+        action: QAction
+        for k, action in enumerate(self._recent_dir_actions):
+            valid = k < len(self._mru_dirs)
+            action.setText(self._mru_dirs[k].name if valid else f"mru{k}")
+            action.setData(self._mru_dirs[k] if valid else None)
+            action.setChecked(valid and (self.data_analyzer.working_directory == self._mru_dirs[k]))
+            action.setVisible(valid)
 
     def quit(self) -> None:
         """
@@ -427,7 +505,8 @@ class ViewManager(QObject):
         self.data_analyzer.split_primary_neuron()
 
     def _refresh_menus(self) -> None:
-        """ Update the enabled state and item text for selected menu items. """
+        """ Update the enabled state and item text for selected menu items, including the Open Recent menu. """
+        self._refresh_open_recent_menu()
         descriptors = self.data_analyzer.undo_last_edit_description()
         if isinstance(descriptors, tuple):
             self._undo_action.setText(f"&Undo: {descriptors[1]}")
@@ -465,8 +544,6 @@ class ViewManager(QObject):
 
     def _save_settings_and_exit(self) -> None:
         """ Save all user settings and exit the application without user prompt. """
-        # TODO: Avoiding native settings format so I can examine INI file during development
-        #  settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)
         settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
                              f".{APP_NAME}.ini")
         settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
@@ -482,6 +559,10 @@ class ViewManager(QObject):
         # current working directory
         settings.setValue('working_dir', str(self.data_analyzer.working_directory))
 
+        # remember MRU directories
+        for k, dir_path in enumerate(self._mru_dirs):
+            settings.setValue(f"mru_dir_{k}", str(dir_path))
+
         QCoreApplication.instance().exit(0)
 
     def _restore_from_settings(self) -> None:
@@ -493,8 +574,6 @@ class ViewManager(QObject):
         layout and any view-specific settings. If the working directory persisted in user preferences storage no longer
         exists, the application will immediately ask the user to specify one.
         """
-        # TODO: Avoiding native settings format so I can examine INI file during development
-        #  settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)
         settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
                              f".{APP_NAME}.ini")
         settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
@@ -519,3 +598,11 @@ class ViewManager(QObject):
         str_path: Optional[str] = settings.value("working_dir")
         if isinstance(str_path, str):
             self._working_dir_path_at_startup = str_path
+
+        # load most recent directories visited, but remove any that no longer exist
+        for k in range(self._MRU_DIR_MAX_SIZE):
+            path_str = settings.value(f"mru_dir_{k}", "")
+            p = Path(path_str)
+            if (len(path_str) > 0) and p.is_dir():
+                self._mru_dirs.append(p)
+        self._refresh_open_recent_menu()

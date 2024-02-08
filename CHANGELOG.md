@@ -15,6 +15,7 @@ microvolts. The voltage span is a user preference that is saved at application e
 corresponding unit for display while clearing any previous selection (single-selection behavior). To select multiple
 units for display (up to three), you must hold down the `Control` key (`Command` key on MacOS) while clicking on each 
 table row to select.
+- Added **File | Open Recent** menu with up to 5 most recently visited working directories.
 - Updated `setup.cfg` to use ">=" rather than "==" in the `install_requires` section. This is needed for Numpy, in 
 particular, as `pip` won't install Numpy <= 1.25 if the Python version is 3.12, as changes made in the 3.12 elease were 
 incompatible with Numpy versions prior to 1.26.
