@@ -110,7 +110,7 @@ class Task(QRunnable):
                 raise Exception("Unrecognized request")
         except Exception as e:
             if not self._cancelled:
-                traceback.print_exception(e)   # TODO: TESTING
+                traceback.print_exception(e)
                 self.signals.error.emit(str(e))
         finally:
             self.signals.finished.emit(self._task_type)

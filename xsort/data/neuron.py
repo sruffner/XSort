@@ -443,7 +443,7 @@ class Neuron:
         :param idx: Index of an Omniplex analog channel.
         :return: None if the channel index is invalid or was not found in the Omniplex recording file, or if the mean
             spike waveform has not yet been computed for that channel (that computation happens on a background task
-            whenever the XSort working directory changes or a new neural unit is defined). Otherwise, a Numppy array
+            whenever the XSort working directory changes or a new neural unit is defined). Otherwise, a Numpy array
             containing the 10-ms mean spike waveform as recorded on the specified channel, in microvolts. The number
             of samples in the array will depend on the analog channel sampling rate: R = len(template)/0.01s.
         """

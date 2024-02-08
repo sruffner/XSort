@@ -1,12 +1,13 @@
+import pickle
 import time
 from pathlib import Path
-from typing import Union, Optional, Dict, List, Tuple
+from typing import Union, Optional, Dict, List, Tuple, Any
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer, QPointF
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPolygonF
-from PySide6.QtWidgets import QMainWindow, QProgressDialog
+from PySide6.QtWidgets import QMainWindow, QProgressDialog, QFileDialog, QMessageBox
 
 from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
@@ -276,6 +277,70 @@ class Analyzer(QObject):
             self._focus_neurons.append(uid)
 
         self._on_focus_list_changed()
+
+    def can_save_neurons_to_file(self) -> bool:
+        """
+        Can the current list of neural units be saved to a results file (currently using Python pickle format)?
+        This is possible only if the working directory is valid, the neural unit list is not empty, and the standard
+        metrics (spike templates, best SNR, primary channel) have been computed for all units.
+        :return: True if neural unit list is ready to be saved.
+        """
+        return (len(self._neurons) > 0) and all([isinstance(u.primary_channel, int) for u in self._neurons])
+
+    def save_neurons_to_file(self) -> None:
+        """
+        Save the current state of the neural units list to a Python pickle file specified by the user.
+
+        After raising a modal dialog to request the destination from the user, the method blocks the UI with a
+        progress dialog while the neural list is saved. If there are multiple units, with several hundred thousand
+        spikes each, this operation could take a noticeable amount of time to finish.
+
+        The units are saved as a List[Dict[str, Any]], where each dictionary in the list represents one neural unit
+        and contains the following key-value pairs:
+        - 'uid': The UID assigned to the neural unit (str).
+        - 'spikes': A 1D Numpy array holding the unit's spike timestamps in chronological order, in seconds.
+        - 'primary': The integer index identifying the primary channel on which the best signal-to-noise ratio was
+          observed for the unit.
+        - 'snr': The signal-to-noise observed on the unit's primary channel (float).
+        - 'template': A 1D Numpy array holding the unit's mean spike waveform as recorded on the primary channel. The
+          waveform spans 10-ms and is in microvolts.
+
+        """
+        if not self.can_save_neurons_to_file():
+            return
+
+        self._cancel_background_task(TaskType.COMPUTESTATS)
+
+        # NOTE: On MacOS Ventura, the native dialog code prints a message ("[CATransaction synchronize] called within
+        # transaction") to stderr, but the dialog still appears to work.
+        file_name, _ = QFileDialog.getSaveFileName(
+            self._main_window, "Save neural units to file", str(self._working_directory.path.absolute()),
+            'Python pickle (*.pkl *.pickle)', 'Python pickle (*.pkl *.pickle)')
+        if len(file_name) == 0:
+            return    # user cancelled
+
+        out_path = Path(file_name)
+        self._progress_dlg.show()
+        self._progress_dlg.setLabelText(f"Saving neural units to {out_path.name}....")
+        self._progress_dlg.setValue(30)
+
+        emsg = ""
+        try:
+            out: List[Dict[str, Any]] = list()
+            for u in self._neurons:
+                out.append(dict(uid=u.uid, spikes=u.spike_times, primary=u.primary_channel, snr=u.snr,
+                                template=u.get_template_for_channel(u.primary_channel)))
+
+            with open(file_name, 'wb') as f:
+                pickle.dump(out, f)
+        except Exception as e:
+            emsg = f"An IO or other error has occurred:\n  -->{str(e)}"
+        finally:
+            self._progress_dlg.close()
+            self._progress_dlg.setLabelText("Please wait....")
+
+        if len(emsg) > 0:
+            QMessageBox.warning(self._main_window, "File save error", emsg)
 
     def _launch_compute_stats_task(self) -> None:
         self._launch_background_task(TaskType.COMPUTESTATS)

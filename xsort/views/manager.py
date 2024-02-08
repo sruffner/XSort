@@ -128,6 +128,7 @@ class ViewManager(QObject):
 
         # actions and menus
         self._open_action: Optional[QAction] = None
+        self._save_action: Optional[QAction] = None
         self._quit_action: Optional[QAction] = None
         self._about_action: Optional[QAction] = None
         self._about_qt_action: Optional[QAction] = None
@@ -177,6 +178,8 @@ class ViewManager(QObject):
         # actions
         self._open_action = QAction('&Open', self._main_window, shortcut="Ctrl+O", statusTip="Select working directory",
                                     triggered=self.select_working_directory)
+        self._save_action = QAction('&Save as...', self._main_window, shortcut="Ctrl+S", statusTip="Save neural units",
+                                    triggered=self._save)
         self._quit_action = QAction("&Quit", self._main_window, shortcut="Ctrl+Q", statusTip=f"Quit {APP_NAME}",
                                     triggered=self.quit)
 
@@ -199,6 +202,8 @@ class ViewManager(QObject):
         self._file_menu = self._main_window.menuBar().addMenu("&File")
         self._file_menu.addAction(self._open_action)
         self._open_recent_submenu = self._file_menu.addMenu("Open &Recent")
+        self._file_menu.addSeparator()
+        self._file_menu.addAction(self._save_action)
         self._file_menu.addSeparator()
         self._file_menu.addAction(self._quit_action)
         self._edit_menu = self._main_window.menuBar().addMenu("&Edit")
@@ -468,6 +473,13 @@ class ViewManager(QObject):
             self.data_analyzer.prepare_for_shutdown()
             self._save_settings_and_exit()
 
+    def _save(self) -> None:
+        """
+        Handler for the File|Save menu command. It raises a modal dialog to request the output file path, then
+        raises a progress dialog while the neural units are saved to the file specified.
+        """
+        self.data_analyzer.save_neurons_to_file()
+
     def _about(self) -> None:
         """
         Handler for the 'About <application name>' menu command. It raises a modal message dialog describing the
@@ -506,7 +518,9 @@ class ViewManager(QObject):
 
     def _refresh_menus(self) -> None:
         """ Update the enabled state and item text for selected menu items, including the Open Recent menu. """
+        self._save_action.setEnabled(self.data_analyzer.can_save_neurons_to_file())
         self._refresh_open_recent_menu()
+
         descriptors = self.data_analyzer.undo_last_edit_description()
         if isinstance(descriptors, tuple):
             self._undo_action.setText(f"&Undo: {descriptors[1]}")

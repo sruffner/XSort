@@ -15,7 +15,16 @@ microvolts. The voltage span is a user preference that is saved at application e
 corresponding unit for display while clearing any previous selection (single-selection behavior). To select multiple
 units for display (up to three), you must hold down the `Control` key (`Command` key on MacOS) while clicking on each 
 table row to select.
-- Added **File | Open Recent** menu with up to 5 most recently visited working directories.
+- Implemented **File | Open Recent** menu with up to 5 most recently visited working directories.
+- Implemented **File | Save** menu command. This will save the current list of neural units to a Python pickle file at a
+location specified by the user. The content is a `List[Dict[str, Any]]`, with the following key-value pairs:
+  1. "uid": The UID assigned to the unit in XSort (`str`).
+  2. "spikes": A 1D Numpy array holding the unit's spike timestamps in chronological order, in seconds.
+  3. "primary": The integer index identifying the primary channel on which the best signal-to-noise ratio was observed 
+for the unit.
+  4. "snr": The signal-to-noise observed on the unit's primary channel (`float`).
+  5. "template": A 1D Numpy array holding the unit's mean spike waveform as recorded on the primary channel. The
+waveform spans 10-ms and is in microvolts.
 - Updated `setup.cfg` to use ">=" rather than "==" in the `install_requires` section. This is needed for Numpy, in 
 particular, as `pip` won't install Numpy <= 1.25 if the Python version is 3.12, as changes made in the 3.12 elease were 
 incompatible with Numpy versions prior to 1.26.
