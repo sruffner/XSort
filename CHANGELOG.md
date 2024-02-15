@@ -1,8 +1,13 @@
 # Changelog
 
-## v0.1.4 (TBD)
+## v0.1.5 (TBD)
+- Tweaked `ChannelView` implementation to adjust the visible Y-axis range whenever the user changes the vertical 
+separation between trace so that -- if the user has zoomed in on a few traces -- those traces remain approximately in
+the same place within the view after changing the vertical separation. 
+
+## v0.1.4 (02/08/2024)
 - Finished implementation of the **Help** view, which offers a small user guide for XSort. The guide is divided into
-five chapters. A dropdown combo box selects the chapter displayed in the read-only text browers. The chapter contents
+five chapters. A dropdown combo box selects the chapter displayed in the read-only text browser. The chapter contents
 are maintained in Markdown files in the `assets` folder.
 - Minor changes to `CorrelogramView`: Added a horizontal line at zero correlation and a translucent white vertical band
 spanning the time range -1.5 to +1.5 milliseconds in each ACG or CCG plot. A checkbox at the bottom of the view lets
@@ -28,7 +33,7 @@ waveform spans 10-ms and is in microvolts.
 - Updated `setup.cfg` to use ">=" rather than "==" in the `install_requires` section. This is needed for Numpy, in 
 particular, as `pip` won't install Numpy <= 1.25 if the Python version is 3.12, as changes made in the 3.12 elease were 
 incompatible with Numpy versions prior to 1.26.
-- Introduce support for an alternative working directory configuration. Instead of the Omniplex PL2 file, a flat
+- Introduced support for an alternative working directory configuration. Instead of the Omniplex PL2 file, a flat
 binary file (extensions `.bin` or `.dat`) can serve as the analog source file. This file contains the analog channel
 streams as raw 16-bit signed integer samples. The streams may be stored one after the other or interleaved, and the
 raw data may be prefiltered or not. In addition, XSort now handles situations in which the specified working directory

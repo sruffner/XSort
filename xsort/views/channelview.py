@@ -167,7 +167,7 @@ class ChannelView(BaseView):
 
             self._plot_item.getViewBox().setLimits(
                 xMin=0, xMax=1, minXRange=0.1, maxXRange=1, yMin=-self._trace_offset, yMax=offset,
-                minYRange=2*self._trace_offset, maxYRange=offset + 2*self._trace_offset)
+                minYRange=2*self._trace_offset, maxYRange=offset + self._trace_offset)
             self._plot_item.getViewBox().enableAutoRange()  # resets the zoom (if user previously zoomed in on view)
 
             # initialize list of plot data items that render spike clips for neurons in display list. Configured so
@@ -379,8 +379,18 @@ class ChannelView(BaseView):
         Handler called when the slider controlling the separation between channel traces is released. It updates the
         corresponding readout label, lays out all traces (and any unit clips if the neural unit display list is not
         empty), and fixes the Y-axis limits of the view IAW the new trace offset.
+
+        Since the user may have zoomed in on the view, an effort is made to adjust the Y-axis visible range so that
+        the channel traces don't shift up/down as a result of the change in separation
+
         :param ofs: The new slider position = the offset between consecutive channel traces in microvolts.
         """
+
+        # compute current visible Y range as a fraction of the previous limits
+        y_rng = self._plot_item.getViewBox().viewRange()[1]
+        y_span = 2 * self._trace_offset + (len(self._trace_segments) - 1) * self._trace_offset
+        y_min_frac = (y_rng[0] + self._trace_offset) / y_span
+        y_max_frac = (y_rng[1] + self._trace_offset) / y_span
 
         self._trace_offset = ofs
         self._vspan_readout.setText(f"+/-{int(ofs/2)} \u00b5v")
@@ -399,7 +409,7 @@ class ChannelView(BaseView):
         self._plot_item.getAxis('left').setTicks([ticks])
         self._plot_item.getViewBox().setLimits(
             xMin=0, xMax=1, minXRange=0.1, maxXRange=1, yMin=-self._trace_offset, yMax=offset,
-            minYRange=2 * self._trace_offset, maxYRange=offset + 2*self._trace_offset)
+            minYRange=2 * self._trace_offset, maxYRange=offset + self._trace_offset)
 
         displayed = self.data_manager.neurons_with_display_focus
         for k, pdi in enumerate(self._unit_spike_clips):
@@ -418,3 +428,9 @@ class ChannelView(BaseView):
             else:
                 x, y = self._prepare_clip_data(unit, seg, offset)
                 pdi.setData(x=x, y=y)
+
+        # adjust visible Y range so that the same traces are in view (in case user has zoomed in on view)
+        y_span = 2 * self._trace_offset + (len(self._trace_segments) - 1) * self._trace_offset
+        y_min = y_span * y_min_frac - self._trace_offset
+        y_max = y_span * y_max_frac - self._trace_offset
+        self._plot_item.getViewBox().setYRange(y_min, y_max)
