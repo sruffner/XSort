@@ -353,7 +353,8 @@ class WorkingDirectory:
         the user. The user may cancel out of this dialog.
 
         :param folder: File system path for a putative XSort working directory.
-        :param window: Main application window (to serve as parent for modal dialog, if needed).
+        :param window: Main application window (to serve as parent for modal dialog, if needed). If None and user
+            input is required, the method fails.
         :return: A 2-tuple **(emsg, W)**, where **W** is a :class:`WorkingDirectory` object encapsulating the working
             directory content. On failure, **W** is None and **emsg** is a brief description of the error encountered.
             If the user cancels out of the modal dialog, **W** is None and **emsg** is an empty string.
@@ -383,7 +384,9 @@ class WorkingDirectory:
             else:
                 return work_dir.error_description, None
 
-        # if we get here, we need user input
+        # if we get here, we need user input -- fail if main application window is None
+        if window is None:
+            return "Unable to load working directory without user input", None
         dlg = _QueryDialog(folder, analog_sources, unit_sources, parent=window)
         dlg.exec()
         if dlg.result() == QDialog.DialogCode.Accepted:
@@ -662,11 +665,11 @@ class WorkingDirectory:
 
             For performant retrieval of any portion of an analog data channel's bandpass-filtered stream, that channel's
         samples are extracted from the analog data source file, filtered, and stored in a dedicated internal cache file
-        in the working directory. This is the case whenever the analog data sourc in an Omniplex PL2 file, or a flat
+        in the working directory. This is the case whenever the analog data source in an Omniplex PL2 file, or a flat
         binary file containing raw **unfiltered** channel data. However, if the analog source is a prefiltered flat
         binary file, then there is no need to cache the analog channel streams.
 
-        :return: False unless the analog data source is a flat binary file containing prefiltered channel data.
+        :return: True unless the analog data source is a flat binary file containing prefiltered channel data.
         """
         return self.uses_omniplex_as_analog_source or (not self.is_analog_data_prefiltered)
 
