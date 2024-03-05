@@ -70,9 +70,9 @@ class _QueryDialog(QDialog):
         # the "Flat Binary File Configuration" group
         nchan_label = QLabel("#Analog channels")
         self._nchannels_edit = QLineEdit()
-        self._nchannels_edit.setValidator(QIntValidator(1, 99, self._nchannels_edit))
+        self._nchannels_edit.setValidator(QIntValidator(1, 999, self._nchannels_edit))
         self._nchannels_edit.setText('16')
-        self._nchannels_edit.setToolTip("Enter number of recorded channels in [1..99].")
+        self._nchannels_edit.setToolTip("Enter number of recorded channels in [1..999].")
         self._nchannels_edit.textEdited.connect(lambda _: self._refresh())
 
         rate_label = QLabel("Sampling rate (Hz)")
@@ -158,7 +158,7 @@ class _QueryDialog(QDialog):
             n_channels = int(self._nchannels_edit.text())
             rate = int(self._rate_edit.text())
             scale = float(self._scale_edit.text())
-            if not ((1 <= n_channels < 99) and (0.1 <= scale <= 99) and (1000 <= rate <= 99999)):
+            if not ((1 <= n_channels < 999) and (0.1 <= scale <= 99) and (1000 <= rate <= 99999)):
                 raise Exception()
         except Exception:
             msg = "!!! Incomplete or invalid binary file configuration"

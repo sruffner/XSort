@@ -15,8 +15,10 @@ from PySide6.QtCore import QObject, Signal, QRunnable, Slot, QThreadPool
 from PySide6.QtWidgets import QProgressDialog
 
 from xsort.data.files import WorkingDirectory, CHANNEL_CACHE_FILE_PREFIX, UNIT_CACHE_FILE_PREFIX
-from xsort.data.neuron import Neuron
-from xsort.data.testfunc import _cache_analog_channel, _mp_compute_unit_templates_on_channel
+from xsort.data.neuron import Neuron, ChannelTraceSegment
+from xsort.data.taskfunc import _cache_analog_channel, _mp_compute_unit_templates_on_channel, \
+    read_and_filer_interleaved_analog_source, cache_analog_channels_from_queue, mp_cache_interleaved_analog_source, \
+    mp2_cache_interleaved_analog_source, service_analog_channel_blocks_queue
 
 N_MAX_SPKS_FOR_TEMPLATE: int = 10000   # -1 to use all spikes
 
@@ -70,7 +72,7 @@ class TaskManager(QObject):
         super().__init__()
         self._manager: mp.Manager = mp.Manager()
         """ Interprocess manager context to allow sharing a queue and a cancel event across processes. """
-        self._process_pool = mp.Pool()
+        self._process_pool: mp.Pool = mp.Pool()
         """ A pool of processes for running tasks that are significantly CPU-bound. """
         self._proc_progress_q: mp.Queue = self._manager.Queue()
         """ A synchronized queue by which tasks running in child processes provide progress updates. """
@@ -234,8 +236,8 @@ class TaskManager(QObject):
             try:
                 if self.task_type == TaskType.BUILDCACHE:
                     self.cache_all_analog_channels()
-                    if not self.cancelled:
-                        self.cache_all_neural_units()
+                    # if not self.cancelled:
+                    #     self.cache_all_neural_units()
                 # elif self.task_type == TaskType.GETCHANNELS:
                 #     self.get_channel_traces()
                 # elif self.task_type == TaskType.COMPUTESTATS:
@@ -284,6 +286,11 @@ class TaskManager(QObject):
             if not self.work_dir.need_analog_cache:
                 return
 
+            # handle interleaved flat binary files differently
+            if self.work_dir.is_analog_data_interleaved:
+                self.cache_all_analog_channels_interleaved()  # TODO: TESTING
+                return
+
             # list of analog channel indices that need to be cached
             ch_indices = [k for k in self.work_dir.analog_channel_indices if
                           not Path(self.work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(k)}").is_file()]
@@ -297,18 +304,22 @@ class TaskManager(QObject):
             futures: List[Future] = [self.mgr._mt_pool_exec.submit(_cache_analog_channel, self.work_dir, idx,
                                                                    self.mgr._thrd_progress_q, self.cancel_event)
                                      for idx in ch_indices]
-            n_done = 0
+
             first_error: Optional[str] = None
-            while n_done < len(ch_indices):
+            while True:
                 try:
-                    update = self.mgr._thrd_progress_q.get(timeout=0.5)  # (ch_idx, pct_complete, error_msg)
-                    if len(update[2]) > 0:
+                    # progress updates are: (ch_idx, first_sec_trace) or (ch_idx, pct_complete, error_msg)
+                    update = self.mgr._thrd_progress_q.get(timeout=0.2)
+                    if len(update) == 2:
+                        # TODO: Deliver channel trace segment to GUI via data_available signal
+                        self.mgr.progress.emit(f"Received channel trace segment on channel {update[0]}: "
+                                               f"{isinstance(update[1], ChannelTraceSegment)}", 0)
+                    elif len(update[2]) > 0:
                         # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
                         # threads stop, then break out
                         if not self.cancel_event.is_set():
                             self.cancel_event.set()
                             first_error = f"Error caching channel {update[0]}: {update[2]}"
-                        break
                     else:
                         progress_per_ch[update[0]] = update[1]
                         total_progress = sum(progress_per_ch.values()) / len(progress_per_ch)
@@ -317,21 +328,137 @@ class TaskManager(QObject):
                             next_progress_update_pct += 10
                 except Empty:
                     pass
-                for future in futures:
-                    if future.done():
-                        n_done += 1
 
-            # in case of cancellation or premature termination on an error, wait for all threads to stop and continue
-            # emptying the progress message queue while doing so.
-            while not all([future.done() for future in futures]):
-                try:
-                    self.mgr._thrd_progress_q.get(timeout=0.1)
-                except Empty:
-                    pass
+                if all([future.done() for future in futures]):
+                    break
 
             # report first error encountered, if any
             if first_error is not None:
                 self.mgr.error(first_error)
+
+        def cache_all_analog_channels_interleaved(self) -> None:
+            """
+            TODO: WORKING HERE - Modifying to use a separate process to read the source and deliver blocks to ONE
+                process-safe queue that is serviced by 10 writer threads...
+
+            Thie method handles the case of an unfiltered flat binary analog source file in which the channel streams
+            are interleaved. Because it is unfiltered, we bandpass filter each channel's data stream and cache it to a
+            separate file. But if there are hundreds of channels, the source file will be very large. In this scenario,
+            a MT approach in which we assign a separate thread to cache each channel is untenable: since the channels
+            are interleaved, every thread has to read through the entire file -- extremely wasteful.
+
+            Instead, we employ a "pipeline" MT strategy: one thread consumes the source file, reading one second's
+            worth of channel data at a time and pushing each channel's one-second block onto one of 10 thread-safe
+            queues. Each of ten "writer threads" service one of these queues, popping the next block off the queue
+            and writing it to the corresponding channel's cache file.
+
+            Each object in the queues are 2-tuples (ch_idx, block), where ch_idx is the channel index and block is
+            the byte buffer containing the next second's worth of that channel's data stream, ready to be appended to
+            the corresponding cache file. To divvy up the work, queue K, K=0..9, holds channel data blocks for which
+            ch_idx % 10 == K. Each writer thread simply appends each block extracted from its assigned queue to the
+            corresponding channel cache file. One writer thread will be responsible for N / 10 cache files, where N
+            is the total number of analog data channels.
+
+            NOTE: Method does not check for any existing analog channel cache files. Should remove all such files
+            from working directory before running this task, as the writer threads will simply append to an already
+            existing file!
+            """
+            if not (self.work_dir.need_analog_cache and self.work_dir.is_analog_data_interleaved):
+                return
+
+            n_ch = self.work_dir.num_analog_channels()
+            next_progress_update_pct = 0
+
+            self.cancel_event = self.mgr._manager.Event()
+            block_queue = self.mgr._manager.Queue()
+            task_args = [(self.work_dir.path, block_queue, self.mgr._proc_progress_q, self.cancel_event)]
+            result: AsyncResult = self.mgr._process_pool.starmap_async(mp2_cache_interleaved_analog_source, task_args)
+            futures: List[Future] = \
+                [self.mgr._mt_pool_exec.submit(service_analog_channel_blocks_queue, self.work_dir, i, block_queue,
+                                               self.mgr._proc_progress_q, self.cancel_event) for i in range(10)]
+
+            first_error: Optional[str] = None
+            while not result.ready():
+                try:
+                    # progress updates are: (pct_complete, error_msg)
+                    update = self.mgr._proc_progress_q.get(timeout=0.2)
+                    if len(update[1]) > 0:
+                        # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
+                        # threads stop, then break out
+                        if not self.cancel_event.is_set():
+                            self.cancel_event.set()
+                            first_error = f"Error caching interleaved analog data: {update[1]}"
+                    elif update[0] >= next_progress_update_pct:
+                        self.mgr.progress.emit(f"Caching {n_ch} interleaved analog channels", int(update[0]))
+                        next_progress_update_pct += 5
+                except Empty:
+                    pass
+                except Exception as e:
+                    if not self.cancel_event.is_set():
+                        self.cancel_event.set()
+                        first_error = f"Unexpected error while caching interleaved analog data: {str(e)}"
+
+            # wait for writer threads to finish
+            while not all([future.done() for future in futures]):
+                time.sleep(0.1)
+
+            # report first error encountered, if any
+            if first_error is not None:
+                self.mgr.error(first_error)
+
+        def mp_cache_all_analog_channels_interleaved(self) -> None:
+            """
+            This version of cache_all_analog_channels_interleaved() spawns a separate process for every 20 channels in
+            the source file.
+            """
+            if not (self.work_dir.need_analog_cache and self.work_dir.is_analog_data_interleaved):
+                return
+
+            n_ch = self.work_dir.num_analog_channels()
+
+            # need a process-safe event to signal cancellation of task
+            self.cancel_event = self.mgr._manager.Event()
+
+            # assign banks of 20 channels to each process
+            n_banks = int(n_ch / 20)
+            if n_banks * 20 < n_ch:
+                n_banks += 1
+            progress_per_bank: Dict[int, int] = {idx: 0 for idx in range(n_banks)}
+            next_progress_update_pct = 5
+            dir_path = str(self.work_dir.path.absolute())
+            task_args = list()
+            for i in range(n_banks):
+                task_args.append((dir_path, i*20, 20, self.mgr._proc_progress_q, self.cancel_event))
+
+            first_error: Optional[str] = None
+            result: AsyncResult = self.mgr._process_pool.starmap_async(
+                mp_cache_interleaved_analog_source, task_args, chunksize=1)
+            while not result.ready():
+                try:
+                    update = self.mgr._proc_progress_q.get(timeout=0.5)  # (pct_complete, error_msg)
+                    if len(update[2]) > 0:
+                        # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
+                        # processes stop, then break out
+                        if not self.cancel_event.is_set():
+                            self.cancel_event.set()
+                            first_error = f"Error processing channels {update[0]}-{update[0]+19}: {update[2]}"
+                        break
+                    else:
+                        bank_idx = int(update[0] / 20)
+                        progress_per_bank[bank_idx] = update[1]
+                        total_progress = sum(progress_per_bank.values()) / len(progress_per_bank)
+                        if total_progress >= next_progress_update_pct:
+                            self.mgr.progress.emit(f"Caching {n_ch} interleaved analog channels", int(total_progress))
+                            next_progress_update_pct += 5
+                except Empty:
+                    pass
+
+            # in case of cancellation or premature termination on an error, make sure all processes have stopped
+            while not result.ready():
+                time.sleep(0.1)
+            if first_error is not None:
+                self.mgr.error.emit(first_error)
+                return
 
         def cache_all_neural_units(self) -> None:
             """
@@ -355,9 +482,11 @@ class TaskManager(QObject):
                                    f"{self.work_dir.num_analog_channels()} analog channels...", 0)
 
             # accumulate results as they come in
-            template_dict_per_unit: List[Dict[int, np.ndarray]] = [dict()] * n_units
             best_snr_per_unit: List[float] = [0] * n_units
             primary_ch_per_unit: List[int] = [-1] * n_units
+            template_dict_per_unit: List[Dict[int, np.ndarray]] = list()
+            for i in range(n_units):
+                template_dict_per_unit.append(dict())
 
             # need a process-safe event to signal cancellation of task
             self.cancel_event = self.mgr._manager.Event()
@@ -406,7 +535,8 @@ class TaskManager(QObject):
                         if snr > best_snr_per_unit[i]:
                             best_snr_per_unit[i] = snr
                             primary_ch_per_unit[i] = ch_idx
-                        template_dict_per_unit[i][ch_idx] = template
+                        # convert template units from raw ADC samples to microvolts
+                        template_dict_per_unit[i][ch_idx] = template * self.work_dir.analog_channel_sample_to_uv(ch_idx)
                 else:
                     self.mgr.error.emit(emsg)
                     return

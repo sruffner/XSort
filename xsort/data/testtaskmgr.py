@@ -11,7 +11,7 @@ from PySide6.QtWidgets import QMainWindow, QPushButton, QApplication, QVBoxLayou
 from xsort.data.files import WorkingDirectory
 from xsort.data.neuron import Neuron
 from xsort.data.taskmanager import TaskManager
-from xsort.data.testfunc import delete_internal_cache_files
+from xsort.data.taskfunc import delete_internal_cache_files
 
 
 class MainWindow(QMainWindow):
