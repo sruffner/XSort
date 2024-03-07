@@ -15,10 +15,8 @@ from PySide6.QtCore import QObject, Signal, QRunnable, Slot, QThreadPool
 from PySide6.QtWidgets import QProgressDialog
 
 from xsort.data.files import WorkingDirectory, CHANNEL_CACHE_FILE_PREFIX, UNIT_CACHE_FILE_PREFIX
-from xsort.data.neuron import Neuron, ChannelTraceSegment
-from xsort.data.taskfunc import _cache_analog_channel, _mp_compute_unit_templates_on_channel, \
-    read_and_filer_interleaved_analog_source, cache_analog_channels_from_queue, mp_cache_interleaved_analog_source, \
-    mp2_cache_interleaved_analog_source, service_analog_channel_blocks_queue
+from xsort.data.neuron import Neuron
+import xsort.data.taskfunc as tfunc
 
 N_MAX_SPKS_FOR_TEMPLATE: int = 10000   # -1 to use all spikes
 
@@ -156,10 +154,11 @@ class TaskManager(QObject):
         :return: True if a background task was launched to build out the cache, else False.
         """
         need_caching = False
-        for idx in work_dir.analog_channel_indices:
-            if not Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}").is_file():
-                need_caching = True
-                break
+        if work_dir.need_analog_cache:
+            for idx in work_dir.analog_channel_indices:
+                if not Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}").is_file():
+                    need_caching = True
+                    break
         if not need_caching:
             for uid in uids:
                 if not Path(work_dir.path, f"{UNIT_CACHE_FILE_PREFIX}{uid}").is_file():
@@ -272,13 +271,12 @@ class TaskManager(QObject):
 
         def cache_all_analog_channels(self) -> None:
             """
-            Extract the entire data stream for each analog channel in the XSort working directory's analog data source,
-            bandpass filter it if necessary, and store it in a separate cache file (flat binary file of 16-bit samples)
-            in the directory.
+            Extract the entire data stream for each analog channel in the file designated as the analog data source for
+            the current XSort working directory, bandpass filter it if necessary, and store it in a separate cache file
+            (flat binary file of 16-bit samples) in the directory.
 
             Analog stream caching is required if the analog data source is an Omniplex PL2 file, or if it's a flat
-            binary file containing raw, unfiltered data. Because this task is primarly IO-bound, it is handled by a pool
-            of up to 32 independent threads, with each thread caching one analog channel.
+            binary file containing raw, unfiltered data.
 
             The cache files are named ".xs.ch.<idx>", where <idx> is the integer channel index. If the cache file for
             any channel already exists, that channel is NOT cached again.
@@ -286,37 +284,43 @@ class TaskManager(QObject):
             if not self.work_dir.need_analog_cache:
                 return
 
-            # handle interleaved flat binary files differently
-            if self.work_dir.is_analog_data_interleaved:
-                self.cache_all_analog_channels_interleaved()  # TODO: TESTING
-                return
+            if self.work_dir.uses_omniplex_as_analog_source:
+                self.cache_all_analog_channels_pl2()
+            elif self.work_dir.is_analog_data_interleaved:
+                self.cache_all_analog_channels_interleaved()
+            else:
+                self.cache_all_analog_channels_noninterleaved()
 
+        def cache_all_analog_channels_pl2(self) -> None:
+            """
+            Extract, bandpass filter if necessary, and separately cache all wideband (WB) and narrowband (SPKC) analog
+            data channels recorded in the Omniplex PL2 file designated as the analog data source for the current XSort
+            working directory.
+
+            NOTE: Current MT approach spawns a separate thread for each analog channel to be cached. Given the structure
+            of the PL2 file, each thread only reads what it needs to extract the channel data (unlike a flat binary
+            interleaved file!). However, if we need to tackle Omniplex files with hundreds of channels recorded, we
+            may have to rethink this solution.
+            """
             # list of analog channel indices that need to be cached
-            ch_indices = [k for k in self.work_dir.analog_channel_indices if
-                          not Path(self.work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(k)}").is_file()]
-            if len(ch_indices) == 0:
-                return
+            ch_indices = [k for k in self.work_dir.analog_channel_indices]
 
             progress_per_ch: Dict[int, int] = {idx: 0 for idx in ch_indices}
-            next_progress_update_pct = 10
+            next_progress_update_pct = 0
 
             self.cancel_event = Event()
-            futures: List[Future] = [self.mgr._mt_pool_exec.submit(_cache_analog_channel, self.work_dir, idx,
+            futures: List[Future] = [self.mgr._mt_pool_exec.submit(tfunc.cache_pl2_analog_channel, self.work_dir, idx,
                                                                    self.mgr._thrd_progress_q, self.cancel_event)
                                      for idx in ch_indices]
 
             first_error: Optional[str] = None
             while True:
                 try:
-                    # progress updates are: (ch_idx, first_sec_trace) or (ch_idx, pct_complete, error_msg)
+                    # progress updates are: (ch_idx, pct_complete, error_msg)
                     update = self.mgr._thrd_progress_q.get(timeout=0.2)
-                    if len(update) == 2:
-                        # TODO: Deliver channel trace segment to GUI via data_available signal
-                        self.mgr.progress.emit(f"Received channel trace segment on channel {update[0]}: "
-                                               f"{isinstance(update[1], ChannelTraceSegment)}", 0)
-                    elif len(update[2]) > 0:
+                    if len(update[2]) > 0:
                         # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
-                        # threads stop, then break out
+                        # threads stop
                         if not self.cancel_event.is_set():
                             self.cancel_event.set()
                             first_error = f"Error caching channel {update[0]}: {update[2]}"
@@ -325,7 +329,75 @@ class TaskManager(QObject):
                         total_progress = sum(progress_per_ch.values()) / len(progress_per_ch)
                         if total_progress >= next_progress_update_pct:
                             self.mgr.progress.emit(f"Caching {len(ch_indices)} analog channels", int(total_progress))
-                            next_progress_update_pct += 10
+                            next_progress_update_pct += 5
+                except Empty:
+                    pass
+
+                if all([future.done() for future in futures]):
+                    break
+
+            # report first error encountered, if any
+            if first_error is not None:
+                self.mgr.error(first_error)
+
+        def cache_all_analog_channels_noninterleaved(self) -> None:
+            """
+            Extract, bandpass filter, and separately cache all analog data streams in the noninterleaved, flat binary
+            file designated as the analog data source for the current XSort working directory.
+
+            NOTE: Current MT approach spawns a separate thread for each analog channel to be cached. For a
+            noninterleaved flat binary file, each thread only reads what it needs to extract the channel data. Using a
+            32-count thread pool, it took ~68-75s to cache a 385-channel, 37GB Neuropixel binary file with
+            noninterleaved channels. With a 7-count pool, ~100s. With a 10-count pool (the default for a machine with
+            6 cores), ~75-85s. With a 64-count pool, ~60s (several times my machine crashed while running this test,
+            launching from the PyCharm IDE; the kernel panic occurred in the Python process, but I have no idea what the
+            root cause is. My machine has been experiencing a lot of kernel panics in other processes as well...)
+
+            Also tried varaitions on the one-process-per-channel-bank strategy that is currently the best solution for
+            the interleaved case. Chose channel bank size so that the number of spawned processes matched the number of
+            cores in the system. Variations included: 1 thread per proc, processing each of the channels in the bank
+            sequentially); or N threads per proc, where N = # channels in the bank and each thread processed one
+            channel. The former was slower than the MT-only approach: 83-88s typical.
+
+            The latter variation, essentially the MT approach distributed across multiple processes, was the fastest
+            solution, averaging 55-57s if the thread pool size was 32, and 60-63s if the pool size was 10. However, when
+            I repeatedly cleared the cache and repeated the test, subsequent attempts would fail on a "Connection
+            refused" IO error -- EVEN after exiting and relaunching the test fixture! I think that underlying file
+            IO/socket resources were getting used up and there was a delay in cleaning up old file handles. Eventually a
+            subsequent attempt would succeed after several tries. In any case, I decided to stick with the pure MT
+            approach for the noninterleaved scenario, as you get good performance without the resource issue.
+
+            NOTE2: This method is the same as cache_all_analog_channels_pl2(), except for the task function used. We
+            decided to keep it separate because we may fine-tune the solution for this use case.
+            """
+            # list of analog channel indices that need to be cached
+            ch_indices = [k for k in self.work_dir.analog_channel_indices]
+
+            progress_per_ch: Dict[int, int] = {idx: 0 for idx in ch_indices}
+            next_progress_update_pct = 0
+            
+            self.cancel_event = Event()
+            futures: List[Future] = \
+                [self.mgr._mt_pool_exec.submit(tfunc.cache_noninterleaved_analog_channel, self.work_dir, idx,
+                                               self.mgr._thrd_progress_q, self.cancel_event) for idx in ch_indices]
+
+            first_error: Optional[str] = None
+            while True:
+                try:
+                    # progress updates are: (ch_idx, pct_complete, error_msg)
+                    update = self.mgr._thrd_progress_q.get(timeout=0.2)
+                    if len(update[2]) > 0:
+                        # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
+                        # threads stop
+                        if not self.cancel_event.is_set():
+                            self.cancel_event.set()
+                            first_error = f"Error caching channel {update[0]}: {update[2]}"
+                    else:
+                        progress_per_ch[update[0]] = update[1]
+                        total_progress = sum(progress_per_ch.values()) / len(progress_per_ch)
+                        if total_progress >= next_progress_update_pct:
+                            self.mgr.progress.emit(f"Caching {len(ch_indices)} analog channels", int(total_progress))
+                            next_progress_update_pct += 5
                 except Empty:
                     pass
 
@@ -338,78 +410,49 @@ class TaskManager(QObject):
 
         def cache_all_analog_channels_interleaved(self) -> None:
             """
-            TODO: WORKING HERE - Modifying to use a separate process to read the source and deliver blocks to ONE
-                process-safe queue that is serviced by 10 writer threads...
+            Extract, bandpass filter, and separately cache all analog data streams in the INTERLEAVED, flat binary file
+            designated as the analog data source for the current XSort working directory.
 
-            Thie method handles the case of an unfiltered flat binary analog source file in which the channel streams
-            are interleaved. Because it is unfiltered, we bandpass filter each channel's data stream and cache it to a
-            separate file. But if there are hundreds of channels, the source file will be very large. In this scenario,
-            a MT approach in which we assign a separate thread to cache each channel is untenable: since the channels
-            are interleaved, every thread has to read through the entire file -- extremely wasteful.
+            Because the individual channel streams are interleaved, caching one channel requires reading the entire
+            file. If the file contains hundreds of channels, the one-thread-per-channel approach utilized for
+            noninterleaved files is extremely wasteful, as every thread reads through the entire source file to
+            extract the channel stream. And since every channel stream is filtered (else caching would be unnecessary),
+            each thread has both CPU-bound and IO-bound components.
 
-            Instead, we employ a "pipeline" MT strategy: one thread consumes the source file, reading one second's
-            worth of channel data at a time and pushing each channel's one-second block onto one of 10 thread-safe
-            queues. Each of ten "writer threads" service one of these queues, popping the next block off the queue
-            and writing it to the corresponding channel's cache file.
+            Approaches that have not worked well thus far (tested on a 37GB binary file with 385 interleaved channels):
+             - One-thread-per-channel strategy (32 threads running in the XSort process). Took 130s to cache 32 of 385
+               channels; estimate about 1600s to cache all 385.
+             - MT pipeline strategy: One "reader thread" consumes the source file, reading reading one second's worth of
+               channel data at a time and pushing each channel's one-second block onto one of 10 thread-safe queues.
+               Each of ten "writer threads" service one of these queues, popping the next block off the queue and
+               writing it to the corresponding channel's cache file. Execution time was highly variable, between 240 and
+               660s.
+             - One-process-per-channel-bank strategy: Spawn N processes, each of which caches a bank of 20 channels.
+               Each process reads the source from beginning to end, extracting, filtering and caching the 20 channels
+               for which it is responsible. Execution time was more consistent, typ 200-225s. But this still seems
+               wasteful: the 37GB, 385-channel source file is read in its entirety 20x. Also, the test machine had 6
+               cores, so that jobs were queued in the process pool until previously started jobs finished -- serializing
+               the work to some extent. However, if we choose the bank size so that the # of processes matches the
+               # of available CPUs, we get the execution time down to 140-160s typ.
+             - MP pipeline strategy: Similar to the MT pipeline, but using one separate "reader process" to digest
+               the source and push de-interleaved, filtered channel blocks onto a process-safe queue serviced by 10
+               writer threads (spawned by the main XSort process). The idea here was to only read and process the source
+               file once, in a separate process running on a different core. In reality, this did not work well: 80-115s
+               to process only 20% of the 37GB file, which extrapolate to roughly 400-575s for the entire file. This
+               was NOT a good approach because the reader process did all of the CPU-bound work, so that was the
+               bottleneck. It would be better to have as many processes as possible digesting raw blocks from one
+               reader process.
+             - Variants on the one-process-per-channel-bank strategy: The work of the main thread in each process is
+               "serialized": read a raw buffer, process that buffer (deinterleave into N streams and filter each), and
+               append the N channel blocks to the corresponding cache files. Tried introducing a block queue serviced
+               by a pool of M writer threads so that main thread could keep working while the writer threads did the
+               appends. Even tried a separate reader thread to read raw blocks sequentially from the source file into
+               a "read queue". The queues were size-limited to ensure they did not grow too large. Nevertheless, the
+               overall performance of these variants was somewhat worse than the basic serialized approach.
 
-            Each object in the queues are 2-tuples (ch_idx, block), where ch_idx is the channel index and block is
-            the byte buffer containing the next second's worth of that channel's data stream, ready to be appended to
-            the corresponding cache file. To divvy up the work, queue K, K=0..9, holds channel data blocks for which
-            ch_idx % 10 == K. Each writer thread simply appends each block extracted from its assigned queue to the
-            corresponding channel cache file. One writer thread will be responsible for N / 10 cache files, where N
-            is the total number of analog data channels.
-
-            NOTE: Method does not check for any existing analog channel cache files. Should remove all such files
-            from working directory before running this task, as the writer threads will simply append to an already
-            existing file!
-            """
-            if not (self.work_dir.need_analog_cache and self.work_dir.is_analog_data_interleaved):
-                return
-
-            n_ch = self.work_dir.num_analog_channels()
-            next_progress_update_pct = 0
-
-            self.cancel_event = self.mgr._manager.Event()
-            block_queue = self.mgr._manager.Queue()
-            task_args = [(self.work_dir.path, block_queue, self.mgr._proc_progress_q, self.cancel_event)]
-            result: AsyncResult = self.mgr._process_pool.starmap_async(mp2_cache_interleaved_analog_source, task_args)
-            futures: List[Future] = \
-                [self.mgr._mt_pool_exec.submit(service_analog_channel_blocks_queue, self.work_dir, i, block_queue,
-                                               self.mgr._proc_progress_q, self.cancel_event) for i in range(10)]
-
-            first_error: Optional[str] = None
-            while not result.ready():
-                try:
-                    # progress updates are: (pct_complete, error_msg)
-                    update = self.mgr._proc_progress_q.get(timeout=0.2)
-                    if len(update[1]) > 0:
-                        # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
-                        # threads stop, then break out
-                        if not self.cancel_event.is_set():
-                            self.cancel_event.set()
-                            first_error = f"Error caching interleaved analog data: {update[1]}"
-                    elif update[0] >= next_progress_update_pct:
-                        self.mgr.progress.emit(f"Caching {n_ch} interleaved analog channels", int(update[0]))
-                        next_progress_update_pct += 5
-                except Empty:
-                    pass
-                except Exception as e:
-                    if not self.cancel_event.is_set():
-                        self.cancel_event.set()
-                        first_error = f"Unexpected error while caching interleaved analog data: {str(e)}"
-
-            # wait for writer threads to finish
-            while not all([future.done() for future in futures]):
-                time.sleep(0.1)
-
-            # report first error encountered, if any
-            if first_error is not None:
-                self.mgr.error(first_error)
-
-        def mp_cache_all_analog_channels_interleaved(self) -> None:
-            """
-            This version of cache_all_analog_channels_interleaved() spawns a separate process for every 20 channels in
-            the source file.
+            Thus far, the best strategy has been the one-process-per-channel-bank approach, selecting the number of
+            channels per banks so that the number of processes spawned matches the number of available cores. This
+            method currently implements that solution.
             """
             if not (self.work_dir.need_analog_cache and self.work_dir.is_analog_data_interleaved):
                 return
@@ -419,20 +462,21 @@ class TaskManager(QObject):
             # need a process-safe event to signal cancellation of task
             self.cancel_event = self.mgr._manager.Event()
 
-            # assign banks of 20 channels to each process
-            n_banks = int(n_ch / 20)
-            if n_banks * 20 < n_ch:
+            # assign banks of N channels to each process
+            ch_per_bank = 65
+            n_banks = int(n_ch / ch_per_bank)
+            if n_banks * ch_per_bank < n_ch:
                 n_banks += 1
             progress_per_bank: Dict[int, int] = {idx: 0 for idx in range(n_banks)}
-            next_progress_update_pct = 5
+            next_progress_update_pct = 0
             dir_path = str(self.work_dir.path.absolute())
             task_args = list()
             for i in range(n_banks):
-                task_args.append((dir_path, i*20, 20, self.mgr._proc_progress_q, self.cancel_event))
+                task_args.append((dir_path, i*ch_per_bank, ch_per_bank, self.mgr._proc_progress_q, self.cancel_event))
 
             first_error: Optional[str] = None
             result: AsyncResult = self.mgr._process_pool.starmap_async(
-                mp_cache_interleaved_analog_source, task_args, chunksize=1)
+                tfunc.cache_interleaved_analog_channel_bank, task_args, chunksize=1)
             while not result.ready():
                 try:
                     update = self.mgr._proc_progress_q.get(timeout=0.5)  # (pct_complete, error_msg)
@@ -441,14 +485,15 @@ class TaskManager(QObject):
                         # processes stop, then break out
                         if not self.cancel_event.is_set():
                             self.cancel_event.set()
-                            first_error = f"Error processing channels {update[0]}-{update[0]+19}: {update[2]}"
+                            first_error = (f"Error processing {ch_per_bank}-channel bank "
+                                           f"starting at {update[0]}: {update[2]}")
                         break
                     else:
-                        bank_idx = int(update[0] / 20)
+                        bank_idx = int(update[0] / ch_per_bank)
                         progress_per_bank[bank_idx] = update[1]
                         total_progress = sum(progress_per_bank.values()) / len(progress_per_bank)
                         if total_progress >= next_progress_update_pct:
-                            self.mgr.progress.emit(f"Caching {n_ch} interleaved analog channels", int(total_progress))
+                            self.mgr.progress.emit(f"Caching {n_ch} analog channels", int(total_progress))
                             next_progress_update_pct += 5
                 except Empty:
                     pass
@@ -456,6 +501,13 @@ class TaskManager(QObject):
             # in case of cancellation or premature termination on an error, make sure all processes have stopped
             while not result.ready():
                 time.sleep(0.1)
+            # make sure process-safe progress_q is emptied
+            while 1:
+                try:
+                    _ = self.mgr._proc_progress_q.get(block=False)
+                except Empty:
+                    break
+
             if first_error is not None:
                 self.mgr.error.emit(first_error)
                 return
@@ -499,7 +551,7 @@ class TaskManager(QObject):
 
             first_error: Optional[str] = None
             result: AsyncResult = self.mgr._process_pool.starmap_async(
-                _mp_compute_unit_templates_on_channel, task_args, chunksize=1)
+                tfunc.mp_compute_unit_templates_on_channel, task_args, chunksize=1)
             while not result.ready():
                 try:
                     update = self.mgr._proc_progress_q.get(timeout=0.5)  # (ch_idx, pct_complete, error_msg)
