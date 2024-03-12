@@ -267,10 +267,12 @@ class WorkingDirectory:
         """ Is analog data in flat binary file prefiltered? Ignored for PL2 source file."""
         self._recording_dur_seconds: float = 0
         """ 
-        Analog channel recording duration. For a flat binary file, this is based on file size, the number of 
+        Analog channel recording duration in seconds. For a flat binary file, this is based on file size, the number of 
         analog channels recorded, and the sampling rate specified by user. For a PL2 file, the duration is extracted
         from metadata stored in the file.
         """
+        self._recording_dur_samples: int = 0
+        """ Analog channel recording duration in total number of samples. """
         self._pl2_info: Optional[Dict[str, Any]] = None
         """ 
         Metadata extracted from the Omniplex PL2 file if that is the analog data source. Ignored if the analog data 
@@ -317,6 +319,7 @@ class WorkingDirectory:
                         int(self._pl2_info['analog_channels'][ch_indices[0]]['samples_per_second'])
                     if self._sampling_rate > 0:
                         dur = max([self._pl2_info['analog_channels'][idx]['num_values'] for idx in ch_indices])
+                        self._recording_dur_samples = dur
                         self._recording_dur_seconds = dur / self._sampling_rate
                         # verify all channels are sampled at the same rate
                         for k in ch_indices:
@@ -331,6 +334,7 @@ class WorkingDirectory:
             # compute analog recording duration based on flat binary file's size and user-specifed sampling rate and
             # number of channels
             num_scans = self.analog_source.stat().st_size / (2 * self._num_channels)
+            self._recording_dur_samples = num_scans
             self._recording_dur_seconds = num_scans / float(self._sampling_rate)
             self._analog_channel_indices = [k for k in range(self._num_channels)]
 
@@ -588,6 +592,11 @@ class WorkingDirectory:
         flat binary file, then the duration is determined by the file size and the user-specified sampling rate.
         """
         return self._recording_dur_seconds
+
+    @property
+    def analog_channel_recording_duration_samples(self) -> int:
+        """ Duration of analog recording in # of samples. Should be the same for every analog channel recorded. """
+        return self._recording_dur_samples
 
     @property
     def omniplex_file_info(self) -> Optional[Dict[str, Any]]:

@@ -1,24 +1,26 @@
 import multiprocessing as mp
+import os
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from enum import Enum
 # noinspection PyProtectedMember
 from multiprocessing.pool import AsyncResult
 from pathlib import Path
 from queue import Queue, Empty
 from threading import Event
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal, QRunnable, Slot, QThreadPool
 from PySide6.QtWidgets import QProgressDialog
 
 from xsort.data.files import WorkingDirectory, CHANNEL_CACHE_FILE_PREFIX, UNIT_CACHE_FILE_PREFIX
-from xsort.data.neuron import Neuron
+from xsort.data.neuron import Neuron, DataType, ChannelTraceSegment
 import xsort.data.taskfunc as tfunc
 
-N_MAX_SPKS_FOR_TEMPLATE: int = 10000   # -1 to use all spikes
+N_MAX_SPKS_FOR_TEMPLATE: int = 100    # -1 to use all spikes
+N_MAX_TEMPLATES_PER_UNIT: int = 16     # we only keep up to this many per-channel templates per neural unit
 
 
 class TaskType(Enum):
@@ -29,7 +31,7 @@ class TaskType(Enum):
     streams and neural unit metrics. 
     """
     GETCHANNELS = 2,
-    """ Retrieve from internal cache all recorded analog channel traces for a specified time period [t0..t1]. """
+    """ Retrieve selected analog channel traces for a specified time period [t0..t1]. """
     COMPUTESTATS = 3
     """
     Compute statistics for each neural unit in the current focus list. Currently, the following statistics are
@@ -53,12 +55,12 @@ class TaskManager(QObject):
     Signal emitted by a worker task to deliver a progress message and integer completion percentage. Ignore completion
     percentage if not in [0..100].
     """
-    # data_available = Signal(DataType, object)
-    # """
-    # Signal emitted to deliver a data object to the receiver. First argument indicates the type of data retrieved
-    # (or computed), and the second argument is a container for the data. For the :class:`TaskType`.COMPUTESTATS task,
-    # the data object is actually the :class:`Neuron` instance in which the computed statistics are cached.
-    # """
+    data_available = Signal(DataType, object)
+    """
+    Signal emitted to deliver a data object to the receiver. First argument indicates the type of data retrieved
+    (or computed), and the second argument is a container for the data. For the :class:`TaskType`.COMPUTESTATS task,
+    the data object is actually the :class:`Neuron` instance in which the computed statistics are cached.
+    """
     error = Signal(str)
     """ Signal emitted when the worker task has failed. Argument is an error description. """
     _task_finished = Signal()
@@ -72,16 +74,16 @@ class TaskManager(QObject):
         """ Interprocess manager context to allow sharing a queue and a cancel event across processes. """
         self._process_pool: mp.Pool = mp.Pool()
         """ A pool of processes for running tasks that are significantly CPU-bound. """
-        self._proc_progress_q: mp.Queue = self._manager.Queue()
-        """ A synchronized queue by which tasks running in child processes provide progress updates. """
         self._mt_pool_exec = ThreadPoolExecutor(max_workers=32)
         """ Manages a pool of threads for running tasks that are primarily IO bound. """
-        self._thrd_progress_q = Queue()
-        """ A thread-safe queue by which tasks running in the thread pool provide progress updates. """
         self._qthread_pool = QThreadPool()
         """ Qt-managed thread pool for running slow background tasks as QRunnables. """
         self._running_tasks: List[TaskManager._Task] = list()
         """ List of currently running worker tasks. """
+
+        n = os.cpu_count()
+        self._num_cpus = 1 if n is None else n
+        """ The number of CPUs available according to os.cpu_count(). If that fails, we just assume 1. """
 
         self.progress.connect(self._on_progress_update)
         self._task_finished.connect(self._on_task_finished)
@@ -105,6 +107,11 @@ class TaskManager(QObject):
     def busy(self) -> bool:
         """ True if any tasks are currently running in the background. """
         return len(self._running_tasks) > 0
+
+    @property
+    def num_cpus(self) -> int:
+        """ Number of available CPUs in system according to os.cpu_count(). If that fails, 1 CPU is assumed. """
+        return self._num_cpus
 
     def cancel_all_tasks(self, progress_dlg: QProgressDialog) -> None:
         """
@@ -151,7 +158,8 @@ class TaskManager(QObject):
 
         :param work_dir: The XSort working directory.
         :param uids: The UIDs of the neural units that should be cached in the directory.
-        :return: True if a background task was launched to build out the cache, else False.
+        :return: True if a background task was launched to build out the cache, else False if directory's internal
+            cache is already complete.
         """
         need_caching = False
         if work_dir.need_analog_cache:
@@ -171,16 +179,31 @@ class TaskManager(QObject):
         self._launch_task(work_dir, TaskType.BUILDCACHE)
         return True
 
-    def _launch_task(self, work_dir: WorkingDirectory, task_type: TaskType, **kwargs) -> None:
+    def get_channel_traces(self, work_dir: WorkingDirectory, first: int, n_ch: int, start: int, n_samples: int) -> None:
+        """
+        Launch a background task to retrieve analog traces for a specified range of analog data channels over a
+        specified time period. The background task delivers each trace as a :class:`ChannelTraceSegment` object via
+        the :class:`TaskManager`'s data_available signal.
+
+        :param work_dir: The XSort working directory.
+        :param first: Index of first channel to retrieve
+        :param n_ch: The number of channels to retrieve, starting at the index specified.
+        :param start: Sample index at which traces start
+        :param n_samples: Number of samples in each trace.
+        """
+        task = TaskManager._Task(self, work_dir, TaskType.GETCHANNELS, (first, n_ch, start, n_samples))
+        self._running_tasks.append(task)
+        self._qthread_pool.start(task)
+
+    def _launch_task(self, work_dir: WorkingDirectory, task_type: TaskType, params: Optional[Tuple] = None) -> None:
         """
         Launch a background task.
 
         :param work_dir: The XSort working directory on which the task operates.
         :param task_type: The type of background task to perform.
-        :param kwargs: Task-specific arguments. See :class:`TaskManager._Task`.
-        :return:
+        :param params: A tuple of task-specific arguments. See :class:`TaskManager._Task`.
         """
-        task = TaskManager._Task(self, work_dir, task_type, **kwargs)
+        task = TaskManager._Task(self, work_dir, task_type, params)
         self._running_tasks.append(task)
         self._qthread_pool.start(task)
 
@@ -201,14 +224,21 @@ class TaskManager(QObject):
             self.ready.emit()
 
     class _Task(QRunnable):
-        def __init__(self, mgr: 'TaskManager', working_dir: WorkingDirectory, task_type: TaskType, **kwargs):
+        def __init__(self, mgr: 'TaskManager', working_dir: WorkingDirectory, task_type: TaskType,
+                     params: Optional[Tuple]):
             """
-            Initialize, but do not start, a background task runnoble. Additional keywords:
+            Initialize, but do not start, a background task runnoble. The 'params' argument is an optional tuple, the
+            contents of which vary with the task.
+             - TaskType.BUILDCACHE: None (ignored).
+             - TaskType.GETCHANNELS: A 4-tuple of ints (first, n, start, count), where [first, first+n-1] is a
+               contiguous range of analog channel indices and [start, start+count-1] is the span of the desired trace
+               segments as a contiguous range of sample indices.
 
             :param mgr: The background task manager.
             :param working_dir: The XSort working directory on which to operate.
             :param task_type: The type of background task to perform
-            :param kwargs: Additional keyword arguments that depend on the type of task performed, as described.
+            :param params: A tuple of additional keyword arguments that depend on the type of task performed, as
+                described above. Default is None.
             """
             super().__init__()
             self.mgr = mgr
@@ -220,10 +250,14 @@ class TaskManager(QObject):
             """ The XSort working directory in which required source files and internal cache files are located. """
             self.task_type = task_type
             """ The type of background task executed. """
-            self.start: int = kwargs.get('start', -1)
-            """ For the GETCHANNELS task only, the index of the first analog sample to retrieve. """
-            self.count: int = kwargs.get('count', 0)
-            """ For the GETCHANNELS task only, the number of analog samples to retrieve. """
+            self.first_ch: int = int(params[0]) if task_type == TaskType.GETCHANNELS else -1
+            """ For GETCHANNELS task only, index of the first analog channel to retrieve. """
+            self.n_channels: int = int(params[1]) if task_type == TaskType.GETCHANNELS else 0
+            """ For GETCHANNELS task only, the numbe of analog channels to retrieve. """
+            self.start: int = int(params[2]) if task_type == TaskType.GETCHANNELS else -1
+            """ For GETCHANNELS task only, the index of the first analog sample to retrieve. """
+            self.count: int = int(params[3]) if task_type == TaskType.GETCHANNELS else 0
+            """ For GETCHANNELS task only, the number of analog samples to retrieve. """
             self.cancel_event: Optional[Event] = None
             """ An optional event object used to cancel the task. If None, task is not cancellable. """
             self._done: bool = False
@@ -235,10 +269,10 @@ class TaskManager(QObject):
             try:
                 if self.task_type == TaskType.BUILDCACHE:
                     self.cache_all_analog_channels()
-                    # if not self.cancelled:
-                    #     self.cache_all_neural_units()
-                # elif self.task_type == TaskType.GETCHANNELS:
-                #     self.get_channel_traces()
+                    if not self.cancelled:
+                        self.cache_all_neural_units()
+                elif self.task_type == TaskType.GETCHANNELS:
+                    self.get_channel_traces()
                 # elif self.task_type == TaskType.COMPUTESTATS:
                 #     self.compute_statistics()
                 else:
@@ -309,15 +343,16 @@ class TaskManager(QObject):
             next_progress_update_pct = 0
 
             self.cancel_event = Event()
+            progress_q = Queue()
             futures: List[Future] = [self.mgr._mt_pool_exec.submit(tfunc.cache_pl2_analog_channel, self.work_dir, idx,
-                                                                   self.mgr._thrd_progress_q, self.cancel_event)
+                                                                   progress_q, self.cancel_event)
                                      for idx in ch_indices]
 
             first_error: Optional[str] = None
             while True:
                 try:
                     # progress updates are: (ch_idx, pct_complete, error_msg)
-                    update = self.mgr._thrd_progress_q.get(timeout=0.2)
+                    update = progress_q.get(timeout=0.2)
                     if len(update[2]) > 0:
                         # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
                         # threads stop
@@ -336,6 +371,10 @@ class TaskManager(QObject):
                 if all([future.done() for future in futures]):
                     break
 
+            # on error or cancellation, delete all analog cache files
+            if self.cancel_event.is_set():
+                tfunc.delete_internal_cache_files(self.work_dir, del_analog=True, del_units=False)
+
             # report first error encountered, if any
             if first_error is not None:
                 self.mgr.error(first_error)
@@ -353,7 +392,7 @@ class TaskManager(QObject):
             launching from the PyCharm IDE; the kernel panic occurred in the Python process, but I have no idea what the
             root cause is. My machine has been experiencing a lot of kernel panics in other processes as well...)
 
-            Also tried varaitions on the one-process-per-channel-bank strategy that is currently the best solution for
+            Also tried variations on the one-process-per-channel-bank strategy that is currently the best solution for
             the interleaved case. Chose channel bank size so that the number of spawned processes matched the number of
             cores in the system. Variations included: 1 thread per proc, processing each of the channels in the bank
             sequentially); or N threads per proc, where N = # channels in the bank and each thread processed one
@@ -377,15 +416,16 @@ class TaskManager(QObject):
             next_progress_update_pct = 0
             
             self.cancel_event = Event()
+            progress_q = Queue()
             futures: List[Future] = \
                 [self.mgr._mt_pool_exec.submit(tfunc.cache_noninterleaved_analog_channel, self.work_dir, idx,
-                                               self.mgr._thrd_progress_q, self.cancel_event) for idx in ch_indices]
+                                               progress_q, self.cancel_event) for idx in ch_indices]
 
             first_error: Optional[str] = None
             while True:
                 try:
                     # progress updates are: (ch_idx, pct_complete, error_msg)
-                    update = self.mgr._thrd_progress_q.get(timeout=0.2)
+                    update = progress_q.get(timeout=0.2)
                     if len(update[2]) > 0:
                         # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
                         # threads stop
@@ -403,6 +443,10 @@ class TaskManager(QObject):
 
                 if all([future.done() for future in futures]):
                     break
+
+            # on error or cancellation, delete all analog cache files
+            if self.cancel_event.is_set():
+                tfunc.delete_internal_cache_files(self.work_dir, del_analog=True, del_units=False)
 
             # report first error encountered, if any
             if first_error is not None:
@@ -459,33 +503,33 @@ class TaskManager(QObject):
 
             n_ch = self.work_dir.num_analog_channels()
 
-            # need a process-safe event to signal cancellation of task
+            # need a process-safe event to signal cancellation of task, as well as a queue for IP comm
             self.cancel_event = self.mgr._manager.Event()
+            progress_q: Queue = self.mgr._manager.Queue()
 
-            # assign banks of N channels to each process
-            ch_per_bank = 65
-            n_banks = int(n_ch / ch_per_bank)
-            if n_banks * ch_per_bank < n_ch:
-                n_banks += 1
+            # assign banks of N channels to each process, with one process per core
+            n_banks = self.mgr.num_cpus
+            ch_per_bank = int(0.5 + n_ch / n_banks)
+
             progress_per_bank: Dict[int, int] = {idx: 0 for idx in range(n_banks)}
             next_progress_update_pct = 0
             dir_path = str(self.work_dir.path.absolute())
             task_args = list()
             for i in range(n_banks):
-                task_args.append((dir_path, i*ch_per_bank, ch_per_bank, self.mgr._proc_progress_q, self.cancel_event))
+                task_args.append((dir_path, i*ch_per_bank, ch_per_bank, progress_q, self.cancel_event))
 
             first_error: Optional[str] = None
             result: AsyncResult = self.mgr._process_pool.starmap_async(
                 tfunc.cache_interleaved_analog_channel_bank, task_args, chunksize=1)
             while not result.ready():
                 try:
-                    update = self.mgr._proc_progress_q.get(timeout=0.5)  # (pct_complete, error_msg)
+                    update = progress_q.get(timeout=0.5)  # (pct_complete, error_msg)
                     if len(update[2]) > 0:
                         # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
                         # processes stop, then break out
                         if not self.cancel_event.is_set():
                             self.cancel_event.set()
-                            first_error = (f"Error processing {ch_per_bank}-channel bank "
+                            first_error = (f"Error processing interleaved {ch_per_bank}-channel bank "
                                            f"starting at {update[0]}: {update[2]}")
                         break
                     else:
@@ -501,12 +545,10 @@ class TaskManager(QObject):
             # in case of cancellation or premature termination on an error, make sure all processes have stopped
             while not result.ready():
                 time.sleep(0.1)
-            # make sure process-safe progress_q is emptied
-            while 1:
-                try:
-                    _ = self.mgr._proc_progress_q.get(block=False)
-                except Empty:
-                    break
+
+            # on error or cancellation, delete all analog cache files
+            if self.cancel_event.is_set():
+                tfunc.delete_internal_cache_files(self.work_dir, del_analog=True, del_units=False)
 
             if first_error is not None:
                 self.mgr.error.emit(first_error)
@@ -514,6 +556,8 @@ class TaskManager(QObject):
 
         def cache_all_neural_units(self) -> None:
             """
+            NOTE: THIS SOLUTION IS UNTENABLE WHEN THE NUMBER OF CHANNELS AND THE NUMBER OF UNITS ARE IN THE HUNDREDS.
+
             Calculate and cache metrics for all neural units found in the XSort working directory's unit data source
             file.
 
@@ -524,6 +568,9 @@ class TaskManager(QObject):
             digests each analog channel stream once, calculating the template for each unit on that channel, as well as
             the channel's noise level. The task results are accumulated by this method as they come in, then the
             individual units are updated and the unit cache files written.
+
+            For each unit, up to N_MAX_TEMPLATES_PER_UNIT per-channel templates are kept -- those with the best
+            observed SNR. For all other channels, the templates are assumed to be "flat lines".
             """
             emsg, neurons = self.work_dir.load_neural_units()
             if len(emsg) > 0:
@@ -533,20 +580,22 @@ class TaskManager(QObject):
             self.mgr.progress.emit(f"Calculating and caching metrics for {n_units} neural units across "
                                    f"{self.work_dir.num_analog_channels()} analog channels...", 0)
 
-            # accumulate results as they come in
-            best_snr_per_unit: List[float] = [0] * n_units
-            primary_ch_per_unit: List[int] = [-1] * n_units
+            # accumulate results as they come in. For recordings with hundreds of analog channels, we only keep a
+            # limited number of per-channel templates for each unit -- those exhibiting the highest SNRs
+            template_snrs_per_unit: List[Dict[int, float]] = list()
             template_dict_per_unit: List[Dict[int, np.ndarray]] = list()
             for i in range(n_units):
                 template_dict_per_unit.append(dict())
+                template_snrs_per_unit.append(dict())
 
-            # need a process-safe event to signal cancellation of task
+            # need a process-safe event to signal cancellation of task, as well as a queue for IP comm
             self.cancel_event = self.mgr._manager.Event()
+            progress_q: Queue = self.mgr._manager.Queue()
 
             progress_per_ch: Dict[int, int] = {idx: 0 for idx in self.work_dir.analog_channel_indices}
-            next_progress_update_pct = 10
+            next_progress_update_pct = 0
             dir_path = str(self.work_dir.path.absolute())
-            task_args = [(dir_path, ch_idx, self.mgr._proc_progress_q, self.cancel_event, N_MAX_SPKS_FOR_TEMPLATE)
+            task_args = [(dir_path, ch_idx, progress_q, self.cancel_event, N_MAX_SPKS_FOR_TEMPLATE)
                          for ch_idx in self.work_dir.analog_channel_indices]
 
             first_error: Optional[str] = None
@@ -554,7 +603,7 @@ class TaskManager(QObject):
                 tfunc.mp_compute_unit_templates_on_channel, task_args, chunksize=1)
             while not result.ready():
                 try:
-                    update = self.mgr._proc_progress_q.get(timeout=0.5)  # (ch_idx, pct_complete, error_msg)
+                    update = progress_q.get(timeout=0.5)  # (ch_idx, pct_complete, error_msg)
                     if len(update[2]) > 0:
                         # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
                         # processes stop, then break out
@@ -567,7 +616,7 @@ class TaskManager(QObject):
                         total_progress = sum(progress_per_ch.values()) / len(progress_per_ch)
                         if total_progress >= next_progress_update_pct:
                             self.mgr.progress.emit(f"Caching {n_units} neural units", int(total_progress))
-                            next_progress_update_pct += 10
+                            next_progress_update_pct += 5
                 except Empty:
                     pass
 
@@ -584,11 +633,14 @@ class TaskManager(QObject):
                     for i in range(n_units):
                         template = template_dict[neurons[i].uid]
                         snr = (np.max(template) - np.min(template)) / (1.96 * noise)
-                        if snr > best_snr_per_unit[i]:
-                            best_snr_per_unit[i] = snr
-                            primary_ch_per_unit[i] = ch_idx
-                        # convert template units from raw ADC samples to microvolts
+                        # we only keep a limited number of templates -- with the highest observed SNRs
+                        snr_dict = template_snrs_per_unit[i]
+                        snr_dict[ch_idx] = snr
                         template_dict_per_unit[i][ch_idx] = template * self.work_dir.analog_channel_sample_to_uv(ch_idx)
+                        if len(snr_dict) > N_MAX_TEMPLATES_PER_UNIT:
+                            discard_ch_idx = min(snr_dict.keys(), key=snr_dict.get)
+                            snr_dict.pop(discard_ch_idx)
+                            template_dict_per_unit[i].pop(discard_ch_idx)
                 else:
                     self.mgr.error.emit(emsg)
                     return
@@ -596,6 +648,63 @@ class TaskManager(QObject):
             # finally, for each unit, update metrics and save to cache file
             for i in range(n_units):
                 u: Neuron = neurons[i]
-                u.update_metrics(primary_ch_per_unit[i], best_snr_per_unit[i], template_dict_per_unit[i])
+                snr_dict = template_snrs_per_unit[i]
+                primary_ch = max(snr_dict.keys(), key=snr_dict.get)
+                u.update_metrics(primary_ch, snr_dict[primary_ch], template_dict_per_unit[i])
                 if not self.work_dir.save_neural_unit_to_cache(u):
                     raise Exception(f"Error occurred while writing unit metrics to internal cache: uid={u.uid}")
+                # TODO: TESTING
+                print(f"Unit {u.uid}: {sorted(snr_dict, key=snr_dict.get, reverse=True)}")
+
+        def get_channel_traces(self) -> None:
+            """
+            Retrieve the specified trace segment for selected analog data channel streams cached in the working
+            directory.
+                This method handles the GETCHANNELS task. When channel caching is NOT required (prefiltered flat binary
+            source file, the method retrieves the channel trace segments sequentially on the task runnable, because
+            we're reading small parts of the same file. When caching is required, the cache files must exist, and
+            the method spins up a separate thread to retrieve the trace segment for each channel (this MT strategy was
+            about 70x faster than retrieving the segments sequentially on the task runnable).
+
+            :raises Exception: If a channel cache file is missing, or if a file IO error occurs.
+            """
+
+            # check/correct task arguments
+            total_ch = self.work_dir.num_analog_channels()
+            if (self.first_ch < 0) or (self.first_ch >= total_ch):
+                raise Exception("Invalid analog channel range!")
+            self.n_channels = min(self.n_channels, total_ch - self.first_ch)
+            total_samples = self.work_dir.analog_channel_recording_duration_samples
+            if (self.start < 0) or (self.start >= total_samples):
+                raise Exception("Invalid starting index for channel traces!")
+            self.count = min(self.count, total_samples - self.start)
+
+            self.mgr.progress.emit(f"Retrieving {self.n_channels} channel trace segments ...", 0)
+
+            self.cancel_event = Event()
+
+            # special case: If analog data caching isn't required, it's overkill to spin up threads to read very small
+            # parts of the analog data source file.
+            if not self.work_dir.need_analog_cache:
+                for i in range(self.n_channels):
+                    idx = self.first_ch + i
+                    segment = self.work_dir.retrieve_cached_channel_trace(idx, self.start, self.count)
+                    if self.cancel_event.is_set():
+                        raise Exception("Operation cancelled")
+                    self.mgr.data_available.emit(DataType.CHANNELTRACE, segment)
+                return
+
+            # otherwise: spin up a thread to retrieve the trace segment for each of the channels specified. The
+            # individual tasks are not cancellable.
+            futures: List[Future] = \
+                [self.mgr._mt_pool_exec.submit(tfunc.retrieve_trace_from_channel_cache_file, self.work_dir,
+                                               i + self.first_ch, self.start, self.count)
+                 for i in range(self.n_channels)]
+            for future in as_completed(futures):
+                res = future.result()
+                if isinstance(res, ChannelTraceSegment):
+                    self.mgr.data_available.emit(DataType.CHANNELTRACE, res)
+                else:  # an error occurred. Cancel any pending tasks and hope any running task finish quickly!
+                    for f in futures:
+                        f.cancel()
+                    raise Exception(res)

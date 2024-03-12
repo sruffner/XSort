@@ -2,14 +2,14 @@ import random
 from pathlib import Path
 from queue import Queue
 from threading import Event
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Tuple, Union
 
 import numpy as np
 import scipy
 
 from xsort.data import PL2
 from xsort.data.files import WorkingDirectory, CHANNEL_CACHE_FILE_PREFIX, UNIT_CACHE_FILE_PREFIX
-from xsort.data.neuron import Neuron
+from xsort.data.neuron import Neuron, ChannelTraceSegment
 
 """
 NOTES: The methods here were developed during testing of multi-threading (MT) and multi-processing (MP) strategies for 
@@ -91,7 +91,9 @@ def _compute_unit_templates_on_channel(
     n_ch = work_dir.num_analog_channels()
     interleaved = work_dir.is_analog_data_interleaved
     n_bytes_per_sample = 2 * n_ch if interleaved else 2
-    block_size = 1024 * 1024
+    # desired block read size in byte -- ensure it does not split a sample!
+    block_size = int(1024 * 1024 / n_bytes_per_sample) * n_bytes_per_sample
+
     num_samples_recorded = ch_file.stat().st_size / n_bytes_per_sample
     block_medians: List[float] = list()   # for computing noise level on channel
     with (open(ch_file, 'rb') as src):
@@ -102,7 +104,7 @@ def _compute_unit_templates_on_channel(
         while (clip_starts[clip_idx][0] < 0) and (clip_idx < len(clip_starts)):
             clip_idx += 1
 
-        next_update_pct = 5
+        next_update_pct = 0
         while (clip_idx < len(clip_starts)) and (clip_starts[clip_idx][0] + template_len < num_samples_recorded):
             # seek to start of next clip to be processed, then read in a big block of samples
             sample_idx = clip_starts[clip_idx][0]
@@ -111,7 +113,9 @@ def _compute_unit_templates_on_channel(
 
             # if reading an interleaved analog source, extract the interleaved samples for the current channel index
             if interleaved:
-                curr_block = curr_block[ch_idx::n_ch].copy()
+                curr_block = curr_block.reshape(-1, n_ch)
+                curr_block = curr_block.transpose()
+                curr_block = curr_block[ch_idx].copy()
             block_medians.append(np.median(np.abs(curr_block)))  # for later SNR calc
 
             # accumulate all spike template clips that are fully contained in the current block OR straddle
@@ -433,12 +437,36 @@ def cache_interleaved_analog_channel_bank(
     return emsg
 
 
-def delete_internal_cache_files(work_dir: WorkingDirectory) -> None:
+def retrieve_trace_from_channel_cache_file(work_dir: WorkingDirectory, ch_idx: int, start: int, count: int) \
+        -> Union[ChannelTraceSegment, str]:
+    """
+    Retrieve a trace segment from an analog data channel cache file within the XSort working directory. This method
+    expects the cache file to exist and fails otherwise. It is not cancellable.
+
+    :param work_dir: The XSort working directory.
+    :param ch_idx: The index of the requested analog data channel.
+    :param start: Index of the first sample in the trace (relative to recording start at index 0).
+    :param count: The trace length in # of samples.
+    :return: The requested trace segment. On failure, returns a brief error description (str).
+    """
+    try:
+        trace = work_dir.retrieve_cached_channel_trace(ch_idx, start, count)
+        return trace
+    except Exception as e:
+        return f"Error retrieving trace for channel {ch_idx}: {str(e)}"
+
+
+def delete_internal_cache_files(work_dir: WorkingDirectory, del_analog: bool = True, del_units: bool = True) -> None:
     """
     Remove all internal analog data and unit metrics cache files from an XSort working directory.
 
     :param work_dir: The working directory.
+    :param del_analog: If True, analog data cache files are removed. Default = True.
+    :param del_units: If True, neural unit metrics cache files are removed. Default = True.
     """
+    if not (del_analog or del_units):
+        return
     for p in work_dir.path.iterdir():
-        if p.name.startswith(CHANNEL_CACHE_FILE_PREFIX) or p.name.startswith(UNIT_CACHE_FILE_PREFIX):
+        if ((del_analog and p.name.startswith(CHANNEL_CACHE_FILE_PREFIX)) or
+                (del_units and p.name.startswith(UNIT_CACHE_FILE_PREFIX))):
             p.unlink(missing_ok=True)
