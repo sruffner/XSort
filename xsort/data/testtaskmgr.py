@@ -45,6 +45,10 @@ class MainWindow(QMainWindow):
         self.clear_btn.setEnabled(False)
         self.clear_btn.clicked.connect(self._on_clear_cache)
 
+        self.test_btn = QPushButton("Run Test")
+        self.test_btn.setEnabled(False)
+        self.test_btn.clicked.connect(self._on_run_test)
+
         self.get_traces_btn = QPushButton("Get Channel Traces")
         self.get_traces_btn.setEnabled(False)
         self.get_traces_btn.clicked.connect(self._on_get_traces)
@@ -90,6 +94,7 @@ class MainWindow(QMainWindow):
         control_line.addWidget(self.work_dir_label, stretch=1)
         control_line.addWidget(self.build_btn)
         control_line.addWidget(self.clear_btn)
+        control_line.addWidget(self.test_btn)
         main_layout.addLayout(control_line)
 
         control_line_2 = QHBoxLayout()
@@ -128,6 +133,7 @@ class MainWindow(QMainWindow):
         self.build_btn.setEnabled(valid_dir)
         self.build_btn.setText("Cancel" if self.task_manager.busy else "Build Cache")
         self.clear_btn.setEnabled(valid_dir and not self.task_manager.busy)
+        self.test_btn.setEnabled(valid_dir and not self.task_manager.busy)
         self.get_traces_btn.setEnabled(
             valid_dir and isinstance(self._get_args_for_get_traces(), tuple) and (not self.task_manager.busy))
 
@@ -199,6 +205,14 @@ class MainWindow(QMainWindow):
                 self._refresh_state()
         else:
             self.task_manager.cancel_all_tasks(self.progress_dlg)
+
+    @Slot(bool)
+    def _on_run_test(self, _: bool) -> None:
+        if (not self.task_manager.busy) and isinstance(self.work_dir, WorkingDirectory) and self.work_dir.is_valid:
+            self.task_manager.run_performance_test(self.work_dir)
+            self.t_task_start = time.perf_counter()
+            self.progress_edit.append("Running performance test...")
+            self._refresh_state()
 
     @Slot(bool)
     def _on_get_traces(self, _: bool) -> None:
