@@ -20,6 +20,11 @@ PL2 file.
 """
 CHANNEL_CACHE_FILE_PREFIX: str = '.xs.ch.'
 """ Prefix for analog channel data stream cache file -- followed by the channel index. """
+NOISE_CACHE_FILE: str = '.xs.noise'
+""" 
+Internal cache file holds the estimated noise level (in raw ADC units, not voltage) on each recorded analog data 
+channel. Stored as a list of N single-precision floating-point values, where N is the number of analog channels.
+"""
 UNIT_CACHE_FILE_PREFIX: str = '.xs.unit.'
 """ Prefix for a neural unit cache file -- followed by the unit's UID. """
 
@@ -883,3 +888,62 @@ class WorkingDirectory:
         for child in self._folder.iterdir():
             if child.is_file() and child.name.startswith(UNIT_CACHE_FILE_PREFIX) and child.name.endswith('x'):
                 child.unlink(missing_ok=True)
+
+    def channel_noise_cache_file_exists(self) -> bool:
+        """
+        Does this working directory contain the internal cache file '.xs.noise' holding the estimated noise level on
+        each recorded analog channel?
+        """
+        return self.is_valid and Path(self._folder, NOISE_CACHE_FILE).is_file()
+
+    def load_channel_noise_from_cache(self) -> Optional[np.ndarray]:
+        """
+        Load estimate analog channel noise levels stored in a dedicated internal cache file ('.xs.noise') within this
+        XSort working directory. Analog channel noise is estimated and cached while building out the internal cache
+        the first time a working directory is visited.
+
+        :return: Single-precision floating-point 1D array F such that F[k] is the noise level on channel k, k in [0,N),
+            where N is the number of analog channels recorded. Returns None if channel noise cache file is missing or
+            could not be read.
+        """
+        try:
+            with open(Path(self.path, NOISE_CACHE_FILE), 'rb') as src:
+                out = np.frombuffer(src.read(), dtype='<f')
+            return out
+        except Exception:
+            return None
+
+    def save_channel_noise_to_cache(self, noise_levels: List[float]) -> bool:
+        """
+        Save estimated analog channel noise levels in a dedicated internal cache file ('.xs.noise') within this
+        XSort working directory
+        :param noise_levels: Array F such that F[k] is the noise level on channel k, k in [0,N), where N is the number
+            of analog channels. Noise level should be in raw ADC units rather than converted to volts.
+        :return: True if successful, else False. Fails if argument length does not match the number of analog channels
+        """
+        if len(noise_levels) != self.num_analog_channels():
+            return False
+        try:
+            noise_array = np.array(noise_levels, dtype='<f')
+            with open(Path(self.path, NOISE_CACHE_FILE), 'wb') as src:
+                src.write(noise_array.tobytes())
+            return True
+        except Exception:
+            return False
+
+    def delete_internal_cache_files(self, analog: bool = True, noise: bool = True, units: bool = True) -> None:
+        """
+        Remove all or some of the dedicated internal cache files in this XSort working directory.
+y.
+        :param analog: If True, analog data channel cache files are removed. Default = True.
+        :param noise: If True, the analog channel noise cache file is removed. Default = True.
+        :param units: If True, neural unit metrics cache files are removed. Default = True.
+        """
+        if (not self.is_valid) or not (analog or noise or units):
+            return
+        if noise:
+            Path(self._folder, NOISE_CACHE_FILE).unlink(missing_ok=True)
+        for p in self._folder.iterdir():
+            if ((analog and p.name.startswith(CHANNEL_CACHE_FILE_PREFIX)) or
+                    (units and p.name.startswith(UNIT_CACHE_FILE_PREFIX))):
+                p.unlink(missing_ok=True)

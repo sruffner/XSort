@@ -1,7 +1,7 @@
 import sys
 import time
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict, Any
 
 import numpy as np
 from PySide6.QtCore import QStandardPaths, Slot, QCoreApplication
@@ -12,7 +12,6 @@ from PySide6.QtWidgets import QMainWindow, QPushButton, QApplication, QVBoxLayou
 from xsort.data.files import WorkingDirectory
 from xsort.data.neuron import Neuron, DataType, ChannelTraceSegment
 from xsort.data.taskmanager import TaskManager
-from xsort.data.taskfunc import delete_internal_cache_files
 
 
 class MainWindow(QMainWindow):
@@ -27,6 +26,13 @@ class MainWindow(QMainWindow):
 
         self.work_dir: Optional[WorkingDirectory] = None
         self.units: List[Neuron] = list()
+
+        # caches of previously computed unit statistics - clear whenever working directory changes
+        self.acg_cache: Dict[str, np.ndarray] = dict()
+        self.isi_cache: Dict[str, np.ndarray] = dict()
+        self.acgrate_cache: Dict[str, Tuple[np.ndarray, np.ndarray]] = dict()
+        self.ccg_cache: Dict[str, Dict[str, np.ndarray]] = dict()
+        self.pca_cache: Dict[str, np.ndarray] = dict()
 
         self.t_task_start: float = 0.0
 
@@ -44,10 +50,6 @@ class MainWindow(QMainWindow):
         self.clear_btn = QPushButton("Clear Cache")
         self.clear_btn.setEnabled(False)
         self.clear_btn.clicked.connect(self._on_clear_cache)
-
-        self.test_btn = QPushButton("Run Test")
-        self.test_btn.setEnabled(False)
-        self.test_btn.clicked.connect(self._on_run_test)
 
         self.get_traces_btn = QPushButton("Get Channel Traces")
         self.get_traces_btn.setEnabled(False)
@@ -74,6 +76,15 @@ class MainWindow(QMainWindow):
         self._dur_edit.setText('0')
         self._dur_edit.textEdited.connect(lambda _: self._refresh_state())
 
+        units_label = QLabel("Select units (eg: '2 10 34')")
+        self.uids_edit = QLineEdit()
+        self.uids_edit.setText('')
+        self.uids_edit.textEdited.connect(lambda _: self._refresh_state())
+
+        self.stats_btn = QPushButton("Compute Stats")
+        self.stats_btn.setEnabled(False)
+        self.stats_btn.clicked.connect(self._on_compute_stats)
+
         self.progress_edit = QTextEdit()
         self.progress_edit.setReadOnly(True)
 
@@ -82,6 +93,7 @@ class MainWindow(QMainWindow):
 
         # customize progress dialog: modal, no cancel, no title bar (so you can't close it)
         self.progress_dlg.setMinimumDuration(500)
+        # noinspection PyTypeChecker
         self.progress_dlg.setCancelButton(None)
         self.progress_dlg.setModal(True)
         self.progress_dlg.setAutoClose(False)
@@ -94,7 +106,6 @@ class MainWindow(QMainWindow):
         control_line.addWidget(self.work_dir_label, stretch=1)
         control_line.addWidget(self.build_btn)
         control_line.addWidget(self.clear_btn)
-        control_line.addWidget(self.test_btn)
         main_layout.addLayout(control_line)
 
         control_line_2 = QHBoxLayout()
@@ -108,6 +119,12 @@ class MainWindow(QMainWindow):
         control_line_2.addWidget(dur_label)
         control_line_2.addWidget(self._dur_edit)
         main_layout.addLayout(control_line_2)
+
+        control_line_3 = QHBoxLayout()
+        control_line_3.addWidget(units_label)
+        control_line_3.addWidget(self.uids_edit, stretch=1)
+        control_line_3.addWidget(self.stats_btn)
+        main_layout.addLayout(control_line_3)
 
         main_layout.addWidget(self.progress_edit, stretch=1)
 
@@ -133,7 +150,8 @@ class MainWindow(QMainWindow):
         self.build_btn.setEnabled(valid_dir)
         self.build_btn.setText("Cancel" if self.task_manager.busy else "Build Cache")
         self.clear_btn.setEnabled(valid_dir and not self.task_manager.busy)
-        self.test_btn.setEnabled(valid_dir and not self.task_manager.busy)
+        self.stats_btn.setEnabled(valid_dir and isinstance(self._get_uids_for_compute_stats(), list) and
+                                  not self.task_manager.busy)
         self.get_traces_btn.setEnabled(
             valid_dir and isinstance(self._get_args_for_get_traces(), tuple) and (not self.task_manager.busy))
 
@@ -152,6 +170,16 @@ class MainWindow(QMainWindow):
         except Exception:
             out = None
         return out
+
+    def _get_uids_for_compute_stats(self) -> Optional[List[str]]:
+        try:
+            uids = self.uids_edit.text().split()
+            actual_uids = [u.uid for u in self.units]
+            if (len(uids) > 0) and all([uid in actual_uids for uid in uids]):
+                return uids
+        except Exception:
+            pass
+        return None
 
     @Slot(bool)
     def _on_select_directory(self, _: bool):
@@ -172,6 +200,12 @@ class MainWindow(QMainWindow):
                 # success
                 self.work_dir = work_dir
                 _, self.units = self.work_dir.load_neural_units()
+                self.acg_cache.clear()
+                self.isi_cache.clear()
+                self.acgrate_cache.clear()
+                self.ccg_cache.clear()
+                self.pca_cache.clear()
+
                 self.progress_edit.append(f"Valid working directory: {self.work_dir.num_analog_channels()} analog "
                                           f"data channels and {len(self.units)} neural units.")
                 min_spks = min([u.num_spikes for u in self.units])
@@ -187,7 +221,7 @@ class MainWindow(QMainWindow):
     @Slot(bool)
     def _on_clear_cache(self, _: bool) -> None:
         if (not self.task_manager.busy) and isinstance(self.work_dir, WorkingDirectory) and self.work_dir.is_valid:
-            delete_internal_cache_files(self.work_dir)
+            self.work_dir.delete_internal_cache_files()
             self.progress_edit.append("Removed all internal cache files from the current working directory.")
 
     @Slot(bool)
@@ -207,12 +241,50 @@ class MainWindow(QMainWindow):
             self.task_manager.cancel_all_tasks(self.progress_dlg)
 
     @Slot(bool)
-    def _on_run_test(self, _: bool) -> None:
-        if (not self.task_manager.busy) and isinstance(self.work_dir, WorkingDirectory) and self.work_dir.is_valid:
-            self.task_manager.run_performance_test(self.work_dir)
+    def _on_compute_stats(self, _: bool) -> None:
+        uids = self._get_uids_for_compute_stats()
+        if (not self.task_manager.busy) and isinstance(self.work_dir, WorkingDirectory) and \
+                self.work_dir.is_valid and isinstance(uids, list):
+            request_stats = self._prepare_stats_request(uids)
+            if len(request_stats) == 0:
+                self.progress_edit.append(f"Statistics cached for units specified. Nothing to do!")
+                return
+            self.pca_cache.clear()   # we clear this before every PCA computation
+            self.task_manager.compute_unit_stats(self.work_dir, request_stats)
             self.t_task_start = time.perf_counter()
-            self.progress_edit.append("Running performance test...")
+            self.progress_edit.append(f"Computing statistics for neural units: {uids} ...")
             self._refresh_state()
+
+    def _prepare_stats_request(self, uids: List[str]) -> List[Tuple[Any]]:
+        out: List[Tuple] = list()
+        isi_uids, acg_uids, acgrate_uids, ccg_uids = set(), set(), set(), set()
+        uid_set = set(uids)
+        for uid in uid_set:
+            if self.isi_cache.get(uid) is None:
+                isi_uids.add(uid)
+            if self.acg_cache.get(uid) is None:
+                acg_uids.add(uid)
+            if self.acgrate_cache.get(uid) is None:
+                acgrate_uids.add(uid)
+            if len(ccg_uids) < len(uids):
+                if self.ccg_cache.get(uid) is None:
+                    ccg_uids.update(set(uids))
+                else:
+                    for uid2 in uids:
+                        if (uid != uid2) and (self.ccg_cache[uid].get(uid2) is None):
+                            ccg_uids.update((uid, uid2))
+
+        if len(isi_uids) > 0:
+            out.append((DataType.ISI,) + tuple(isi_uids))
+        if len(acg_uids) > 0:
+            out.append((DataType.ACG,) + tuple(acg_uids))
+        if len(acgrate_uids) > 0:
+            out.append((DataType.ACG_VS_RATE,) + tuple(acgrate_uids))
+        if len(ccg_uids) > 1:
+            out.append((DataType.CCG,) + tuple(ccg_uids))
+        if 1 <= len(uid_set) <= 3:
+            out.append((DataType.PCA,) + tuple(uid_set))
+        return out
 
     @Slot(bool)
     def _on_get_traces(self, _: bool) -> None:
@@ -235,6 +307,36 @@ class MainWindow(QMainWindow):
                                           f"dur={seg.duration:.1f}")
             else:
                 self.progress_edit.append(f"Bad data object returned, should be ChannelTraceSegment")
+        elif isinstance(data, tuple):
+            try:
+                uid = data[0]
+                uid_other = data[1] if data_type == DataType.CCG else None
+                result = data[2] if (data_type in [DataType.CCG, DataType.PCA]) else data[1]
+                spk_idx = data[1] if data_type == DataType.PCA else None
+                if data_type == DataType.ISI:
+                    self.isi_cache[uid] = result
+                    self.progress_edit.append(f"Got ISI histogram for unit {uid}")
+                elif data_type == DataType.ACG:
+                    self.acg_cache[uid] = result
+                    self.progress_edit.append(f"Got autocorrelogram for unit {uid}")
+                elif data_type == DataType.ACG_VS_RATE:
+                    self.acgrate_cache[uid] = result
+                    self.progress_edit.append(f"Got 3D ACG-vs-firing rate for unit {uid}")
+                elif data_type == DataType.CCG:
+                    if self.ccg_cache.get(uid, None) is None:
+                        self.ccg_cache[uid] = dict()
+                    self.ccg_cache[uid][uid_other] = result
+                    self.progress_edit.append(f"Got crosscorrelogram for unit {uid} vs unit {uid_other}")
+                elif data_type == DataType.PCA:
+                    if self.pca_cache.get(uid, None) is None:
+                        self.pca_cache[uid] = result
+                    else:
+                        self.pca_cache[uid] = np.vstack((self.pca_cache[uid], result))
+                    self.progress_edit.append(f"Got chunk of PCA projection for unit {uid} starting at "
+                                              f"spike index {spk_idx}; length={len(self.pca_cache[uid])}")
+
+            except Exception as e:
+                self.progress_edit.append(f"Badly formed data object returned: {str(e)}")
 
     def _on_task_error(self, emsg: str) -> None:
         self.progress_edit.append(f"==> ERROR: {emsg}")

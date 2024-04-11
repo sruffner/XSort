@@ -105,6 +105,7 @@ class Analyzer(QObject):
 
         # customize progress dialog: modal, no cancel, no title bar (so you can't close it)
         self._progress_dlg.setMinimumDuration(500)
+        # noinspection PyTypeChecker
         self._progress_dlg.setCancelButton(None)
         self._progress_dlg.setModal(True)
         self._progress_dlg.setAutoClose(False)

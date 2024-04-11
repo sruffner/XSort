@@ -1,18 +1,16 @@
 import random
-import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from queue import Queue, Empty
 from threading import Event
-from typing import Dict, List, Tuple, Union, Optional
+from typing import Dict, List, Tuple, Union, Optional, Any, Set
 
 import numpy as np
 import scipy
 
-from xsort.data import PL2
-from xsort.data.files import WorkingDirectory, CHANNEL_CACHE_FILE_PREFIX, UNIT_CACHE_FILE_PREFIX
-from xsort.data.neuron import Neuron, ChannelTraceSegment
-
+from xsort.data import PL2, stats
+from xsort.data.files import WorkingDirectory, CHANNEL_CACHE_FILE_PREFIX
+from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
 
 """
 NOTES: The methods here were developed during testing of multi-threading (MT) and multi-processing (MP) strategies for 
@@ -47,6 +45,25 @@ N_MAX_TEMPLATES_PER_UNIT: int = 16
 """ Maximum number of per-channel spike templates computed and cached in neural unit metrics file. """
 _READ_CHUNK_SIZE: int = 2400 * 1024
 """ Read chunk size when processing individual channel cache file or non-interleaved analog source file. """
+NCLIPS_FOR_PCA: int = 5000
+"""
+When PCA is performed on a single neural unit, we use this many randomly selected spike multi-clips (horizontal concat
+of spike clip on each of the up to 16 channels "near" the unit's primary channel) to calculate principal components. 
+When more than one unit is selected, PCA calculation uses the spike templates for all units on the 16 (or fewer)
+channels that are common to all units.
+"""
+SPIKE_CLIP_DUR_SEC: float = 0.002
+""" 
+Spike clip duration in seconds for purposes of principal component analysis. Cannot exceed 10ms, as that is
+the fixed length of the mean spike template waveforms used to compute the PCs.
+"""
+PRE_SPIKE_SEC: float = 0.001
+""" 
+Pre-spike interval included in spike clip, in seconds, for purposes of principal component analysis. **Do NOT
+change, as this is the pre-spike interval used to compute all mean spike template waveforms.**
+"""
+SPIKES_PER_BATCH: int = 20000
+""" Batch size used when projecting all spike clips for a unit to 2D space defined by 2 principal components. """
 
 
 def retrieve_trace_from_channel_cache_file(work_dir: WorkingDirectory, ch_idx: int, start: int, count: int) \
@@ -99,6 +116,10 @@ def cache_neural_units_all_channels(
         if len(emsg) > 0:
             raise Exception(emsg)
 
+        noise_levels = work_dir.load_channel_noise_from_cache()
+        if noise_levels is None:
+            raise Exception("Missing internal cache file containing channel noise estimates")
+
         if cancel.is_set():
             raise Exception("Task canceled")
 
@@ -110,25 +131,28 @@ def cache_neural_units_all_channels(
             progress_per_ch: Dict[int, int] = {idx: 0 for idx in work_dir.analog_channel_indices}
             next_progress_update_pct = 0
 
+            # NOTE: Previously used the multiprocess event object supplied as an argument as the cancel signal for
+            # the threads spawned here, but that has caused issues on MacOS. Instead, each process has its own
+            # thread-safe cancel event
+            thrd_cancel = Event()
+
             thrd_q = Queue()
             futures: List[Future] = \
-                [mt_exec.submit(_compute_unit_templates_on_channel, work_dir, idx, neurons, thrd_q, cancel,
+                [mt_exec.submit(_compute_unit_templates_on_channel, work_dir, idx, neurons, thrd_q, thrd_cancel,
                                 N_TEMPLATE_CLIPS)
                  for idx in work_dir.analog_channel_indices]
 
             first_error: Optional[str] = None
+            cancelled_already = False
             while 1:
+                trigger_cancel = False
                 try:
                     # progress updates are: (ch_idx, pct_complete, error_msg)
                     update = thrd_q.get(timeout=0.2)
                     if len(update[2]) > 0:
-                        # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
-                        # threads stop. And, just in case, cancel any threads that have not started.
-                        if not cancel.is_set():
-                            cancel.set()
+                        if first_error is None:
                             first_error = f"Error computing unit templates on channel {update[0]}: {update[2]}"
-                        for future in futures:
-                            future.cancel()
+                        trigger_cancel = True
                     else:
                         progress_per_ch[update[0]] = update[1]
                         total_progress = sum(progress_per_ch.values()) / len(progress_per_ch)
@@ -137,6 +161,19 @@ def cache_neural_units_all_channels(
                             next_progress_update_pct += 5
                 except Empty:
                     pass
+
+                # if no error and we haven't cancelled, check for cancel from master
+                if not (trigger_cancel or cancelled_already):
+                    trigger_cancel = cancel.is_set()
+
+                # trigger cancel on error or master cancel: Must cancel both running and not yet started tasks
+                # spawned by this process, and inform other processes spawned by master
+                if trigger_cancel and not cancelled_already:
+                    thrd_cancel.set()
+                    for future in futures:
+                        future.cancel()
+                    cancel.set()
+                    cancelled_already = True  # only need to do this once!
 
                 if all([future.done() for future in futures]):
                     break
@@ -159,7 +196,8 @@ def cache_neural_units_all_channels(
             best_snr_for_unit: Dict[str, float] = {uid: 0.0 for uid in uids}
             primary_ch_for_unit: Dict[str, int] = {uid: -1 for uid in uids}
             for future in futures:
-                ch_idx, noise, template_dict = future.result()
+                ch_idx, template_dict = future.result()
+                noise = noise_levels[ch_idx]
                 for uid in uids:
                     template = template_dict[uid]
                     snr = ((np.max(template) - np.min(template)) / (1.96 * noise)) if noise > 0 else 0.0
@@ -184,7 +222,7 @@ def cache_neural_units_all_channels(
 def _compute_unit_templates_on_channel(
         work_dir: WorkingDirectory, ch_idx: int, units: List[Neuron], progress_q: Queue,
         cancel: Event, n_max_spks: int) \
-        -> Optional[Tuple[int, float, Dict[str, np.ndarray]]]:
+        -> Optional[Tuple[int, Dict[str, np.ndarray]]]:
     """
     Helper task for cache_neural_units_all_channels() calculates neural unit mean spike waveforms on a single analog
     channel. Intended to be performed on a separate thread.
@@ -198,9 +236,8 @@ def _compute_unit_templates_on_channel(
     :param cancel: A thread-safe event object which is set to request premature cancellation of this task function.
     :param n_max_spks: The maximum number of spike waveform clips to process when computing the spike templates.
         If <= 0, then the entire spike train is included in the calculation.
-    :return: A 3-tuple [ch_idx, noise, template_dict], where: ch_idx is the index of the analog channel processed;
-        noise is the calculated noise level on the channel (needed to compute SNR for each unit); and template_dict is a
-        dictionary, keyed by unit UID, holding the computed spike templates. **Both noise level and template samples
+    :return: A 2-tuple [ch_idx, template_dict], where: ch_idx is the index of the analog channel processed; and
+        template_dict is a dictionary, keyed by unit UID, holding the computed spike templates. **Template samples
         are in raw ADC units (NOT converted to microvolts).** If task fails, returns None.
     """
     try:
@@ -296,7 +333,6 @@ def _compute_unit_templates_on_channel(
             for _k in range(n):
                 _s = clip_starts[i_clip + _k][0] - chunk_s
                 clip = chunk[_s:_s + template_len]
-                block_medians.append(np.median(np.abs(clip)))
 
                 # accumulate extracted spike clip for the relevant unit
                 i_unit = clip_starts[i_clip + _k][1]
@@ -307,7 +343,6 @@ def _compute_unit_templates_on_channel(
 
         # extract and accumulate all spike waveform clips, across all units, from the source file. If we're dealing with
         # a flat binary file with interleaving, one sample is actually one scan of the N channels recorded!
-        block_medians: List[float] = list()  # for computing noise level on channel
         with open(ch_file, 'rb') as src:
             clip_idx = 0
             # for the prefiltered non-interleaved flat binary source, we need the offset to the start of the
@@ -328,8 +363,6 @@ def _compute_unit_templates_on_channel(
                         curr_clip = curr_clip.reshape(-1, n_ch).transpose()
                         curr_clip = curr_clip[ch_idx]
 
-                    block_medians.append(np.median(np.abs(curr_clip)))  # for later noise calc
-
                     # accumulate extracted spike clip for the relevant unit
                     unit_idx = clip_starts[clip_idx][1]
                     template = unit_templates[unit_idx]
@@ -344,7 +377,6 @@ def _compute_unit_templates_on_channel(
 
         # prepare mean spike waveform template and compute SNR for each unit on the specified channel.
         template_dict: Dict[str, np.ndarray] = dict()
-        noise = np.median(block_medians) * 1.4826
         for i in range(n_units):
             num_clips = unit_num_clips[i]
             template: np.ndarray = unit_templates[i]
@@ -352,7 +384,7 @@ def _compute_unit_templates_on_channel(
                 template /= num_clips
             template_dict[units[i].uid] = template
 
-        return ch_idx, noise, template_dict
+        return ch_idx, template_dict
 
     except Exception as e:
         progress_q.put_nowait((ch_idx, 0, str(e)))
@@ -398,7 +430,8 @@ def cache_neural_units_select_channels(
         emsg, neurons = work_dir.load_neural_units()
         if len(emsg) > 0:
             raise Exception(emsg)
-
+        if not work_dir.channel_noise_cache_file_exists():
+            raise Exception('Missing channel noise cache')
         if cancel.is_set():
             raise Exception("Task canceled")
 
@@ -410,24 +443,27 @@ def cache_neural_units_select_channels(
             progress_per_unit: Dict[str, int] = {u.uid: 0 for u in neurons}
             next_progress_update_pct = 0
 
+            # NOTE: Previously used the multiprocess event object supplied as an argument as the cancel signal for
+            # the threads spawned here, but that has caused issues on MacOS. Instead, each process has its own
+            # thread-safe cancel event
+            thrd_cancel = Event()
+
             thrd_q = Queue()
             futures: List[Future] = \
                 [mt_exec.submit(_compute_templates_and_cache_metrics_for_unit, work_dir, u, unit_to_primary[u.uid],
-                                thrd_q, cancel, N_TEMPLATE_CLIPS) for u in neurons]
+                                thrd_q, thrd_cancel, N_TEMPLATE_CLIPS) for u in neurons]
 
             first_error: Optional[str] = None
+            cancelled_already = False
             while 1:
+                trigger_cancel = False
                 try:
                     # progress updates are: (uid, pct_complete, error_msg)
                     update = thrd_q.get(timeout=0.2)
                     if len(update[2]) > 0:
-                        # an error has occurred. If error is not bc task was cancelled, signal cancel now so that
-                        # remaining running threads abort. Also cancel any unstarted threads.
-                        if not cancel.is_set():
-                            cancel.set()
+                        if first_error is None:
                             first_error = f"Error caching metrics for unit {update[0]}: {update[2]}"
-                        for future in futures:
-                            future.cancel()
+                        trigger_cancel = True
                     else:
                         progress_per_unit[update[0]] = update[1]
                         total_progress = sum(progress_per_unit.values()) / len(progress_per_unit)
@@ -436,6 +472,19 @@ def cache_neural_units_select_channels(
                             next_progress_update_pct += 5
                 except Empty:
                     pass
+
+                # if no error and we haven't cancelled, check for cancel from master
+                if not (trigger_cancel or cancelled_already):
+                    trigger_cancel = cancel.is_set()
+
+                # trigger cancel on error or master cancel: Must cancel both running and not yet started tasks
+                # spawned by this process, and inform other processes spawned by master
+                if trigger_cancel and not cancelled_already:
+                    thrd_cancel.set()
+                    for future in futures:
+                        future.cancel()
+                    cancel.set()
+                    cancelled_already = True  # only need to do this once!
 
                 if all([future.done() for future in futures]):
                     break
@@ -467,12 +516,12 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
 
     NOTE: The primary channel is "identified" by computing templates and SNR for a small random sampling of clips
     across ALL available channels, then choosing the channel on which the unit's SNR was greatest. To compute the
-    cached templates, many more clips are averaged, so the identify of the primary channel could change -- although it
+    cached templates, many more clips are averaged, so the identity of the primary channel could change -- although it
     is assumed to be "in the neighborhood" of the originally identified primary channel.
 
     :param work_dir: The XSort working directory.
     :param unit: The neural unit for which metrics are to be computed.
-    :param primary_ch: Index of the analog data channel designated as the primary channel for the neural unit. Given
+    :param primary_ch: Index P of the analog data channel designated as the primary channel for the neural unit. Given
         N = N_MAX_TEMPLATES_PER_UNIT and K = total # of analog channels, the method compute spike templates on
         channels [P-N/2 .. P-N/2 + N-1]. If P < N/2, then [0 .. N-1] is used; if P > K-N/2, then [K-N, K-1] is used.
     :param progress_q: A thread-safe queue for delivering progress updates. Each "update" is in the form of a
@@ -481,16 +530,17 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
     :param cancel: A thread-safe event object which is set to request premature cancellation of this task function.
     :param n_max_spks: The maximum number of spike waveform clips to process when computing the spike templates.
         If <= 0, then the entire spike train is included in the calculation.
-    :return: A 4-tuple [uid, snr, primary_ch, template_dict], where: uid is the neural unit's UID; snr is the best
-        SNR across the set of analog channels analyzed, primary_ch is the index of the analog channel exhibiting the
-        best SNR (**this could be different than the initially specified primary channel!!**); and template_dict is a
-        dictionary, keyed by channel index, holding the unit's computed spike template for that channel. **Template
-        samples are converted to microvolts.** If task fails, returns None.
     """
     try:
+        # expect to find per-channel noise levels in internal cache file
+        noise_levels = work_dir.load_channel_noise_from_cache()
+        if noise_levels is None:
+            raise Exception("Missing or unreadable channel noise cache")
+
         # the list of channel indices on which we'll compute unit templates
         n_ch, half_w = work_dir.num_analog_channels(), int(N_MAX_TEMPLATES_PER_UNIT/2)
-        first_ch = 0 if primary_ch < half_w else (n_ch-half_w if (primary_ch > n_ch-half_w) else primary_ch-half_w)
+        first_ch = 0 if primary_ch < half_w else \
+            (n_ch-N_MAX_TEMPLATES_PER_UNIT if (primary_ch > n_ch-half_w) else primary_ch-half_w)
         ch_indices = [i + first_ch for i in range(N_MAX_TEMPLATES_PER_UNIT)]
 
         # we either read directly from the original, prefiltered flat binary source or a set of internal cache files
@@ -513,16 +563,15 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
             n_bytes_per_sample = 2 * n_ch if interleaved else 2
             if not work_dir.analog_source.is_file():
                 raise Exception(f"Original flat binary analog source is missing in working directory.")
-            if work_dir.analog_source.stat().st_size % n_bytes_per_sample != 0:
+            if work_dir.analog_source.stat().st_size % (n_ch * 2) != 0:
                 raise Exception(f"Bad file size for analog source file: {work_dir.analog_source.name}")
-            num_samples_recorded = int(work_dir.analog_source.stat().st_size / n_bytes_per_sample)
+            num_samples_recorded = int(work_dir.analog_source.stat().st_size / (n_ch * 2))
 
         samples_per_sec = work_dir.analog_sampling_rate
         template_len = int(samples_per_sec * 0.01)
 
-        # for accumulating clips and noise level medians on each channel
+        # for accumulating clips on each channel
         template_dict: Dict[int, np.ndarray] = {i: np.zeros(template_len, dtype='<f') for i in ch_indices}
-        clip_medians: Dict[int, List[float]] = {i: list() for i in ch_indices}
 
         # compute start indices of ALL 10-ms waveform clips to be culled from analog channels
         clip_starts: List[int]
@@ -544,7 +593,6 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
         if len(clip_starts) == 0:
             raise Exception("No spike clips to process!")
 
-        # desired block read size in bytes: one template length!
         n_bytes_per_clip = template_len * n_bytes_per_sample
 
         # for tracking overall progress
@@ -561,21 +609,32 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
                 with open(ch_file, 'rb') as src:
                     clip_idx = 0
                     while clip_idx < len(clip_starts):
-                        # seek to start of next clip to be processed, then read in THAT CLIP ONLY
-                        sample_idx = clip_starts[clip_idx]
-                        src.seek(sample_idx * n_bytes_per_sample)
-                        curr_clip = np.frombuffer(src.read(n_bytes_per_clip), dtype='<h')
+                        # seek to start of next clip to be processed
+                        chunk_s = clip_starts[clip_idx]
+                        src.seek(chunk_s * n_bytes_per_sample)
 
-                        clip_medians[ch_idx].append(np.median(np.abs(curr_clip)))  # for later noise calc
+                        # read a chunk of size M <= _READ_CHUNK_SIZE that fully contains 1 or more clips
+                        n = 1
+                        while ((clip_idx + n < len(clip_starts)) and
+                               ((clip_starts[clip_idx + n - 1] - chunk_s) * n_bytes_per_sample +
+                                n_bytes_per_clip < _READ_CHUNK_SIZE)):
+                            n += 1
+                        chunk_sz = (clip_starts[clip_idx + n - 1] - chunk_s) * n_bytes_per_sample + n_bytes_per_clip
+                        chunk = np.frombuffer(src.read(chunk_sz), dtype='<h')
 
-                        # accumulate extracted spike clip for the relevant unit
-                        np.add(per_ch_template, curr_clip, out=per_ch_template)
-                        clip_idx += 1
+                        # accumulate all clips in that chunk
+                        for k in range(n):
+                            s = clip_starts[clip_idx + k] - chunk_s
+                            clip = chunk[s:s + template_len]
+
+                            # accumulate extracted spike clip for the relevant unit
+                            np.add(per_ch_template, clip, out=per_ch_template)
+                        clip_idx += n
 
                         # get ready for next clip, check for cancellation, and report progress
                         if cancel.is_set():
-                            return
-                        total_clips_so_far += 1
+                            raise Exception("Task cancelled")
+                        total_clips_so_far += n
                         pct_done = int(total_clips_so_far * 100 / total_clips)
                         if pct_done >= next_update_pct:
                             progress_q.put_nowait((unit.uid, pct_done, ""))
@@ -589,21 +648,32 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
                     clip_idx = 0
                     per_ch_template = template_dict[ch_idx]
                     while clip_idx < len(clip_starts):
-                        # seek to start of next clip to be processed, then read in THAT CLIP ONLY
-                        sample_idx = clip_starts[clip_idx]
-                        src.seek(ofs + sample_idx * n_bytes_per_sample)
-                        curr_clip = np.frombuffer(src.read(n_bytes_per_clip), dtype='<h')
+                        # seek to start of next clip to be processed
+                        chunk_s = clip_starts[clip_idx]
+                        src.seek(ofs + chunk_s * n_bytes_per_sample)
 
-                        clip_medians[ch_idx].append(np.median(np.abs(curr_clip)))  # for later noise calc
+                        # read a chunk of size M <= _READ_CHUNK_SIZE that fully contains 1 or more clips
+                        n = 1
+                        while ((clip_idx + n < len(clip_starts)) and
+                               ((clip_starts[clip_idx + n - 1] - chunk_s) * n_bytes_per_sample +
+                                n_bytes_per_clip < _READ_CHUNK_SIZE)):
+                            n += 1
+                        chunk_sz = (clip_starts[clip_idx + n - 1] - chunk_s) * n_bytes_per_sample + n_bytes_per_clip
+                        chunk = np.frombuffer(src.read(chunk_sz), dtype='<h')
 
-                        # accumulate extracted spike clip for the relevant unit
-                        np.add(per_ch_template, curr_clip, out=per_ch_template)
-                        clip_idx += 1
+                        # accumulate all clips in that chunk
+                        for k in range(n):
+                            s = clip_starts[clip_idx + k] - chunk_s
+                            clip = chunk[s:s + template_len]
+
+                            # accumulate extracted spike clip for the relevant unit
+                            np.add(per_ch_template, clip, out=per_ch_template)
+                        clip_idx += n
 
                         # get ready for next clip, check for cancellation, and report progress
                         if cancel.is_set():
-                            return
-                        total_clips_so_far += 1
+                            raise Exception("Task cancelled")
+                        total_clips_so_far += n
                         pct_done = int(total_clips_so_far * 100 / total_clips)
                         if pct_done >= next_update_pct:
                             progress_q.put_nowait((unit.uid, pct_done, ""))
@@ -624,15 +694,14 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
                     # accumulate clips and clip medians for all the channels we care about
                     for ch_idx in ch_indices:
                         per_ch_clip = curr_clip[ch_idx]
-                        clip_medians[ch_idx].append(np.median(np.abs(per_ch_clip)))
                         per_ch_template = template_dict[ch_idx]
                         np.add(per_ch_template, per_ch_clip, out=per_ch_template)
                     clip_idx += 1
 
                     # get ready for next clip, check for cancellation, and report progress
-                    if cancel.is_set():
-                        return
                     total_clips_so_far += len(ch_indices)
+                    if cancel.is_set():
+                        raise Exception("Task cancelled")
                     pct_done = int(total_clips_so_far * 100 / total_clips)
                     if pct_done >= next_update_pct:
                         progress_q.put_nowait((unit.uid, pct_done, ""))
@@ -642,10 +711,10 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
         best_snr: float = 0
         primary_ch = -1
         for i in ch_indices:
-            noise = np.median(clip_medians[i]) * 1.4826
+            noise = noise_levels[i]
             template = template_dict[i]
             template = template / len(clip_starts)
-            snr = (np.max(template) - np.min(template)) / (1.96 * noise)
+            snr = 0 if noise <= 0 else (np.max(template) - np.min(template)) / (1.96 * noise)
             if snr > best_snr:
                 best_snr = snr
                 primary_ch = i
@@ -662,10 +731,10 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
         progress_q.put_nowait((unit.uid, 0, str(e)))
 
 
-def identify_unit_primary_channels_in_range(
-        dir_path: str, start: int, count: int, progress_q: Queue, cancel: Event) -> Dict[str, Tuple[int, float]]:
+def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: int, uids: List[str], progress_q: Queue,
+                                            cancel: Event) -> Dict[str, Tuple[int, float]]:
     """
-    Estimate SNR for each unit in the XSort working directory's neural unit source file for each analog channel in the
+    Estimate SNR for some or all neural units found in the XSort working directory for each analog channel in the
     range specified, and for each unit return the index of the channel for which the unit's SNR was greatest.
 
     This task function is intended to run in a separate process. The task manager should split up the entire set of
@@ -680,9 +749,15 @@ def identify_unit_primary_channels_in_range(
       number of clips per unit.** The "primary channel" for each unit is then identified as the analog channel on which
       SNR is greatest. Then more accurate templates (averaging many more spike waveform clips) can be computed only for
       a small number of data channels "in the neighborhood" of the primary channel.
-    - This method esimates the channel noise level by sampling the median value of each extracted clip rather than the
-      the entire recording on that channel. But tests have indicated this still gives a reasonable estimate of unit SNR
-      on the channel.
+    - Use case: Caching metrics for a newly derived unit. When a new unit is derived, XSort immediately writes the
+      derived unit's spike times to an **incomplete** unit cache file, and eventually spawns a background task to
+      find the unit's primary channel, calculate spike templates, and write a complete cache file. To handle this use
+      case, explicitly specify the UIDs of the units to be cache. When an explicit list of UIDs is given, this method
+      will load the unit data from the corresponding cache file (if present), else from the original unit source file.
+      When the list is empty, the method finds the primary channel of every unit stored in the original neural unit
+      source file ONLY.
+    - This method assumes channel noise levels have already been estimated and cached in a dedicated internal cache
+      file ('.xs.noise') within the working directory.
     - The analog data is located in individual channel cache files, or in the original prefiltered flat binary file,
       with the channels streams interleaved or not.
     - Extracting one clip at a time can be problematic -- the total number of file seek-and-read operations would be
@@ -695,6 +770,10 @@ def identify_unit_primary_channels_in_range(
     :param start: Index of first channel in the range, K
     :param count: The number of channels N in the range. If K+N is greater than the number of channels
         recorded, then the task processes all remaining channels starting at K.
+    :param uids: If not empty, this list contains the UIDs of select neural units for which a primary channel
+        designation is required. If empty, the method finds the primary channel for **every** unit found in the original
+        neural unit source file in the working directory. Specify a list when you need to cache metrics for a newly
+        derived unit, or to rebuild one or missing unit cache files.
     :param progress_q: A process-safe queue for delivering progress updates. Each update is in the form of a 3-tuple
         (start, pct, emsg), where start is the index of the first channel processed (int), pct is the percent complete
         (int), and emsg is an error description if the task has failed (otherwise an empty string).
@@ -707,14 +786,32 @@ def identify_unit_primary_channels_in_range(
         emsg, work_dir = WorkingDirectory.load_working_directory(Path(dir_path))
         if work_dir is None:
             raise Exception(emsg)
-        emsg, units = work_dir.load_neural_units()
+        emsg, original_units = work_dir.load_neural_units()
         if len(emsg) > 0:
             raise Exception(emsg)
+        noise_levels = work_dir.load_channel_noise_from_cache()
+        if noise_levels is None:
+            raise Exception('Missing or unreadable channel noise cache')
         n_ch = work_dir.num_analog_channels()
         if start < 0 or start >= n_ch:
             raise Exception("Invalid channel range")
         elif start + count > n_ch:
             count = n_ch - start
+
+        # if an explicit list of UIDs is specified, only find primary channel for each of the listed units. In this
+        # case we expect an INCOMPLETE metrics file to be present for each UID, or if not, it must be among the units
+        # defined in the origal neural unit source
+        units: List[Neuron] = list()
+        if len(uids) > 0:
+            for uid in uids:
+                unit = work_dir.load_neural_unit_from_cache(uid)
+                if unit is None:
+                    unit = next((u for u in original_units if u.uid == uid), None)
+                    if unit is None:
+                        raise Exception(f"Nonexistent UID specified: {uid}")
+                units.append(unit)
+        else:
+            units.extend(original_units)
 
         if cancel.is_set():
             raise Exception("Task canceled")
@@ -739,7 +836,7 @@ def identify_unit_primary_channels_in_range(
             n_bytes_per_sample = 2 * n_ch if interleaved else 2
             if not work_dir.analog_source.is_file():
                 raise Exception(f"Original flat binary analog source is missing in working directory.")
-            if work_dir.analog_source.stat().st_size % n_bytes_per_sample != 0:
+            if work_dir.analog_source.stat().st_size % (2*n_ch) != 0:
                 raise Exception(f"Bad file size for analog source file: {work_dir.analog_source.name}")
             num_samples_recorded = int(work_dir.analog_source.stat().st_size / (2*n_ch))
 
@@ -782,11 +879,6 @@ def identify_unit_primary_channels_in_range(
             clip_starts.pop()
         if len(clip_starts) == 0:
             raise Exception("No spike clips to process!")
-
-        # accumulate clip medians for computing noise level on each channel
-        clip_medians: Dict[int, List[float]] = dict()
-        for i in range(count):
-            clip_medians[i+start] = list()
 
         # for tracking overall progress
         next_update_pct = 0
@@ -834,7 +926,6 @@ def identify_unit_primary_channels_in_range(
             for _k in range(n):
                 _s = clip_starts[i_clip + _k][0] - chunk_s
                 clip = chunk[_s:_s + template_len]
-                clip_medians[i_ch].append(np.median(np.abs(clip)))
 
                 # accumulate extracted spike clip for the relevant unit
                 i_unit = clip_starts[i_clip + _k][1]
@@ -843,8 +934,7 @@ def identify_unit_primary_channels_in_range(
                 unit_num_clips[i_unit][i_ch] += 1
             return n
 
-        # accumulate spike waveform clips across all units, plus clip medians, from the channel cache files or the
-        # flat binary source file.
+        # accumulate spike waveform clips across all units from the channel cache files or the flat binary source file.
         n_bytes_per_clip = template_len * n_bytes_per_sample
         if work_dir.need_analog_cache:
             # CASE 1: individual binary cache file for each analog channel stream
@@ -892,7 +982,6 @@ def identify_unit_primary_channels_in_range(
                     for i in range(count):
                         ch_idx = i + start
                         per_ch_clip = curr_clip[ch_idx]
-                        clip_medians[ch_idx].append(np.median(np.abs(per_ch_clip)))
                         per_ch_template = unit_templates[unit_idx][ch_idx]
                         np.add(per_ch_template, per_ch_clip, out=per_ch_template)
                         unit_num_clips[unit_idx][ch_idx] += 1
@@ -900,11 +989,6 @@ def identify_unit_primary_channels_in_range(
 
                     total_clips_so_far += count
                     next_update_pct = check_progress(next_update_pct)
-
-        # noise estimate on each channel in channel bank
-        noise_dict: Dict[int, float] = dict()
-        for i in range(count):
-            noise_dict[i+start] = np.median(clip_medians[i+start]) * 1.4826
 
         # for each unit, find which channel in the range had the highest SNR.
         res: Dict[str, Tuple[int, float]] = dict()
@@ -917,7 +1001,7 @@ def identify_unit_primary_channels_in_range(
                 if num_clips_dict[ch_idx] > 0:
                     t /= num_clips_dict[ch_idx]
                 # if zero noise (in case a channel is dead/connected to ground) SNR is set to 0.
-                snr = 0 if noise_dict[ch_idx] <= 0 else (np.max(t) - np.min(t)) / (1.96 * noise_dict[ch_idx])
+                snr = 0 if noise_levels[ch_idx] <= 0 else (np.max(t) - np.min(t)) / (1.96 * noise_levels[ch_idx])
                 if snr > best_snr:
                     best_snr = snr
                     primary_ch = ch_idx
@@ -942,16 +1026,19 @@ def cache_analog_channels_in_range(dir_path: str, start: int, count: int, progre
 
     - Two major use cases -- interleaved or noninterleaved source. The Omniplex file is a noninterleaved source with a
       complex structure compared to a flat binary noninterleaved source.
-    - Prefiltered flat binary source files need not be cached. The method fails is the source is prefiltered. An
+    - Prefiltered flat binary source files need not be cached. The method fails if the source is prefiltered. An
       Omniplex file is always cached because its file structure is complex and it typically contains wideband data.
-    - Strategy for noninterleaved case: Use a 4-count thread pool and assign each channel to a separate thread. Because
+    - Strategy for noninterleaved case: Use a 16-count thread pool and assign each channel to a separate thread. Because
       the source is noninterleaved, each thread processes a different part of the source file. Read in and process in
       1200K chunks. [In testing with the 37GB 385-channel Neuropixel data, using 4 threads and 1200K read chunk sizes
       got the total execution time -- with the 385 channels split into 6 ranges on a 6-core machine -- down to ~55s;
       increasing the number of threads or the read chunk size did not further improve performance.]
     - When I used 5 or more threads in each process for the noninterleaved strategy, the task sometimes fails on a
       Errno 61 - Connection refused socket error. A CPython bug report indicated this is a MacOS-specific bug in
-      Python's multiprocessing library, and a backport bug fix is provided for 3.11.
+      Python's multiprocessing library, and a backport bug fix is provided for 3.11. Later I realized this was
+      happening because I had lots of threads across multiple processes accessing the same process-safe Event object
+      to test for user cancel. That required establishing lots of socket connections (in multiprocessing.manager), which
+      led to the Errno 61 issues. I changed the implementation to avoid this.
     - Strategy for interleaved case: The method sequentially reads in a large chunk, deinterleaves the streams, filters
       the streams for the channels in the range specified, and appends each channel's block to the corresponding cache
       file. Typical execution time is 150s on a 6-core machine. It is fundamentally slower than the noninterleaved case
@@ -1014,24 +1101,29 @@ def cache_analog_channels_in_range(dir_path: str, start: int, count: int, progre
             task_func = _cache_pl2_analog_channel if work_dir.uses_omniplex_as_analog_source else \
                 _cache_noninterleaved_analog_channel
 
-            with ThreadPoolExecutor(max_workers=4) as mt_exec:
+            with ThreadPoolExecutor(max_workers=16) as mt_exec:
+                # NOTE: Previously used the multiprocess event object supplied as an argument as the cancel signal for
+                # the threads spawned here, but that has caused issues on MacOS. Instead, each process has its own
+                # thread-safe cancel event
+                thrd_cancel = Event()
+
                 thrd_q = Queue()
-                futures: List[Future] = [mt_exec.submit(task_func, work_dir, i+start, thrd_q, cancel)
+                futures: List[Future] = [mt_exec.submit(task_func, work_dir, i+start, thrd_q, thrd_cancel)
                                          for i in range(count)]
 
                 first_error: Optional[str] = None
+                cancelled_already = False
                 while 1:
+                    trigger_cancel = False
                     try:
                         # progress updates from per-channel thread tasks are: (ch_idx, pct_complete, error_msg)
                         update = thrd_q.get(timeout=0.2)
                         if len(update[2]) > 0:
                             # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
                             # threads stop. Also cancel any tasks that have not begun!
-                            if not cancel.is_set():
-                                cancel.set()
+                            if first_error is None:
                                 first_error = f"Error caching channel {update[0]}: {update[2]}"
-                            for future in futures:
-                                future.cancel()
+                            trigger_cancel = True
                         else:
                             progress_per_ch[update[0]] = update[1]
                             total_progress = sum(progress_per_ch.values()) / len(progress_per_ch)
@@ -1040,6 +1132,19 @@ def cache_analog_channels_in_range(dir_path: str, start: int, count: int, progre
                                 next_update_pct += 5
                     except Empty:
                         pass
+
+                    # if no error and we haven't cancelled, check for cancel from master
+                    if not (trigger_cancel or cancelled_already):
+                        trigger_cancel = cancel.is_set()
+
+                    # trigger cancel on error or master cancel: Must cancel both running and not yet started tasks
+                    # spawned by this process, and inform other processes spawned by master
+                    if trigger_cancel and not cancelled_already:
+                        thrd_cancel.set()
+                        for future in futures:
+                            future.cancel()
+                        cancel.set()
+                        cancelled_already = True  # only need to do this once!
 
                     if all([future.done() for future in futures]):
                         break
@@ -1235,498 +1340,637 @@ def _cache_noninterleaved_analog_channel(work_dir: WorkingDirectory, idx: int, u
         upd_q.put_nowait((idx, 100, str(e)))
 
 
-def delete_internal_cache_files(work_dir: WorkingDirectory, del_analog: bool = True, del_units: bool = True) -> None:
+def estimate_noise_on_channels_in_range(
+        work_dir: WorkingDirectory, start: int, count: int, upd_q: Queue, cancel: Event) -> Dict[int, float]:
     """
-    Remove all internal analog data and unit metrics cache files from an XSort working directory.
+    Estimates analog channel noise using 100 random 10-ms clips selected across the entire recording without regard to
+    unit spike times, concatenating clips into a long 1D vector V, then: M = np.median(V) and noise =
+    1.4826*np.median(np.abs(V-M)).
 
-    :param work_dir: The working directory.
-    :param del_analog: If True, analog data cache files are removed. Default = True.
-    :param del_units: If True, neural unit metrics cache files are removed. Default = True.
-    """
-    if not (del_analog or del_units):
-        return
-    for p in work_dir.path.iterdir():
-        if ((del_analog and p.name.startswith(CHANNEL_CACHE_FILE_PREFIX)) or
-                (del_units and p.name.startswith(UNIT_CACHE_FILE_PREFIX))):
-            p.unlink(missing_ok=True)
+    This task function is intended to run in a separate thread. The task manager should split up the entire set of
+    analog channels into smaller contiguous ranges, each of which is assigned to a different thread.
 
+    NOTE: We conducted tests using 100, 200, 500, 100 and 10000 clips and the results were not significantly different.
+    Using spike times to select clips for noise estimation also did not change the results. Performance was very
+    drammatically improved by using the algorigthm described above, rather than computing the np.median(nb.abs(clip))
+    for every extracted clip, then taking the median of the list of clip medians as the noise level. Also, the algorithm
+    described above replicates the Wikipedia description of estimating standard deviation of normally distributed data
+    from the median absolute deviation (MAD) of that data.
 
-def extract_template_clips_interleaved_analog_src(
-        work_dir: WorkingDirectory, n_clips: int, n_units: int, n_ch_proc: int, upd_q: Queue, cancel: Event) -> None:
-    """
-    Task function called by text fixture -- assessing single-threaded performance when extracting unit template clips
-    from a very large interleaved flat binary source.
-
-    :param work_dir: The XSort working directory.
-    :param n_clips: Number of clips per unit.
-    :param n_units: Number of units to process.
-    :param n_ch_proc: Number of channels to process.
-    :param upd_q: A thread-safe queue for delivering progress updates. Each update is in the form of a 2-tuple
-        (pct, emsg), pct is the percent complete (int), and emsg is an error description if the task has failed
-        (otherwise an empty string).
+    :param work_dir: The XSort working directory. If analog channel caching is required, this method fails if any
+        channel cache file is missing.
+    :param start: Index K of first analog data channel to process.
+    :param count: The number of channels to process, N. If K+N > the number of analog channels available, the method
+        processes the remaining channels starting at K.
+    :param upd_q: A thread-safe queue for delivering progress updates. Each update is in the form of a 3-tuple
+        (start, pct, emsg), where start is the index of the first channel in the range handled by this task, pct is the
+        percent complete (int), and emsg is an error description if the task has failed (otherwise an empty string).
     :param cancel: A thread-safe event object which is set to request premature cancellation of this task function.
+    :return: A dictionary mapping analog channel index to the estimate noise on that channel. Note that noise is in
+        raw ADC units, NOT volts. On failure, returns an empty dict.
     """
     try:
-        if not work_dir.is_analog_data_interleaved:
-            raise Exception("Expected interleaved analog source")
         n_ch = work_dir.num_analog_channels()
+        if start < 0 or start >= n_ch:
+            raise Exception("Invalid channel range")
+        elif start + count > n_ch:
+            count = n_ch - start
+
+        # we either read directly from the original, prefiltered flat binary source or a set of internal cache files
+        interleaved = False
+        n_bytes_per_sample = 2
+        n_samples = 0
+        if work_dir.need_analog_cache:
+            for i in range(count):
+                ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i+start)}")
+                if not ch_file.is_file():
+                    raise Exception(f"Missing internal analog cache file {ch_file.name}")
+                elif ch_file.stat().st_size % n_bytes_per_sample != 0:
+                    raise Exception(f"Bad file size for internal analog cache file {ch_file.name}")
+                elif n_samples == 0:
+                    n_samples = int(ch_file.stat().st_size / n_bytes_per_sample)
+                elif n_samples != int(ch_file.stat().st_size / n_bytes_per_sample):
+                    raise Exception(f"All internal analog cache files must be the same size!")
+        else:
+            interleaved = work_dir.is_analog_data_interleaved
+            n_bytes_per_sample = 2 * n_ch if interleaved else 2
+            if not work_dir.analog_source.is_file():
+                raise Exception(f"Original flat binary analog source is missing in working directory.")
+            if work_dir.analog_source.stat().st_size % n_bytes_per_sample != 0:
+                raise Exception(f"Bad file size for analog source file: {work_dir.analog_source.name}")
+            n_samples = int(work_dir.analog_source.stat().st_size / (2*n_ch))
+
         samples_per_sec = work_dir.analog_sampling_rate
-        file_size = work_dir.analog_source.stat().st_size
-        if file_size % (2 * n_ch) != 0:
-            raise Exception(f'Flat binary file size inconsistent with specified number of channels ({n_ch})')
-        n_samples = int(file_size / (2 * n_ch))
         template_len = int(samples_per_sec * 0.01)
 
-        # for interleaved flat binary source, each "sample" is an array of N samples - one per channel
-        n_bytes_per_sample = n_ch * 2
-        n_bytes_per_clip = template_len * n_bytes_per_sample
-
-        emsg, neurons = work_dir.load_neural_units()
-        if len(emsg) > 0:
-            raise Exception(emsg)
-        n_units = min(n_units, len(neurons))
-
-        n_ch_proc = min(n_ch_proc, n_ch)
-        unit_num_clips: List[Dict[int, int]] = list()
-        unit_templates: List[Dict[int, np.ndarray]] = list()
-        clip_starts: List[Tuple[int, int]] = list()
-        for _ in range(n_units):
-            template_dict: Dict[int, np.ndarray] = dict()
-            num_clips_dict: Dict[int, int] = dict()
-            for i in range(n_ch_proc):
-                template_dict[i] = np.zeros(template_len, dtype='<f')
-                num_clips_dict[i] = 0
-            unit_templates.append(template_dict)
-            unit_num_clips.append(num_clips_dict)
-
-        for unit_idx in range(n_units):
-            u = neurons[unit_idx]
-            n_spks = min(u.num_spikes, n_clips)
-            if n_spks < u.num_spikes:
-                spike_indices = sorted(random.sample(range(u.num_spikes), n_spks))
-                unit_clip_starts = [(int((u.spike_times[i] - 0.001) * samples_per_sec), unit_idx)
-                                    for i in spike_indices]
-            else:
-                unit_clip_starts = [(int((t - 0.001) * samples_per_sec), unit_idx) for t in u.spike_times]
-            clip_starts.extend(unit_clip_starts)
-
-        # clips must be in chronological order!
-        clip_starts.sort(key=lambda x: x[0])
-
-        # strip off clips that are cut off at beginning or end of recording
-        while (len(clip_starts) > 0) and (clip_starts[0][0] < 0):
-            clip_starts.pop(0)
-        while (len(clip_starts) > 0) and (clip_starts[-1][0] + template_len >= n_samples):
-            clip_starts.pop()
-        if len(clip_starts) == 0:
-            raise Exception("No spike clips to process!")
-
-        # we compute per-channel clip medians on a limited number of extracted clips to assess noise on each channel
-        # TODO: CONTINUE HERE 3/27 -- Want to calculate noise using different numbers of clips and see what how the
-        #   noise levels change across channels. Do in separate test fixture....
-        clip_medians: Dict[int, List[float]] = dict()
-        for i in range(n_ch_proc):
-            clip_medians[i] = list()
-
-        with open(work_dir.analog_source, 'rb') as src:
-            clip_idx, next_update_pct = 0, 0
-            while clip_idx < len(clip_starts):
-                # seek to start of next clip to be processed
-                chunk_s = clip_starts[clip_idx][0]
-                src.seek(chunk_s * n_bytes_per_sample)
-
-                # read a chunk of size M <= _READ_CHUNK_SIZE that fully contains 1 or more clips. The goal here is to
-                # reduce the total number of reads required to process file. This significantly improved performance.
-                n = 1
-                while ((clip_idx + n < len(clip_starts)) and
-                       ((clip_starts[clip_idx + n - 1][0] - chunk_s) * n_bytes_per_sample +
-                        n_bytes_per_clip < _READ_CHUNK_SIZE)):
-                    n += 1
-                chunk_sz = (clip_starts[clip_idx + n - 1][0] - chunk_s) * n_bytes_per_sample + n_bytes_per_clip
-                chunk = np.frombuffer(src.read(chunk_sz), dtype='<h')
-
-                # deinterleave the chunk
-                chunk = chunk.reshape(-1, n_ch).transpose()
-
-                # process all clips in the chunk
-                for k in range(n):
-                    start, unit_idx = clip_starts[clip_idx + k][0] - chunk_s, clip_starts[clip_idx + k][1]
-                    for ch_idx in range(n_ch_proc):
-                        per_ch_clip = chunk[ch_idx][start:start + template_len]
-                        template = unit_templates[unit_idx][ch_idx]
-                        np.add(template, per_ch_clip, out=template)
-                        unit_num_clips[unit_idx][ch_idx] += 1
-                clip_idx += n
-
-                if cancel.is_set():
-                    raise Exception("Task cancelled")
-                pct = int(clip_idx * 100 / len(clip_starts))
-                if pct >= next_update_pct:
-                    upd_q.put_nowait((pct, ""))
-                    next_update_pct += 5
-
-        avg_clip_delta = 0
-        for i in range(len(clip_starts)-1):
-            avg_clip_delta += clip_starts[i+1][0] - clip_starts[i][0]
-        avg_clip_delta /= len(clip_starts) - 1
-        print(f"Total clips = {len(clip_starts) * n_ch_proc}, avg clip start delta = {avg_clip_delta:.1f}", flush=True)
-
-    except Exception as e:
-        upd_q.put_nowait((0, str(e)))
-
-
-def estimate_noise_interleaved_analog_src(work_dir: WorkingDirectory, upd_q: Queue, cancel: Event) -> None:
-    """
-    Task function called by test fixture -- that estimates noise level on every channel in an interleaved flat binary
-    analog source using different strategies.
-
-    :param work_dir: The XSort working directory.
-    :param upd_q: A thread-safe queue for delivering progress updates. Each update is in the form of a 2-tuple
-        (pct, emsg), pct is the percent complete (int), and emsg is an error description if the task has failed
-        (otherwise an empty string).
-    :param cancel: A thread-safe event object which is set to request premature cancellation of this task function.
-    """
-    try:
-        if not work_dir.is_analog_data_interleaved:
-            raise Exception("Expected interleaved analog source")
-        n_ch = work_dir.num_analog_channels()
-        file_size = work_dir.analog_source.stat().st_size
-        if file_size % (2 * n_ch) != 0:
-            raise Exception(f'Flat binary file size inconsistent with specified number of channels ({n_ch})')
-        n_samples = int(file_size / (2 * n_ch))
-        dur = n_samples / work_dir.analog_sampling_rate
-        emsg, neurons = work_dir.load_neural_units()
-        if len(emsg) > 0:
-            raise Exception(emsg)
-
-        print("Testing different methods for measuring channel noise...", flush=True)
-        print(f"Source: {work_dir.analog_source.name}, #channels={n_ch}, #samples={n_samples}, duration={dur:.3f}s.",
-              flush=True)
-        _noise_method_1(work_dir, neurons, upd_q, cancel)
-        _noise_method_2(work_dir, neurons, upd_q, cancel)
-        _noise_method_3(work_dir, upd_q, cancel)
-
-    except Exception as e:
-        upd_q.put_nowait((0, str(e)))
-
-
-def _noise_method_1(work_dir: WorkingDirectory, neurons: List[Neuron], upd_q: Queue, cancel: Event) -> None:
-    """
-    Estimates noise using random clips selected based on unit spike times, concatenating clips into a long 1D
-    vector V, then noise = 1.4826*np.median(np.abs(V)).
-    """
-    n_ch = work_dir.num_analog_channels()
-    samples_per_sec = work_dir.analog_sampling_rate
-    file_size = work_dir.analog_source.stat().st_size
-    n_samples = int(file_size / (2 * n_ch))
-    template_len = int(samples_per_sec * 0.01)
-    n_bytes_per_sample = n_ch * 2
-    n_bytes_per_clip = template_len * n_bytes_per_sample
-    n_units = len(neurons)
-
-    print("\nMETHOD 1: Randomly select clips from spike times. noise = 1.4826*np.median(np.abs(concatenated clips):")
-    # we'll repeat our noise estimate for different numbers of extracted clips
-    noise_clips: List[np.ndarray] = list()
-    per_loop_pct = 5
-    next_update_pct = 0
-    for loop_idx, n_clips in enumerate(reversed([100, 200, 500, 1000, 10000])):
-        t0 = time.perf_counter()
-        # for every channel, we concatenate extracted clips (horzcat) into one long vector which we then use to
-        # estimate noise
-        noise_clips.clear()
-        for _ in range(n_ch):
-            noise_clips.append(np.zeros(template_len * n_clips, dtype='<h'))
-
-        # first, we create a big list of clip starts time by randomly choosing 100 spikes (or less) from each unit
-        clip_starts: List[int] = list()
-        for unit_idx in range(n_units):
-            u = neurons[unit_idx]
-            n_spks = min(u.num_spikes, n_clips)
-            if n_spks < u.num_spikes:
-                spike_indices = sorted(random.sample(range(u.num_spikes), n_spks))
-                unit_clip_starts = [int((u.spike_times[i] - 0.001) * samples_per_sec) for i in spike_indices]
-            else:
-                unit_clip_starts = [int((t - 0.001) * samples_per_sec) for t in u.spike_times]
-            clip_starts.extend(unit_clip_starts)
-        clip_starts.sort()
-
-        # strip off clips that are cut off at beginning or end of recording
-        while (len(clip_starts) > 0) and (clip_starts[0] < 0):
-            clip_starts.pop(0)
-        while (len(clip_starts) > 0) and (clip_starts[-1] + template_len >= n_samples):
-            clip_starts.pop()
-        if len(clip_starts) < n_clips:
-            raise Exception("Not enough clips to process!")
-
-        # now we randomly select just a few of these clips to extract and estimate noise.
-        clip_indices = sorted(random.sample(range(len(clip_starts)), n_clips))
-        noise_clip_starts = [clip_starts[i] for i in clip_indices]
-        noise_clip_starts.sort()
-        clip_starts.clear()
-
-        # scan file and extract per-channel clips, concatenating them into one long vector (per channel)
-        with open(work_dir.analog_source, 'rb') as src:
-            clip_idx = 0
-            while clip_idx < n_clips:
-                # seek to start of next clip to be processed, then read in THAT CLIP ONLY
-                sample_idx = noise_clip_starts[clip_idx]
-                src.seek(sample_idx * n_bytes_per_sample)
-                curr_clip = np.frombuffer(src.read(n_bytes_per_clip), dtype='<h')
-
-                # deinterleave
-                curr_clip = curr_clip.reshape(-1, n_ch).transpose()
-
-                # for each channel, concatenate clip to the growing voltage vector for that channel
-                start = clip_idx * template_len
-                end = start + template_len
-                for k in range(n_ch):
-                    noise_clips[k][start:end] = curr_clip[k]
-
-                clip_idx += 1
-
-                if cancel.is_set():
-                    raise Exception("Task cancelled")
-                pct = loop_idx * per_loop_pct + int(clip_idx * per_loop_pct / n_clips)
-                if pct >= next_update_pct:
-                    upd_q.put_nowait((pct, ""))
-                    next_update_pct += 5
-
-        # estimate noise level on each channel
-        noise_estimates: List[float] = [1.4826 * np.median(np.abs(noise_clips[k])) for k in range(n_ch)]
-
-        t0 = time.perf_counter() - t0
-        exec_time = f"{t0:6.3f}"
-        listing = ", ".join([f"ch{k}={noise_estimates[k]:5.3f}" for k in range(10)])
-        last_ch = f"ch{n_ch - 1}={noise_estimates[-1]:5.3f} ({np.count_nonzero(noise_clips[-1])} nonzeros)"
-        min_max = f"[{noise_clip_starts[0]} .. {noise_clip_starts[-1]}]"
-        print(f"n_clips={n_clips:>5}: T={exec_time}s. {min_max: >24} | {listing}, .. {last_ch}", flush=True)
-
-
-def _noise_method_2(work_dir: WorkingDirectory, neurons: List[Neuron], upd_q: Queue, cancel: Event) -> None:
-    """
-    Estimates noise using random clips selected based on unit spike times. Gather list L of clip medians, where clip
-    median = np.median(np.abs(clip)), then noise = 1.4826*np.median(L).
-    """
-    n_ch = work_dir.num_analog_channels()
-    samples_per_sec = work_dir.analog_sampling_rate
-    file_size = work_dir.analog_source.stat().st_size
-    n_samples = int(file_size / (2 * n_ch))
-    template_len = int(samples_per_sec * 0.01)
-    n_bytes_per_sample = n_ch * 2
-    n_bytes_per_clip = template_len * n_bytes_per_sample
-    n_units = len(neurons)
-
-    print("\nMETHOD 2: Randomly select clips from spike times. noise = 1.4826*(median of clip medians):")
-    # we'll repeat our noise estimate for different numbers of extracted clips
-    clip_medians: List[List[float]] = list()
-    per_loop_pct = 10
-    init_pct = 25
-    next_update_pct = 30
-    for loop_idx, n_clips in enumerate(reversed([100, 200, 500, 1000, 10000])):
-        t0 = time.perf_counter()
-
-        # for accumulating clip medians
-        clip_medians.clear()
-        for _ in range(n_ch):
-            clip_medians.append(list())
-
-        # first, we create a big list of clip starts time by randomly choosing 100 spikes (or less) from each unit
-        clip_starts: List[int] = list()
-        for unit_idx in range(n_units):
-            u = neurons[unit_idx]
-            n_spks = min(u.num_spikes, n_clips)
-            if n_spks < u.num_spikes:
-                spike_indices = sorted(random.sample(range(u.num_spikes), n_spks))
-                unit_clip_starts = [int((u.spike_times[i] - 0.001) * samples_per_sec) for i in spike_indices]
-            else:
-                unit_clip_starts = [int((t - 0.001) * samples_per_sec) for t in u.spike_times]
-            clip_starts.extend(unit_clip_starts)
-        clip_starts.sort()
-
-        # strip off clips that are cut off at beginning or end of recording
-        while (len(clip_starts) > 0) and (clip_starts[0] < 0):
-            clip_starts.pop(0)
-        while (len(clip_starts) > 0) and (clip_starts[-1] + template_len >= n_samples):
-            clip_starts.pop()
-        if len(clip_starts) < n_clips:
-            raise Exception("Not enough clips to process!")
-
-        # now we randomly select just a few of these clips to extract and estimate noise.
-        clip_indices = sorted(random.sample(range(len(clip_starts)), n_clips))
-        noise_clip_starts = [clip_starts[i] for i in clip_indices]
-        noise_clip_starts.sort()
-        clip_starts.clear()
-
-        # scan file and extract per-channel clips, concatenating them into one long vector (per channel)
-        with open(work_dir.analog_source, 'rb') as src:
-            clip_idx = 0
-            while clip_idx < n_clips:
-                # seek to start of next clip to be processed, then read in THAT CLIP ONLY
-                sample_idx = noise_clip_starts[clip_idx]
-                src.seek(sample_idx * n_bytes_per_sample)
-                curr_clip = np.frombuffer(src.read(n_bytes_per_clip), dtype='<h')
-
-                # deinterleave
-                curr_clip = curr_clip.reshape(-1, n_ch).transpose()
-
-                # for each channel, compute clip median and append to growing list of clip medians for that channel
-                for k in range(n_ch):
-                    clip_medians[k].append(np.median(np.abs(curr_clip[k])))
-
-                clip_idx += 1
-
-                if cancel.is_set():
-                    raise Exception("Task cancelled")
-                pct = init_pct + loop_idx * per_loop_pct + int(clip_idx * per_loop_pct / n_clips)
-                if pct >= next_update_pct:
-                    upd_q.put_nowait((pct, ""))
-                    next_update_pct += 5
-
-        # estimate noise level on each channel
-        noise_estimates: List[float] = [1.4826 * np.median(clip_medians[k]) for k in range(n_ch)]
-
-        t0 = time.perf_counter() - t0
-        exec_time = f"{t0:6.3f}"
-        listing = ", ".join([f"ch{k}={noise_estimates[k]:5.3f}" for k in range(10)])
-        last_ch = f"ch{n_ch - 1}={noise_estimates[-1]:5.3f} ({np.count_nonzero(clip_medians[-1])} nonzeros)"
-        min_max = f"[{noise_clip_starts[0]} .. {noise_clip_starts[-1]}]"
-        print(f"n_clips={n_clips:>5}: T={exec_time}s. {min_max: >24} | {listing}, .. {last_ch}", flush=True)
-
-
-def _noise_method_3(work_dir: WorkingDirectory, upd_q: Queue, cancel: Event) -> None:
-    """
-    Estimates noise using random clips selected across entire recording without regard to unit spike times,
-    concatenating clips into a long 1D vector V, then noise = 1.4826*np.median(np.abs(V)).
-    """
-    n_ch = work_dir.num_analog_channels()
-    samples_per_sec = work_dir.analog_sampling_rate
-    file_size = work_dir.analog_source.stat().st_size
-    n_samples = int(file_size / (2 * n_ch))
-    template_len = int(samples_per_sec * 0.01)
-    n_bytes_per_sample = n_ch * 2
-    n_bytes_per_clip = template_len * n_bytes_per_sample
-
-    print("\nMETHOD 3: Randomly select clips from entire recording without regard to unit spikes. "
-          "noise = 1.4826*np.median(np.abs(concatenated clips):")
-
-    # we'll repeat our noise estimate for different numbers of extracted clips
-    noise_clips: List[np.ndarray] = list()
-    per_loop_pct = 5
-    init_pct = 75
-    next_update_pct = 80
-    for loop_idx, n_clips in enumerate(reversed([100, 200, 500, 1000, 10000])):
-        t0 = time.perf_counter()
-        # for every channel, we concatenate extracted clips (horzcat) into one long vector which we then use to
-        # estimate noise
-        noise_clips.clear()
-        for _ in range(n_ch):
+        # for each channel, preallocate a vector V of length = clip length * #clips
+        noise_clips: List[np.ndarray] = list()
+        n_clips = N_TEMPLATE_CLIPS_MIN
+        for _ in range(count):
             noise_clips.append(np.zeros(template_len * n_clips, dtype='<h'))
 
         # randomly select 50000 clip start times across entire recording and strip off clips cut off at the end
-        clip_starts = sorted(random.sample(range(n_samples), 50000))
-        while (len(clip_starts) > 0) and (clip_starts[-1] + template_len >= n_samples):
-            clip_starts.pop()
+        noise_clip_starts = sorted(random.sample(range(n_samples), 50000))
+        while (len(noise_clip_starts) > 0) and (noise_clip_starts[-1] + template_len >= n_samples):
+            noise_clip_starts.pop()
+        if len(noise_clip_starts) < n_clips:
+            raise Exception("Not enough data available to estimate noise on analog channels")
 
         # from those, randomly select the desired number of clips to process
-        chosen = sorted(random.sample(range(len(clip_starts)), n_clips))
-        noise_clip_starts = [clip_starts[i] for i in chosen]
+        chosen = sorted(random.sample(range(len(noise_clip_starts)), n_clips))
+        noise_clip_starts = [noise_clip_starts[i] for i in chosen]
         noise_clip_starts.sort()
-        clip_starts.clear()
 
-        # scan file and extract per-channel clips, concatenating them into one long vector (per channel)
-        with open(work_dir.analog_source, 'rb') as src:
-            clip_idx = 0
-            while clip_idx < n_clips:
-                # seek to start of next clip to be processed, then read in THAT CLIP ONLY
-                sample_idx = noise_clip_starts[clip_idx]
-                src.seek(sample_idx * n_bytes_per_sample)
-                curr_clip = np.frombuffer(src.read(n_bytes_per_clip), dtype='<h')
+        # for tracking overall progress
+        next_update_pct = 0
+        total_clips = count * n_clips
 
-                # deinterleave
-                curr_clip = curr_clip.reshape(-1, n_ch).transpose()
-
-                # for each channel, concatenate clip to the growing voltage vector for that channel
-                start = clip_idx * template_len
-                end = start + template_len
-                for k in range(n_ch):
-                    noise_clips[k][start:end] = curr_clip[k]
-
-                clip_idx += 1
-
-                if cancel.is_set():
-                    raise Exception("Task cancelled")
-                pct = init_pct + loop_idx * per_loop_pct + int(clip_idx * per_loop_pct / n_clips)
+        # extract and put the clips into preallocated vector
+        n_bytes_per_clip = template_len * n_bytes_per_sample
+        if work_dir.need_analog_cache:
+            # CASE 1: Analog data streams cached in individual files
+            for i in range(count):
+                ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i+start)}")
+                with open(ch_file, 'rb') as src:
+                    clip_idx = 0
+                    while clip_idx < n_clips:
+                        src.seek(noise_clip_starts[clip_idx] * n_bytes_per_sample)
+                        clip = np.frombuffer(src.read(n_bytes_per_clip), dtype='<h')
+                        t0 = clip_idx * template_len
+                        t1 = t0 + template_len
+                        noise_clips[i][t0:t1] = clip
+                        clip_idx += 1
+                        if cancel.is_set():
+                            raise Exception("Task cancelled")
+                total_clips_so_far = (i+1) * n_clips
+                pct = int(total_clips_so_far * 100 / total_clips)
                 if pct >= next_update_pct:
-                    upd_q.put_nowait((pct, ""))
-                    next_update_pct += 5
+                    upd_q.put_nowait((start, pct, ""))
+                    next_update_pct = min(pct + 10, 100)
 
-        # estimate noise level on each channel
-        # TODO: Here we're using noise = 1.4826 * np.median(np.abs(V-np.median(V)))
-        noise_estimates: List[float] = list()
-        for k in range(n_ch):
-            m = np.median(noise_clips[k])
-            noise_estimates.append(1.4826 * np.median(np.abs(noise_clips[k]-m)))
+        elif not interleaved:
+            # CASE 2: Prefiltered, non-interleaved flat binary analog source
+            with open(work_dir.analog_source, 'rb') as src:
+                for i in range(count):
+                    ofs = (i + start) * n_samples * n_bytes_per_sample
+                    clip_idx = 0
+                    while clip_idx < n_clips:
+                        src.seek(ofs + noise_clip_starts[clip_idx] * n_bytes_per_sample)
+                        clip = np.frombuffer(src.read(n_bytes_per_clip), dtype='<h')
+                        t0 = clip_idx * template_len
+                        t1 = t0 + template_len
+                        noise_clips[i][t0:t1] = clip
+                        clip_idx += 1
+                        if cancel.is_set():
+                            raise Exception("Task cancelled")
+                    total_clips_so_far = (i + 1) * n_clips
+                    pct = int(total_clips_so_far * 100 / total_clips)
+                    if pct >= next_update_pct:
+                        upd_q.put_nowait((start, pct, ""))
+                        next_update_pct = min(pct + 10, 100)
+        else:
+            # CASE 3: Prefiltered, interleaved flat binary analog source
+            with open(work_dir.analog_source, 'rb') as src:
+                total_clips_so_far = 0
+                clip_idx = 0
+                while clip_idx < n_clips:
+                    src.seek(noise_clip_starts[clip_idx] * n_bytes_per_sample)
+                    clip = np.frombuffer(src.read(n_bytes_per_clip), dtype='<h')
+                    clip = clip.reshape(-1, n_ch).transpose()
+                    t0 = clip_idx * template_len
+                    t1 = t0 + template_len
+                    for i in range(count):
+                        ch_idx = i + start
+                        noise_clips[i][t0:t1] = clip[ch_idx]
+                    clip_idx += 1
+                    total_clips_so_far += count
+                    if cancel.is_set():
+                        raise Exception("Task cancelled")
+                    pct = int(total_clips_so_far * 100 / total_clips)
+                    if pct >= next_update_pct:
+                        upd_q.put_nowait((start, pct, ""))
+                        next_update_pct = min(pct + 10, 100)
 
-        t0 = time.perf_counter() - t0
-        exec_time = f"{t0:6.3f}"
-        listing = ", ".join([f"ch{k}={noise_estimates[k]:5.3f}" for k in range(10)])
-        last_ch = f"ch{n_ch - 1}={noise_estimates[-1]:5.3f} ({np.count_nonzero(noise_clips[-1])} nonzeros)"
-        min_max = f"[{noise_clip_starts[0]} .. {noise_clip_starts[-1]}]"
-        print(f"n_clips={n_clips:>5}: T={exec_time}s. {min_max: >24} | {listing}, .. {last_ch}", flush=True)
+        # noise computation
+        noise_dict: Dict[int, float] = dict()
+        for i in range(count):
+            ch_idx = i + start
+            noise_vec = noise_clips[i]
+            noise_dict[ch_idx] = 1.4826 * np.median(np.abs(noise_vec - np.median(noise_vec)))
+
+        upd_q.put_nowait((start, 100, ""))
+        return noise_dict
+    except Exception as e:
+        upd_q.put_nowait((start, 0, str(e)))
+        return {}
 
 
-def read_interleaved_analog_source(
-        work_dir: WorkingDirectory, chunk_sz: int,  upd_q: Queue, cancel: Event) -> None:
+def compute_statistics(dir_path: str, task_id: int, request: Tuple[Any], progress_q: Queue, cancel: Event) -> None:
     """
-    Task function called by test fixture -- for evaluating how read chunk size affects how long it takes to read a
-    very large interleaved flat binary file. The raw data is converted to 16-bit samples and deinterleaved, but no
-    other processing is done.
+    Compute statistics for one or more neural units cached in the specified XSort working directory.
 
-    :param work_dir: The XSort working directory.
-    :param chunk_sz: Maximum size of each chunk read in bytes, B. Since the channel streams are interleaved, the actual
-        chunk size may be adjusted lower to ensure that read in an integer number of scans. Each "scan" contains one
-        sample for each analog channel, or N*2 bytes for N channels.
-    :param upd_q: A thread-safe queue for delivering progress updates. Each update is in the form of a 2-tuple
-        (pct, emsg), pct is the percent complete (int), and emsg is an error description if the task has failed
-        (otherwise an empty string).
-    :param cancel: A thread-safe event object which is set to request premature cancellation of this task function.
+    The method expects to find a unit metrics cache file for each unit listed in the computation request. If any cache
+    file is missing, the task aborts.
+
+    This task function is intended to run in a separate process. The task manager assigns each different statistic
+    type (ISI, ACG, etc) to a different process. Since the statistics computations are more CPU-bound than file
+    IO-bound, this should improve overall performance.
+
+    :param dir_path: Full file system path to the XSort working directory.
+    :param task_id: The task_id (for reporting progress back to task manager).
+    :param request: A tuple defining the unit statistic(s) requested: (DataType.ISI, uid1, ...) to compute interspike
+        interval histogram for one or more distinct units; (DataType.ACG, uid1, ...) to compute autocorrelogram for one
+        or more units; (DataType.ACG_VS_RATE, uid1, ...) to compute the 3D autocorrelogram vs instantaneous firing rate
+        for one or more units; (DataType.CCG, uid1, uid2, ...) to compute crosscorrelograms for every possible
+        pairing of units among a list of 2+ distinct units; (DataType.PCA, uid1[, uid2[, uid3]]) to perform
+        principal component analysis on 1-3 distinct units and compute the PCA projections for each unit.
+    :param progress_q: A process-safe queue for delivering progress updates and results to the task manager. A progress
+        update is a 2-tuple (task_id, pct). An individual statistic is delivered as (DataType, result), where result is
+        a tuple packaging the Numpy array(s) and identifying unit UID(s) in the form expected for the particular
+        statistic. If the task fails on an error, that is reported as a 2-tuple (task_id, error_msg), after which the
+        task function returns.
+    :param cancel: A process-safe event object which is set to request premature cancellation of this task function.
+        The function returns as soon as the cancellation is detected without taking further action.
     """
     try:
-        if not work_dir.is_analog_data_interleaved:
-            raise Exception("Expected interleaved analog source")
-        n_ch = work_dir.num_analog_channels()
-        file_size = work_dir.analog_source.stat().st_size
-        if file_size % (2 * n_ch) != 0:
-            raise Exception(f'Flat binary file size inconsistent with specified number of channels ({n_ch})')
-        n_samples = int(file_size / (2 * n_ch))
+        emsg, work_dir = WorkingDirectory.load_working_directory(Path(dir_path))
+        if work_dir is None:
+            raise Exception(emsg)
 
-        # for interleaved flat binary source, each "sample" is an array of N samples - one per channel
-        n_bytes_per_sample = n_ch * 2
-        n_samples_per_chunk = int(chunk_sz / n_bytes_per_sample)
-        if n_samples_per_chunk == 0:
-            raise Exception(f"Requested read chunk size is too small")
-        n_bytes_per_chunk = n_samples_per_chunk * n_bytes_per_sample
+        # validate request
+        ok = isinstance(request, tuple) and (len(request) > 1) and isinstance(request[0], DataType) and \
+            all([isinstance(request[i], str) for i in range(1, len(request))])
+        if not ok:
+            raise Exception("Invalid request")
 
-        total_samples = 0
-        with open(work_dir.analog_source, 'rb') as src:
-            n_samples_read, next_update_pct = 0, 0
-            while n_samples_read < n_samples:
-                n_samples_to_read = min(n_samples_per_chunk, n_samples - n_samples_read)
-                curr_block = np.frombuffer(src.read(n_samples_to_read * n_bytes_per_sample), dtype='<h')
-
-                curr_block = curr_block.reshape(-1, n_ch).transpose()
-                for i in range(n_ch):
-                    total_samples += len(curr_block[i])
-
-                n_samples_read += n_samples_to_read
+        which: DataType = request[0]
+        uids = [request[i] for i in range(1, len(request))]
+        if which == DataType.ISI:
+            for k, uid in enumerate(uids):
+                u = work_dir.load_neural_unit_from_cache(uid)
+                if u is None:
+                    raise Exception(f"Missing or invalid unit metrics cache file (uid={uid})")
                 if cancel.is_set():
-                    raise Exception("Task cancelled")
-                pct = int(n_samples_read * 100 / n_samples)
-                if pct >= next_update_pct:
-                    upd_q.put_nowait((pct, ""))
-                    next_update_pct += 5
+                    return
+                out = stats.generate_isi_histogram(u.spike_times, Neuron.FIXED_HIST_SPAN_MS)
+                max_count = max(out)
+                if max_count > 0:
+                    out = out * (1.0 / max_count)
+                if cancel.is_set():
+                    return
+                progress_q.put_nowait((which, (uid, out)))
+                pct = int((k + 1) * 100 / len(uids))
+                progress_q.put_nowait((task_id, pct))
 
-        print(f"Read chunk size={n_bytes_per_chunk}, total samples={total_samples}", flush=True)
+        elif which == DataType.ACG:
+            for k, uid in enumerate(uids):
+                u = work_dir.load_neural_unit_from_cache(uid)
+                if u is None:
+                    raise Exception(f"Missing or invalid unit metrics cache file (uid={uid})")
+                if cancel.is_set():
+                    return
+                out, n = stats.generate_cross_correlogram(u.spike_times, u.spike_times, Neuron.FIXED_HIST_SPAN_MS)
+                if n > 0:
+                    out = out * (1.0 / n)
+                if cancel.is_set():
+                    return
+                progress_q.put_nowait((which, (uid, out)))
+                pct = int((k + 1) * 100 / len(uids))
+                progress_q.put_nowait((task_id, pct))
+
+        elif which == DataType.ACG_VS_RATE:
+            for k, uid in enumerate(uids):
+                u = work_dir.load_neural_unit_from_cache(uid)
+                if u is None:
+                    raise Exception(f"Missing or invalid unit metrics cache file (uid={uid})")
+                if cancel.is_set():
+                    return
+                out = stats.gen_cross_correlogram_vs_firing_rate(u.spike_times, u.spike_times,
+                                                                 span_ms=Neuron.ACG_VS_RATE_SPAN_MS)
+                if cancel.is_set():
+                    return
+                progress_q.put_nowait((which, (uid, out)))
+                pct = int((k + 1) * 100 / len(uids))
+                progress_q.put_nowait((task_id, pct))
+
+        elif which == DataType.CCG:
+            # load all units for which CCGs are to be computed
+            units: List[Neuron] = list()
+            for uid in set(uids):
+                u = work_dir.load_neural_unit_from_cache(uid)
+                if u is None:
+                    raise Exception(f"Missing or invalid unit metrics cache file (uid={uid})")
+                units.append(u)
+                if cancel.is_set():
+                    return
+            if len(units) < 2:
+                raise Exception(f"Need at least 2 distinct units to compute crosscorrelograms")
+            progress_q.put_nowait((task_id, 10))
+
+            n_ccgs, n_done = len(units) * (len(units) - 1), 0
+            for u in units:
+                for u2 in units:
+                    if u.uid != u2.uid:
+                        out, n = stats.generate_cross_correlogram(u.spike_times, u2.spike_times,
+                                                                  Neuron.FIXED_HIST_SPAN_MS)
+                        if n > 0:
+                            out = out * (1.0 / n)
+                        if cancel.is_set():
+                            return
+                        progress_q.put_nowait((which, (u.uid, u2.uid, out)))
+                        n_done += 1
+                        pct = int(n_done * 90 / n_ccgs) + 10
+                        progress_q.put_nowait((task_id, pct))
+
+        elif which == DataType.PCA:
+            # load the units included in the analysis -- restricted to 1-3 units
+            if (len(uids) != len(set(uids))) or not (1 <= len(uids) <= 3):
+                raise Exception(f"PCA projection requires at least one and no more than 3 distinct units")
+            units: List[Neuron] = list()
+            for uid in set(uids):
+                u = work_dir.load_neural_unit_from_cache(uid)
+                if u is None:
+                    raise Exception(f"Missing or invalid unit metrics cache file (uid={uid})")
+                units.append(u)
+                if cancel.is_set():
+                    return
+            progress_q.put_nowait((task_id, 2))
+
+            _compute_pca_projections(work_dir, task_id, units, progress_q, cancel)
+        else:
+            raise Exception("Invalid request")
 
     except Exception as e:
-        upd_q.put_nowait((0, str(e)))
+        progress_q.put_nowait((task_id, str(e)))
+
+
+def _compute_pca_projections(
+        work_dir: WorkingDirectory, task_id: int, units: List[Neuron], progress_q: Queue, cancel: Event) -> None:
+    """
+    Helper method for :method:`compute_statistics`. Performs principal component analysis on spike waveform clips across
+    a maximum of 16 recorded analog channels for up to 3 neural units. PCA provides a mechanism for detecting
+    whether distinct neural units actually represent incorrectly segregated populations of spikes recorded from the same
+    unit.
+
+    By design XSort only computes mean spike waveforms -- aka "spike templates" -- on a maximum of 16 channels "near"
+    the unit's primary channel -- call this the unit's **primary channel set**. If N<=16 analog channels were recorded,
+    then all units will have the same primary channel set. **PCA is restricted to a unit's primary channel set to keep
+    the computation time and memory usage reasonable.** This is very important for recording sessions with hundreds of
+    analog channels.
+
+    When a single unit is selected for PCA, only the channels in the unit's primary channel set are included in the
+    analysis. When 2 or 3 units are selected for PCA, only those channels comprising the **intersection** of the units'
+    primary channel sets are considered. **If the intersection is empty, then PCA cannot be  performed**.
+
+    Let N = N1 + N2 + N3 represent the total number of spikes recorded across all K units (we're assuming K=3 here).
+    Let the spike clip size be M analog samples long and the number of analog channels included in the analysis be P.
+    Then every spike may be represented by an L=MxP vector, the concatenation of the clips for that spike across the P
+    channels. The goal of PCA analysis is to reduce this L-dimensional space down to 2, which can then be easily
+    visualized as a 2D scatter plot.
+
+    The first step is to compute the principal components for the N samples in L-dimensional space. A great many of
+    these clips will be mostly noise -- since, for every spike, we include the clip from each of up to 16 channels, not
+    just the primary channel for a given unit. So, instead of using a random sampling of individual clips, we use the
+    mean spike template waveforms computed on each channel for each unit. The per-channel spike templates -- which
+    should be available already in the :class:`Neuron` instances -- are concatenated to form a KxL matrix, and the
+    principal component analysis yields an Lx2 matrix in which the two columns represent the first 2 principal
+    components of the data with the greatest variance and therefore most information. **However, if only 1 unit
+    is included in the analysis, we revert to using a random sampling of individual clips (because we need at
+    least two samples of the L=MxP space in order to compute the covariance matrix).**
+
+    Then, to compute the PCA projection of unit 1 onto the 2D space defined by these two PCs, we form the N1xL
+    matrix representing ALL the individual spike clips for that unit, then multiply that by the Lx2 PCA matrix to
+    yield the N1x2 projection. Similarly for the other units.
+
+    Progress messages are delivered regularly as the computation proceeds, and the PCA projection for each specified
+    unit is delivered as a 2D Numpy array via the supplied process-safe queue. You can think of each row in the array as
+    the (x,y) coordinates of each spike in the 2D space defined by the first 2 principal components of the analysis. If
+    the number of spikes for a given unit exceeds 20000, the Nx2 PCA projection array is computed and delivered in
+    batches of 20000 points -- that way the XSort GUI can display a "partial" PCA scatter plot as the computations
+    continue in the background. (NOTE: Total execution time was similar for batch sizes of 10000, 20000 and 40000.)
+
+    All spike clips used in the analysis are 2ms in duration and start 1ms prior to the spike occurrence time.
+
+    :param work_dir: The XSort working directory.
+    :param task_id: The task_id (for reporting progress back to task manager).
+    :param units: The neural unit(s) for which PCA projection(s) are to be computed
+    :param progress_q: A process-safe queue for delivering progress updates and results to the task manager. A progress
+        update is a 2-tuple (task_id, pct). An individual statistic is delivered as (DataType, result), where result is
+        a tuple packaging the Numpy array(s) and identifying unit UID(s) in the form expected for the particular
+        statistic. If the task fails on an error, that is reported as a 2-tuple (task_id, error_msg), after which the
+        task function returns.
+    :param cancel: A process-safe event object which is set to request premature cancellation of this task function.
+        The function returns as soon as the cancellation is detected without taking further action.
+    :raises Exception: If any required files are missing from the current working directory, such as the
+        analog channel data cache files, or if an IO error or other unexpected failure occurs.
+    """
+    # find the set of analog channels on which to perform the analysis. For multiple units, only perform on channels
+    # shared by all units. If no shared units, then PCA cannot be performed.
+    channel_set: Set[int] = set(units[0].template_channel_indices)
+    for i in range(1, len(units)):
+        channel_set = channel_set & set(units[i].template_channel_indices)
+    if len(channel_set) == 0:
+        return
+
+    channel_list = list(channel_set)
+    channel_list.sort()
+    samples_per_sec = work_dir.analog_sampling_rate
+
+    # phase 1: compute 2 highest-variance principal components
+    all_clips: np.ndarray
+    if len(units) == 1:
+        # when doing PCA on a single units, chose a randomly selected set of individual multi-clips to calc PC
+        u: Neuron = units[0]
+        n_clips = min(NCLIPS_FOR_PCA, u.num_spikes)
+        clip_dur = int(SPIKE_CLIP_DUR_SEC * samples_per_sec)
+        if n_clips == u.num_spikes:
+            clip_starts = [int((t - PRE_SPIKE_SEC) * samples_per_sec) for t in u.spike_times]
+        else:
+            spike_indices = sorted(random.sample(range(u.num_spikes), n_clips))
+            clip_starts = [int((u.spike_times[i] - PRE_SPIKE_SEC) * samples_per_sec) for i in spike_indices]
+        clip_starts.sort()
+        all_clips = _retrieve_multi_clips(work_dir, channel_list, clip_starts, clip_dur, task_id,
+                                          pct_start=2, pct_end=20, progress_q=progress_q, cancel=cancel)
+    else:
+        # when doing PCA on 2-3 units, use spike template waveform clips to form matrix for PCA: Each row is
+        # the horizontal concatenation of the spike templates for a unit across all shared analog channels. Each
+        # row corresponds to a different unit.
+        clip_dur = int(SPIKE_CLIP_DUR_SEC * samples_per_sec)
+        all_clips = np.zeros((len(units), clip_dur * len(channel_list)))
+        for i_unit, u in enumerate(units):
+            for i, ch_idx in enumerate(channel_list):
+                all_clips[i_unit, i * clip_dur:(i + 1) * clip_dur] = u.get_template_for_channel(ch_idx)[0:clip_dur]
+    if cancel.is_set():
+        return
+    progress_q.put_nowait((task_id, 20))
+
+    pc_matrix = stats.compute_principal_components(all_clips)
+    if cancel.is_set():
+        return
+    progress_q.put_nowait((task_id, 50))
+
+    # phase 2: compute the projection of each unit's spikes onto the 2D space defined by the 2 principal components
+    # determine how many spike clips to be extracted across all units in the analysis. We omit clips that are cut off at
+    # the beginning or end of the recording.
+    total_spike_count = 0
+    post_dur = SPIKE_CLIP_DUR_SEC - PRE_SPIKE_SEC
+    for u in units:
+        n = u.num_spikes
+        while (n - 1 >= 0) and (u.spike_times[n-1] + post_dur >= work_dir.analog_channel_recording_duration_seconds):
+            n -= 1
+        k = 0
+        while (k < n) and (u.spike_times[k] - PRE_SPIKE_SEC < 0):
+            k += 1
+        total_spike_count += n - k
+
+    total_spikes_so_far = 0
+    for u in units:
+        # again, spike clips cut off at start or end of recording are excluded from the PCA projections
+        n = u.num_spikes
+        while (n - 1 >= 0) and (u.spike_times[n - 1] + post_dur >= work_dir.analog_channel_recording_duration_seconds):
+            n -= 1
+        k = 0
+        while (k < n) and (u.spike_times[k] - PRE_SPIKE_SEC < 0):
+            k += 1
+
+        while k < n:
+            n_spikes_in_chunk = min(SPIKES_PER_BATCH, n - k)
+            clip_starts = [int((u.spike_times[i + k] - PRE_SPIKE_SEC) * samples_per_sec)
+                           for i in range(n_spikes_in_chunk)]
+            pct_start = int(50 + 50*total_spikes_so_far/total_spike_count)
+            pct_end = int(50 + 50*(total_spikes_so_far + n_spikes_in_chunk)/total_spike_count)
+            clips_in_chunk = _retrieve_multi_clips(work_dir, channel_list, clip_starts, clip_dur, task_id,
+                                                   pct_start=pct_start, pct_end=pct_end, progress_q=progress_q,
+                                                   cancel=cancel)
+            if len(clips_in_chunk) == 0:  # an error occurred - proceed no further!
+                return
+            if cancel.is_set():
+                return
+            prj_chunk = np.matmul(clips_in_chunk, pc_matrix)   # this can take a significant amount of time!
+            if cancel.is_set():
+                return
+
+            progress_q.put_nowait((task_id, pct_end))
+            progress_q.put_nowait((DataType.PCA, (u.uid, k, prj_chunk)))
+            k += len(clips_in_chunk)
+            total_spikes_so_far += len(clips_in_chunk)
+
+
+def _retrieve_multi_clips(work_dir: WorkingDirectory, ch_indices: List[int], clip_starts: List[int], clip_dur: int,
+                          task_id: int, pct_start: int, pct_end: int, progress_q: Queue, cancel: Event) -> np.ndarray:
+    """
+    Helper method for :method:`_compute_pca_projections()'. Let P = the number of analog channels included in the PCA
+    analysis, N = number of spike clip start indices specified, and M = per-channel clip duration in #samples. This
+    method extracts N clips of duration M from each of the P channels and forms a 2D array of N L=MXP "multi-clips",
+    where the i-th row contains the multi-clip corresponding to the i-th clip start index.
+
+    NOTE: A previous incarnation spawned 16 threads to extract the clips from each channel (except when the source
+    was a prefiltered, interleaved flat binary file). This was ~3.5x slower than the current solution, which extracts
+    the clips one channel at a time ins the current thread.
+
+
+    :param work_dir:  The XSort working directory.
+    :param ch_indices: The indices of P<=16 analog channels included in PCA.
+    :param clip_starts: The starting indices of the N clips to extract (in # of samples since start of recording).
+    :param clip_dur: The duration of each per-channel clip, M, in # of analog samples.
+    :param task_id: The task_id (for reporting progress back to task manager).
+    :param pct_start: Percentage complete when this function was called.
+    :param pct_end: Percentage complete when this function ends successfully.
+    :param progress_q: A process-safe queue for delivering progress updates to the task manager.
+    :param cancel: A process-safe event object which is set to request premature cancellation of this task function.
+        The function returns as soon as the cancellation is detected without taking further action.
+    :return: An NxL Numpy array containing N multi-clips of length L=MxP each. All samples are raw 16-bit ints.
+    """
+    # strip off any clips that start before or end after the recording
+    num_samples = work_dir.analog_channel_recording_duration_samples
+    while (len(clip_starts) > 0) and (clip_starts[0] < 0):
+        clip_starts.pop(0)
+    while (len(clip_starts) > 0) and (clip_starts[-1] + clip_dur >= num_samples):
+        clip_starts.pop()
+    if len(clip_starts) == 0:
+        raise Exception("No spike clips to process!")   # should never happen!
+
+    # with flat binary interleaved source, it's best to retrieve the clips across all relevant channels rather than
+    # one channel at a time...
+    if (not work_dir.need_analog_cache) and work_dir.is_analog_data_interleaved:
+        n_ch = work_dir.num_analog_channels()
+        n_clips = len(clip_starts)
+        out = np.zeros((n_clips, clip_dur*len(ch_indices)), dtype='<h')
+        with open(work_dir.analog_source, 'rb') as src:
+            clip_idx = 0
+            next_update_pct = 0
+            while clip_idx < n_clips:
+                # seek to start of next clip to be processed, then read in THAT CLIP ONLY
+                sample_idx = clip_starts[clip_idx]
+                src.seek(sample_idx * 2 * n_ch)
+                curr_clip = np.frombuffer(src.read(clip_dur * 2 * n_ch), dtype='<h')
+
+                # for interleaved source: deinterleave channels and extract clip for target channel
+                curr_clip = curr_clip.reshape(-1, n_ch).transpose()
+
+                # form the multi-clip across the specified channels
+                multi_clip = np.zeros((clip_dur*len(ch_indices),), dtype='<h')
+                for i, idx in enumerate(ch_indices):
+                    multi_clip[i*clip_dur:(i+1)*clip_dur] = curr_clip[idx]
+
+                out[clip_idx, :] = multi_clip
+                clip_idx += 1
+
+                # check for cancel and report progress
+                if cancel.is_set():
+                    return np.array([], dtype='<h')
+                pct = int(100 * clip_idx / n_clips)
+                if pct >= next_update_pct:
+                    pct = pct_start + ((pct_end-pct_start) * pct / 100)
+                    progress_q.put_nowait((task_id, pct))
+                    next_update_pct += 10
+        return out
+
+    # otherwise, extract clips for each channel from the relevant source (individual cache file or the original
+    # flat binary prefiltered and non-interleaved source), and horiz concatenate to form the multi-clips
+    out = np.empty((len(clip_starts), 0), dtype='<h')
+    n_done = 0
+    for ch_idx in ch_indices:
+        per_ch_clips = _extract_channel_clips(work_dir, ch_idx, clip_starts, clip_dur, cancel)
+        if cancel.is_set():
+            return np.array([], dtype='<h')
+        if isinstance(per_ch_clips, str):
+            raise Exception(per_ch_clips)
+        out = np.hstack((out, per_ch_clips))
+
+        n_done += 1
+        pct = int(pct_start + (pct_end-pct_start) * n_done / len(ch_indices))
+        progress_q.put_nowait((task_id, pct))
+
+    return out
+
+
+def _extract_channel_clips(work_dir: WorkingDirectory, ch: int, clip_starts: List[int], clip_dur: int,
+                           cancel: Event) -> Union[str, np.ndarray]:
+    """
+    Helper function for :method:`_retrieve_multi_clips()`. Retrieves a series of short "clips" from a recorded analog
+    data channel trace as stored in the relevant source -- either an individual channel cache file or the original,
+    prefiltered flat binary analog source. Note that this is not ideal when the analog source interleaved. In that case
+    -- because the streams are interleaved, it is more efficient to extract the clips from all relevant channels in
+    one pass rather than calling this function once for each channel!
+
+    :param work_dir: The XSort working directory.
+    :param ch: The analog channel index.
+    :param clip_starts: A Nx1 array containing the start index for each clip; MUST be in ascending order!
+    :param clip_dur: The duration of each clip in # of analog samples, M.
+    :param cancel: A process-safe event object which is set to request premature cancellation of this task function.
+        The function returns as soon as the cancellation is detected without taking further action.
+    :return: An NxM Numpy array of 16-bit integers containing the clips, one per row. Returns an empty array if the
+        job was cancelled. Returns a brief error description if the operation failed (missing cache file, IO error).
+    """
+    src_path: Path
+    interleaved = False
+    n_ch = work_dir.num_analog_channels()
+    n_bytes_per_sample = 2
+    ch_offset = 0   # byte offset to start of specified channel's stream (non-interleaved flat binary file only)
+
+    try:
+        if work_dir.need_analog_cache:
+            src_path = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch)}")
+            if not src_path.is_file():
+                raise Exception(f"Channel cache file missing for analog channel {str(ch)}")
+        else:
+            src_path = work_dir.analog_source
+            if not src_path.is_file():
+                raise Exception(f"Original flat binary analog source file is missing!")
+            file_size = work_dir.analog_source.stat().st_size
+            if file_size % (2 * n_ch) != 0:
+                raise Exception(f'Flat binary file size inconsistent with specified number of channels ({n_ch})')
+            num_samples = int(file_size / (2 * n_ch))
+            interleaved = work_dir.is_analog_data_interleaved
+            if not interleaved:
+                ch_offset = (ch * num_samples) * n_bytes_per_sample
+            else:
+                # for interleaved case, one "sample" is actually one scan of all N channels
+                n_bytes_per_sample = 2 * n_ch
+
+        n_clips = len(clip_starts)
+        out = np.zeros((len(clip_starts), clip_dur), dtype='<h')
+        if interleaved:
+            with open(src_path, 'rb') as src:
+                clip_idx = 0
+                while clip_idx < n_clips:
+                    # seek to start of next clip to be processed, then read in THAT CLIP ONLY
+                    sample_idx = clip_starts[clip_idx]
+                    src.seek(ch_offset + sample_idx * n_bytes_per_sample)
+                    curr_clip = np.frombuffer(src.read(clip_dur*n_bytes_per_sample), dtype='<h')
+
+                    # for interleaved source: deinterleave channels and extract clip for target channel
+                    curr_clip = curr_clip.reshape(-1, n_ch).transpose()
+                    out[clip_idx, :] = curr_clip[ch]
+
+                    clip_idx += 1
+                    if cancel.is_set():
+                        return np.array([], dtype='<h')
+        else:
+            with open(src_path, 'rb') as src:
+                clip_idx = 0
+                while clip_idx < n_clips:
+                    # seek to start of next clip to be processed
+                    chunk_s = clip_starts[clip_idx]
+                    src.seek(ch_offset + chunk_s * n_bytes_per_sample)
+
+                    # read a chunk of size M <= _READ_CHUNK_SIZE that fully contains 1 or more clips
+                    n = 1
+                    while ((clip_idx + n < n_clips) and
+                           ((clip_starts[clip_idx+n-1] - chunk_s + clip_dur) * n_bytes_per_sample < _READ_CHUNK_SIZE)):
+                        n += 1
+                    chunk_sz = (clip_starts[clip_idx+n-1] - chunk_s + clip_dur) * n_bytes_per_sample
+                    chunk = np.frombuffer(src.read(chunk_sz), dtype='<h')
+
+                    # process all clips in the chunk
+                    for k in range(n):
+                        start = clip_starts[clip_idx + k] - chunk_s
+                        out[clip_idx+k, :] = chunk[start:start + clip_dur]
+                    clip_idx += n
+                    if cancel.is_set():
+                        return np.array([], dtype='<h')
+
+        return out
+    except Exception as e:
+        return f"Error retrieving clips on channel {ch}: {str(e)}"
