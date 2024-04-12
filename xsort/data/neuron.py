@@ -140,6 +140,18 @@ class Neuron:
         return int(index_str), suffix
 
     @staticmethod
+    def is_derived_uid(uid: str) -> bool:
+        """
+        Does the specified string match the UID of a derived neural unit, created by a merge or split? The UID of
+        any derived unit has an integer index followed by the letter 'x'.
+        """
+        try:
+            index, suffix = Neuron.dissect_uid(uid)
+            return suffix == 'x'
+        except Exception:
+            return False
+
+    @staticmethod
     def merge(unit1: 'Neuron', unit2: 'Neuron', idx: int) -> 'Neuron':
         """
         Create a new neural unit that merges the spike trains of the two specified units, with the merged spike times

@@ -101,9 +101,9 @@ def cache_neural_units_all_channels(
     :param task_id: An integer identifying this task -- included in progress updates.
     :param uids: UIDs identifying which units to process.
     :param progress_q: A process-safe queue for delivering progress updates back to the task manager. Each "update" is
-        in the form of a 3-tuple (id, pct, emsg), where id is the argument task_id (int), pct is the percent complete
-        (int), and emsg is an error description if the task has failed (otherwise an empty string). **The task function
-        finishes immediately after delivering an error message to the queue.**
+        in the form of a 2-tuple: (task_id, pct), where pct is the integer completion percentage; or (task_id, emsg),
+        where emsg is an error description. **The task function finishes immediately after delivering an error message
+        to the queue.**
     :param cancel: A process-safe event object which is set to request premature cancellation of this task function.
     """
     try:
@@ -112,7 +112,8 @@ def cache_neural_units_all_channels(
             raise Exception(emsg)
         if work_dir.num_analog_channels() > N_MAX_TEMPLATES_PER_UNIT:
             raise Exception(f"Not supported for recording session with >{N_MAX_TEMPLATES_PER_UNIT} analog channels.")
-        emsg, neurons = work_dir.load_neural_units()
+
+        emsg, neurons = work_dir.load_select_neural_units(uids)
         if len(emsg) > 0:
             raise Exception(emsg)
 
@@ -122,9 +123,6 @@ def cache_neural_units_all_channels(
 
         if cancel.is_set():
             raise Exception("Task canceled")
-
-        # pare down the unit list to only those we care about
-        neurons = [u for u in neurons if u.uid in uids]
 
         # spawn a thread per channel to calculate unit templates
         with ThreadPoolExecutor(max_workers=work_dir.num_analog_channels()) as mt_exec:
@@ -418,16 +416,17 @@ def cache_neural_units_select_channels(
     :param unit_to_primary: Maps UID of a unit to be cached to the unit's identified primary channel index P. This
         determines which analog channels are analyzed to compute per-channel spike templates for the unit, as described.
     :param progress_q: A process-safe queue for delivering progress updates back to the task manager. Each "update" is
-        in the form of a 3-tuple (id, pct, emsg), where id is the argument task_id (int), pct is the percent complete
-        (int), and emsg is an error description if the task has failed (otherwise an empty string). **The task function
-        finishes immediately after delivering an error message to the queue.**
+        in the form of a 2-tuple: (task_id, pct), where pct is the percent complete (int); OR (task_id, emsg), where
+        emsg is an error description (str) indicating why the task failed. **The task function finishes immediately
+        after delivering an error message to the queue.**
     :param cancel: A process-safe event object which is set to request premature cancellation of this task function.
     """
     try:
         emsg, work_dir = WorkingDirectory.load_working_directory(Path(dir_path))
         if work_dir is None:
             raise Exception(emsg)
-        emsg, neurons = work_dir.load_neural_units()
+
+        emsg, neurons = work_dir.load_select_neural_units([k for k in unit_to_primary.keys()])
         if len(emsg) > 0:
             raise Exception(emsg)
         if not work_dir.channel_noise_cache_file_exists():
@@ -435,11 +434,8 @@ def cache_neural_units_select_channels(
         if cancel.is_set():
             raise Exception("Task canceled")
 
-        # pare down the unit list to only those we care about
-        neurons = [u for u in neurons if u.uid in unit_to_primary]
-
         # spawn a thread per unit to calculate unit templates and cache metrics to file
-        with ThreadPoolExecutor(max_workers=16) as mt_exec:
+        with ThreadPoolExecutor(max_workers=min(16, len(neurons))) as mt_exec:
             progress_per_unit: Dict[str, int] = {u.uid: 0 for u in neurons}
             next_progress_update_pct = 0
 
@@ -468,7 +464,7 @@ def cache_neural_units_select_channels(
                         progress_per_unit[update[0]] = update[1]
                         total_progress = sum(progress_per_unit.values()) / len(progress_per_unit)
                         if total_progress >= next_progress_update_pct:
-                            progress_q.put_nowait((task_id, next_progress_update_pct, ""))
+                            progress_q.put_nowait((task_id, next_progress_update_pct))
                             next_progress_update_pct += 5
                 except Empty:
                     pass
@@ -498,12 +494,12 @@ def cache_neural_units_select_channels(
                         break
 
             if first_error is None:
-                progress_q.put_nowait((task_id, 100, ""))
+                progress_q.put_nowait((task_id, 100))
             else:
-                progress_q.put_nowait((task_id, 0, first_error))
+                progress_q.put_nowait((task_id, first_error))
 
     except Exception as e:
-        progress_q.put_nowait((task_id, 0, f"Error caching unit metrics (task_id={task_id}): {str(e)}"))
+        progress_q.put_nowait((task_id, f"Error caching unit metrics (task_id={task_id}): {str(e)}"))
 
 
 def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, unit: Neuron, primary_ch: int,
@@ -731,14 +727,14 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
         progress_q.put_nowait((unit.uid, 0, str(e)))
 
 
-def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: int, uids: List[str], progress_q: Queue,
-                                            cancel: Event) -> Dict[str, Tuple[int, float]]:
+def identify_unit_primary_channels(dir_path: str, task_id: int, ch_indices: List[int], uids: List[str],
+                                   progress_q: Queue, cancel: Event) -> Dict[str, Tuple[int, float]]:
     """
-    Estimate SNR for some or all neural units found in the XSort working directory for each analog channel in the
-    range specified, and for each unit return the index of the channel for which the unit's SNR was greatest.
+    Estimate SNR for the specified neural units across the specified bank of analog channels, and for each unit return
+    the index of the channel for which the unit's SNR was greatest.
 
     This task function is intended to run in a separate process. The task manager should split up the entire set of
-    analog channels into smaller ranges, each of which is assigned to a different process.
+    analog channels into smaller banks, each of which is assigned to a different process.
 
     NOTES:
 
@@ -749,13 +745,11 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
       number of clips per unit.** The "primary channel" for each unit is then identified as the analog channel on which
       SNR is greatest. Then more accurate templates (averaging many more spike waveform clips) can be computed only for
       a small number of data channels "in the neighborhood" of the primary channel.
-    - Use case: Caching metrics for a newly derived unit. When a new unit is derived, XSort immediately writes the
+    - Use case: Because the list of units to be processed is specified, this method can be used to process any subset or
+      all units defined in the working directory. For example, when a new unit is derived, XSort immediately writes the
       derived unit's spike times to an **incomplete** unit cache file, and eventually spawns a background task to
-      find the unit's primary channel, calculate spike templates, and write a complete cache file. To handle this use
-      case, explicitly specify the UIDs of the units to be cache. When an explicit list of UIDs is given, this method
-      will load the unit data from the corresponding cache file (if present), else from the original unit source file.
-      When the list is empty, the method finds the primary channel of every unit stored in the original neural unit
-      source file ONLY.
+      find the unit's primary channel, calculate spike templates, and write a complete cache file. To handle this
+      scenario, simply specify a list containing the UID of the derived unit(s) to be cached.
     - This method assumes channel noise levels have already been estimated and cached in a dedicated internal cache
       file ('.xs.noise') within the working directory.
     - The analog data is located in individual channel cache files, or in the original prefiltered flat binary file,
@@ -767,16 +761,13 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
       binary file or individual cache files, we need to read in a larger multi-clip chunk (~2400KB).
 
     :param dir_path: Full file system path to the XSort working directory.
-    :param start: Index of first channel in the range, K
-    :param count: The number of channels N in the range. If K+N is greater than the number of channels
-        recorded, then the task processes all remaining channels starting at K.
-    :param uids: If not empty, this list contains the UIDs of select neural units for which a primary channel
-        designation is required. If empty, the method finds the primary channel for **every** unit found in the original
-        neural unit source file in the working directory. Specify a list when you need to cache metrics for a newly
-        derived unit, or to rebuild one or missing unit cache files.
-    :param progress_q: A process-safe queue for delivering progress updates. Each update is in the form of a 3-tuple
-        (start, pct, emsg), where start is the index of the first channel processed (int), pct is the percent complete
-        (int), and emsg is an error description if the task has failed (otherwise an empty string).
+    :param task_id: Task ID for progress updates.
+    :param ch_indices: The bank of analog channel indices to process.
+    :param uids: The UIDs of the neural unists for which a primary channel designation is required.
+    :param progress_q: A process-safe queue for delivering progress updates back to the task manager. Each "update" is
+        in the form of a 2-tuple: (task_id, pct), where pct is the integer completion percentage; or (task_id, emsg),
+        where emsg is an error description. **The task function finishes immediately after delivering an error message
+        to the queue.**
     :param cancel: A process-safe event object which is set to request premature cancellation of this task function.
     :return: Dictionary mapping each neural unit's UID to a 2-tuple (ch_idx, snr) containing the index of the channel
         within the range specified) that exhibited the highest SNR for that unit, and the SNR value. Returns an empty
@@ -786,32 +777,13 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
         emsg, work_dir = WorkingDirectory.load_working_directory(Path(dir_path))
         if work_dir is None:
             raise Exception(emsg)
-        emsg, original_units = work_dir.load_neural_units()
+        emsg, units = work_dir.load_select_neural_units(uids)
         if len(emsg) > 0:
             raise Exception(emsg)
         noise_levels = work_dir.load_channel_noise_from_cache()
         if noise_levels is None:
             raise Exception('Missing or unreadable channel noise cache')
         n_ch = work_dir.num_analog_channels()
-        if start < 0 or start >= n_ch:
-            raise Exception("Invalid channel range")
-        elif start + count > n_ch:
-            count = n_ch - start
-
-        # if an explicit list of UIDs is specified, only find primary channel for each of the listed units. In this
-        # case we expect an INCOMPLETE metrics file to be present for each UID, or if not, it must be among the units
-        # defined in the origal neural unit source
-        units: List[Neuron] = list()
-        if len(uids) > 0:
-            for uid in uids:
-                unit = work_dir.load_neural_unit_from_cache(uid)
-                if unit is None:
-                    unit = next((u for u in original_units if u.uid == uid), None)
-                    if unit is None:
-                        raise Exception(f"Nonexistent UID specified: {uid}")
-                units.append(unit)
-        else:
-            units.extend(original_units)
 
         if cancel.is_set():
             raise Exception("Task canceled")
@@ -821,8 +793,8 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
         n_bytes_per_sample = 2
         num_samples_recorded = 0
         if work_dir.need_analog_cache:
-            for i in range(count):
-                ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i+start)}")
+            for ch_idx in ch_indices:
+                ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
                 if not ch_file.is_file():
                     raise Exception(f"Missing internal analog cache file {ch_file.name}")
                 elif ch_file.stat().st_size % n_bytes_per_sample != 0:
@@ -850,9 +822,9 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
         for _ in range(n_units):
             template_dict: Dict[int, np.ndarray] = dict()
             num_clips_dict: Dict[int, int] = dict()
-            for i in range(count):
-                template_dict[i+start] = np.zeros(template_len, dtype='<f')
-                num_clips_dict[i+start] = 0
+            for ch_idx in ch_indices:
+                template_dict[ch_idx] = np.zeros(template_len, dtype='<f')
+                num_clips_dict[ch_idx] = 0
             unit_templates.append(template_dict)
             unit_num_clips.append(num_clips_dict)
 
@@ -882,7 +854,7 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
 
         # for tracking overall progress
         next_update_pct = 0
-        total_clips = count * len(clip_starts)
+        total_clips = len(ch_indices) * len(clip_starts)
         total_clips_so_far = 0
 
         def check_progress(next_upd: int) -> int:
@@ -895,7 +867,7 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
                 raise Exception("Task cancelled")
             _p = int(total_clips_so_far * 100 / total_clips)
             if _p >= next_upd:
-                progress_q.put_nowait((start, _p, ""))
+                progress_q.put_nowait((task_id, _p))
                 next_upd += 5
             return next_upd
 
@@ -938,8 +910,7 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
         n_bytes_per_clip = template_len * n_bytes_per_sample
         if work_dir.need_analog_cache:
             # CASE 1: individual binary cache file for each analog channel stream
-            for i in range(count):
-                ch_idx = i + start
+            for ch_idx in ch_indices:
                 ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
                 with open(ch_file, 'rb') as src:
                     clip_idx = 0
@@ -952,9 +923,8 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
         elif not interleaved:
             # CASE 2: Analog channel streams in original non-interleaved flat binary source file
             with open(work_dir.analog_source, 'rb') as src:
-                for i in range(count):
+                for ch_idx in ch_indices:
                     # offset to start of contiguous block for next channel to process
-                    ch_idx = i + start
                     ofs = ch_idx * num_samples_recorded * n_bytes_per_sample
                     clip_idx = 0
                     while clip_idx < len(clip_starts):
@@ -979,15 +949,14 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
 
                     # accumulate clips for the relevant unit and clip medians across all channels in the range
                     unit_idx = clip_starts[clip_idx][1]
-                    for i in range(count):
-                        ch_idx = i + start
+                    for ch_idx in ch_indices:
                         per_ch_clip = curr_clip[ch_idx]
                         per_ch_template = unit_templates[unit_idx][ch_idx]
                         np.add(per_ch_template, per_ch_clip, out=per_ch_template)
                         unit_num_clips[unit_idx][ch_idx] += 1
                     clip_idx += 1
 
-                    total_clips_so_far += count
+                    total_clips_so_far += len(ch_indices)
                     next_update_pct = check_progress(next_update_pct)
 
         # for each unit, find which channel in the range had the highest SNR.
@@ -995,8 +964,7 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
         for i in range(n_units):
             num_clips_dict = unit_num_clips[i]
             best_snr, primary_ch = 0.0, -1
-            for k in range(count):
-                ch_idx = k + start
+            for ch_idx in ch_indices:
                 t: np.ndarray = unit_templates[i][ch_idx]
                 if num_clips_dict[ch_idx] > 0:
                     t /= num_clips_dict[ch_idx]
@@ -1007,20 +975,20 @@ def identify_unit_primary_channels_in_range(dir_path: str, start: int, count: in
                     primary_ch = ch_idx
             res[units[i].uid] = (primary_ch, best_snr)
 
-        progress_q.put_nowait((start, 100, ""))
+        progress_q.put_nowait((task_id, 100))
         return res
     except Exception as e:
-        progress_q.put_nowait((start, 0, str(e)))
+        progress_q.put_nowait((task_id, str(e)))
         return {}
 
 
-def cache_analog_channels_in_range(dir_path: str, start: int, count: int, progress_q: Queue, cancel: Event) -> None:
+def cache_analog_channels(dir_path: str, task_id: int, ch_indices: List[int], progress_q: Queue, cancel: Event) -> None:
     """
-    Extract, filter, and cache each analog data stream in the XSort working directory's analog source file for the range
+    Extract, filter, and cache each analog data stream in the XSort working directory's analog source file for the bank
     of data channel indices specified, writing each filtered stream to a separate internal cache file in the directory.
 
     This task function is intended to run in a separate process. The task manager should split up the entire set of
-    analog channels into smaller ranges, each of which is assigned to a different process.
+    analog channels to be cached into smaller ranges, each of which is assigned to a different process.
 
     NOTES:
 
@@ -1069,13 +1037,12 @@ def cache_analog_channels_in_range(dir_path: str, start: int, count: int, progre
        overall performance of these variants was somewhat worse than the basic serialized approach.
 
     :param dir_path: Full file system path to the XSort working directory.
-    :param start: Index of first channel in the range, K
-    :param count: The number of channels N in the range. If K+N is greater than the number of channels
-        recorded, then the task processes all remaining channels starting at K.
-    :param progress_q: A process-safe queue for delivering progress updates. Each update is in the form of a 3-tuple
-        (start, pct, emsg), where start is the index of the first channel processed (int), pct is the percent complete
-        (int), and emsg is an error description if the task has failed (otherwise an empty string). **The task aborts
-        shortly after delivering an error message on the progress queue.**
+    :param task_id: Task ID -- for reporting progress back to the task manager.
+    :param ch_indices: Indices of the channels to be cached.
+    :param progress_q: A process-safe queue for delivering progress updates. Each update is in the form of a 2-tuple:
+        (task_id, int) to indicate progress (second element is % complete) OR (task_id, emsg) to indicate the task has
+        failed (second element is the error description). **The task aborts shortly after delivering an error message
+        on the progress queue.**
     :param cancel: A process-safe event object which is set to request premature cancellation of this task function.
     """
     try:
@@ -1087,29 +1054,22 @@ def cache_analog_channels_in_range(dir_path: str, start: int, count: int, progre
         if work_dir.is_analog_data_prefiltered:
             raise Exception("Analog data caching not required for a prefiltered source!")
 
-        n_ch = work_dir.num_analog_channels()
-        samples_per_sec = work_dir.analog_sampling_rate
-        if start < 0 or start >= n_ch:
-            raise Exception("Invalid channel start index.")
-        elif start + count > n_ch:
-            count = n_ch - start
-
         # for noninterleaved source, we use a small thread pool and cache each channel separately
         if work_dir.uses_omniplex_as_analog_source or not work_dir.is_analog_data_interleaved:
-            progress_per_ch: Dict[int, int] = {i+start: 0 for i in range(count)}
+            progress_per_ch: Dict[int, int] = {ch_idx: 0 for ch_idx in ch_indices}
             next_update_pct = 0
             task_func = _cache_pl2_analog_channel if work_dir.uses_omniplex_as_analog_source else \
                 _cache_noninterleaved_analog_channel
 
-            with ThreadPoolExecutor(max_workers=16) as mt_exec:
+            with ThreadPoolExecutor(max_workers=min(16, len(ch_indices))) as mt_exec:
                 # NOTE: Previously used the multiprocess event object supplied as an argument as the cancel signal for
                 # the threads spawned here, but that has caused issues on MacOS. Instead, each process has its own
                 # thread-safe cancel event
                 thrd_cancel = Event()
 
                 thrd_q = Queue()
-                futures: List[Future] = [mt_exec.submit(task_func, work_dir, i+start, thrd_q, thrd_cancel)
-                                         for i in range(count)]
+                futures: List[Future] = [mt_exec.submit(task_func, work_dir, ch_idx, thrd_q, thrd_cancel)
+                                         for ch_idx in ch_indices]
 
                 first_error: Optional[str] = None
                 cancelled_already = False
@@ -1128,7 +1088,7 @@ def cache_analog_channels_in_range(dir_path: str, start: int, count: int, progre
                             progress_per_ch[update[0]] = update[1]
                             total_progress = sum(progress_per_ch.values()) / len(progress_per_ch)
                             if total_progress >= next_update_pct:
-                                progress_q.put_nowait((start, int(total_progress), ""))
+                                progress_q.put_nowait((task_id, int(total_progress)))
                                 next_update_pct += 5
                     except Empty:
                         pass
@@ -1150,23 +1110,23 @@ def cache_analog_channels_in_range(dir_path: str, start: int, count: int, progre
                         break
 
                 # report first error encountered, if any
-                progress_q.put_nowait((start, 100, "" if first_error is None else first_error))
-
+                progress_q.put_nowait((task_id, 100) if first_error is None else (task_id, first_error))
             return
 
         # HANDLE THE NONINTERLEAVED CASE FROM HERE
+        n_ch = work_dir.num_analog_channels()
+        samples_per_sec = work_dir.analog_sampling_rate
 
         # the channel cache files to be written
-        cache_files: List[Path] = list()
-        for i in range(count):
-            cache_files.append(Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(start + i)}"))
+        cache_file_dict: Dict[int, Path] = \
+            {ch_idx: Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}") for ch_idx in ch_indices}
 
         # prepare bandpass filter in case analog signal is wide-band. The filter delays are initialized with zero-vector
         # initial condition and the delays are updated as each block is filtered. SO MAINTAIN A SEPARATE FILTER DELAY
         # FOR EACH CHANNEL.
         [b, a] = scipy.signal.butter(2, [2 * 300 / samples_per_sec, 2 * 8000 / samples_per_sec], btype='bandpass')
         filter_ic = scipy.signal.lfiltic(b, a, np.zeros(max(len(b), len(a)) - 1))
-        delays: List[np.ndarray] = [filter_ic.copy() for _ in range(count)]
+        delay_dict: Dict[int, np.ndarray] = {ch_idx: filter_ic.copy() for ch_idx in ch_indices}
 
         next_update_pct = 0
         file_size = work_dir.analog_source.stat().st_size
@@ -1188,11 +1148,11 @@ def cache_analog_channels_in_range(dir_path: str, start: int, count: int, progre
                 curr_block = curr_block.transpose()
 
                 # disentangle the channel streams, filter, and deliver to the channel queues
-                for idx in range(start, start + count):
-                    ch_block = curr_block[idx]
-                    ch_block, delays[idx-start] = scipy.signal.lfilter(b, a, ch_block, axis=-1, zi=delays[idx-start])
+                for ch_idx in ch_indices:
+                    ch_block = curr_block[ch_idx]
+                    ch_block, delay_dict[ch_idx] = scipy.signal.lfilter(b, a, ch_block, axis=-1, zi=delay_dict[ch_idx])
                     ch_block = ch_block.astype(np.int16)
-                    with open(cache_files[idx - start], 'ab') as f:
+                    with open(cache_file_dict[ch_idx], 'ab') as f:
                         f.write(ch_block.tobytes())
 
                 num_samples_read += n_samples_to_read
@@ -1201,11 +1161,11 @@ def cache_analog_channels_in_range(dir_path: str, start: int, count: int, progre
                     raise Exception("Task cancelled")
                 pct = int(num_samples_read * 100 / n_samples)
                 if pct >= next_update_pct:
-                    progress_q.put_nowait((start, pct, ""))
+                    progress_q.put_nowait((task_id, pct))
                     next_update_pct += 5
 
     except Exception as e:
-        progress_q.put_nowait((start, 0, str(e)))
+        progress_q.put_nowait((task_id, str(e)))
 
 
 def _cache_pl2_analog_channel(work_dir: WorkingDirectory, idx: int, upd_q: Queue, cancel: Event) -> None:

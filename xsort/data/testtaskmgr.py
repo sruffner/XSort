@@ -229,8 +229,7 @@ class MainWindow(QMainWindow):
         if not (isinstance(self.work_dir, WorkingDirectory) and self.work_dir.is_valid):
             return
         if not self.task_manager.busy:
-            task_started = self.task_manager.build_internal_cache_if_necessary(
-                self.work_dir, [u.uid for u in self.units])
+            task_started = self.task_manager.build_internal_cache_if_necessary(self.work_dir)
             if not task_started:
                 self.progress_edit.append("Cache build not required.")
             else:

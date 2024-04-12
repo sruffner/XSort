@@ -6,7 +6,6 @@ from concurrent.futures import ThreadPoolExecutor, Future, as_completed
 from enum import Enum
 # noinspection PyProtectedMember
 from multiprocessing.pool import AsyncResult
-from pathlib import Path
 from queue import Queue, Empty
 from threading import Event
 from typing import List, Optional, Dict, Tuple, Any, Set
@@ -14,8 +13,8 @@ from typing import List, Optional, Dict, Tuple, Any, Set
 from PySide6.QtCore import QObject, Signal, QRunnable, Slot, QThreadPool
 from PySide6.QtWidgets import QProgressDialog
 
-from xsort.data.files import WorkingDirectory, CHANNEL_CACHE_FILE_PREFIX, UNIT_CACHE_FILE_PREFIX
-from xsort.data.neuron import Neuron, DataType, ChannelTraceSegment
+from xsort.data.files import WorkingDirectory
+from xsort.data.neuron import DataType, ChannelTraceSegment
 import xsort.data.taskfunc as tfunc
 
 
@@ -153,7 +152,7 @@ class TaskManager(QObject):
         finally:
             progress_dlg.close()
 
-    def build_internal_cache_if_necessary(self, work_dir: WorkingDirectory, uids: List[str]) -> bool:
+    def build_internal_cache_if_necessary(self, work_dir: WorkingDirectory) -> bool:
         """
         If necessary, launch a background task to process the analog and unit data source files in the XSort working
         directory specified and generate all missing analog data and neural unit metric cache files within that
@@ -163,24 +162,12 @@ class TaskManager(QObject):
         analog source includes hundreds of channels.
 
         :param work_dir: The XSort working directory.
-        :param uids: The UIDs of the neural units that should be cached in the directory.
         :return: True if a background task was launched to build out the cache, else False if directory's internal
             cache is already complete.
         """
-        need_caching = False
-        if work_dir.need_analog_cache:
-            for idx in work_dir.analog_channel_indices:
-                if not Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}").is_file():
-                    need_caching = True
-                    break
-        if not need_caching:
-            need_caching = not work_dir.channel_noise_cache_file_exists()
-        if not need_caching:
-            for uid in uids:
-                if not Path(work_dir.path, f"{UNIT_CACHE_FILE_PREFIX}{uid}").is_file():
-                    need_caching = True
-                    break
-
+        need_caching = (work_dir.analog_channel_cache_files_missing() or
+                        (not work_dir.channel_noise_cache_file_exists()) or
+                        (len(work_dir.unit_metrics_not_cached()) > 0))
         if not need_caching:
             return False
 
@@ -349,9 +336,9 @@ class TaskManager(QObject):
 
         def cache_analog_channels(self) -> None:
             """
-            Extract the entire data stream for each analog channel in the file designated as the analog data source for
-            the current XSort working directory, bandpass filter it if necessary, and store it in a separate cache file
-            (flat binary file of 16-bit samples) in the directory.
+            If necessary, cache the entire data stream for each analog channel in the original analog data source,
+            bandpass filtering the stream if necessary. The resulting per-channel cache file is a flat binary file
+            containing the recorded stream on that channel (16-bit samples).
 
             Analog stream caching is required if the analog data source is an Omniplex PL2 file, or if it's a flat
             binary file containing raw, unfiltered data. No action is taken otherwise.
@@ -360,44 +347,48 @@ class TaskManager(QObject):
             any channel already exists, that channel is NOT cached again.
 
             Strategy: Implicitly assuming that the host machine has multiple CPUs, this method splits the number of
-            analog channels in the source file into N ranges, where N is the number of available CPUS. A separate
-            process handles each channel range, hopefully parallelizing the work to some extent.
+            analog channels in the source file into N groups, where N is the number of available CPUS. A separate
+            process handles each channel group, hopefully parallelizing the work to some extent.
             """
-            if not self.work_dir.need_analog_cache:
+            # get indices of all channels that need to be cached. If none, we're done.
+            uncached_ch = self.work_dir.channels_not_cached()
+            if len(uncached_ch) == 0:
                 return
 
-            n_ch = self.work_dir.num_analog_channels()
+            n_ch = len(uncached_ch)
 
             # need a process-safe event to signal cancellation of task, as well as a queue for IP comm
             self.cancel_event = self.mgr._manager.Event()
             progress_q: Queue = self.mgr._manager.Queue()
 
-            # assign banks of N channels to each process, with one process per core.
+            # divvy up the channels to process among one or more processes, with one process per core.
             n_banks = self.mgr.num_cpus
-            ch_per_bank = int(n_ch/n_banks)
+            ch_per_bank = int(n_ch / n_banks)
             if n_ch % n_banks != 0:
                 ch_per_bank += 1
 
-            progress_per_bank: Dict[int, int] = {i*ch_per_bank: 0 for i in range(n_banks)}
+            progress_per_bank: Dict[int, int] = dict()
             next_progress_update_pct = 0
             dir_path = str(self.work_dir.path.absolute())
             task_args = list()
-            for i in range(n_banks):
-                task_args.append((dir_path, i*ch_per_bank, ch_per_bank, progress_q, self.cancel_event))
+            task_id = 1
+            for i in range(0, n_ch, ch_per_bank):
+                task_args.append((dir_path, task_id, uncached_ch[i:i+ch_per_bank], progress_q, self.cancel_event))
+                progress_per_bank[task_id] = 0
+                task_id += 1
 
             first_error: Optional[str] = None
-            result: AsyncResult = self.mgr._process_pool.starmap_async(tfunc.cache_analog_channels_in_range, task_args,
+            result: AsyncResult = self.mgr._process_pool.starmap_async(tfunc.cache_analog_channels, task_args,
                                                                        chunksize=1)
             while not result.ready():
                 try:
-                    update = progress_q.get(timeout=0.5)  # (first_ch, pct_complete, error_msg)
-                    if len(update[2]) > 0:
+                    update = progress_q.get(timeout=0.5)  # (task_id, pct_complete) OR (task_id, error_msg)
+                    if isinstance(update[1], str):
                         # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
                         # processes stop
                         if not self.cancel_event.is_set():
                             self.cancel_event.set()
-                            first_error = (f"Error caching {ch_per_bank}-channel bank "
-                                           f"starting at {update[0]}: {update[2]}")
+                            first_error = f"Error caching analog channels (task_id={update[0]}: {update[1]}"
                     else:
                         progress_per_bank[update[0]] = update[1]
                         total_progress = sum(progress_per_bank.values()) / len(progress_per_bank)
@@ -407,10 +398,6 @@ class TaskManager(QObject):
                 except Empty:
                     pass
 
-            # on error or cancellation, delete all analog cache files
-            if self.cancel_event.is_set():
-                self.work_dir.delete_internal_cache_files(analog=True, noise=True, units=False)
-
             if first_error is not None:
                 self.mgr.error.emit(first_error)
                 return
@@ -418,7 +405,8 @@ class TaskManager(QObject):
         def cache_channel_noise_levels(self) -> None:
             """
             Estimate noise level on every recorded analog channel in the XSort working directory's analog data source
-            and store the channel noise levels in an internal cache file within that directory.
+            and store the channel noise levels in an internal cache file within that directory. If the noise cache
+            file is already present, no action is taken.
 
             Strategy: For each channel, it is sufficient to extract 100 random 10-ms clips from the channel stream and
             compute noise level as 1.4826 * the median absolute deviation of the vector formed by concatenating those
@@ -426,11 +414,12 @@ class TaskManager(QObject):
             the number of analog channels in the source file into N ranges, where N is between 1 and 16. A thread
             handles each channel range, hopefully parallelizing the work to some extent. The individual task results
             are collected and the noise levels written to the internal cache file, ".xs.noise".
-
             """
-            n_ch = self.work_dir.num_analog_channels()
+            if self.work_dir.channel_noise_cache_file_exists():
+                return
 
             # divide up the work among up to 16 task threads...
+            n_ch = self.work_dir.num_analog_channels()
             if n_ch < 4:
                 n_banks = 1
                 ch_per_bank = n_ch
@@ -498,8 +487,19 @@ class TaskManager(QObject):
 
         def cache_neural_units(self) -> None:
             """
-            Calculate and cache metrics for all neural units found in the XSort working directory's unit data source
-            file.
+            Calculate and cache metrics as needed for all neural units defined in the XSort working directory.
+
+            All units defined in the original unit data source should have a corresponding metrics cache file in the
+            directory. In addition, whenever XSort creates a "derived unit" by merging two units or splitting one, it
+            immediately saves the new unit's spike train to an **incomplete** metrics cache file. A later background
+            task must be able to detect these, compute the necessary metrics (primary channel, spike templates on up to
+            16 channels near the primary channel) and update the cache file accordingly.
+
+            This method detects which neural units (original or derived) have a missing or incomplete metrics cache,
+            and performs the work necessary to generate or complete those cache files. Typically, it generates the cache
+            files for all original units when the working directory is visited for the first time, or it builds a
+            complete cache file for one or two deived units. It was also regenerate an original unit cache file if that
+            file was accidentally removed by an external action,
 
             By design, XSort computes and displays the mean spike waveform -- aka, "spike  template" -- on each of up to
             16 analog data channels. Calculating each unit's template on each recorded channel requires reading and
@@ -529,36 +529,33 @@ class TaskManager(QObject):
               neighborhood" of the unit's primary channel. Since XSort does not yet support the notion of "probe
               geometry", we use the range of channel indices numerically "around" the primary channel index.
             """
-            # load all neural units
-            emsg, neurons = self.work_dir.load_neural_units()
-            if len(emsg) > 0:
-                raise Exception(f"{emsg}")
-            if len(neurons) == 0:
+            # return immediately if there is nothing to do!
+            uids_uncached = self.work_dir.unit_metrics_not_cached()
+            if len(uids_uncached) == 0:
                 return
 
             # CASE 1: Not too many analog channels
             if self.work_dir.num_analog_channels() <= tfunc.N_MAX_TEMPLATES_PER_UNIT:
-                self._cache_neural_units_all_channels(neurons)
+                self._cache_neural_units_all_channels(uids_uncached)
                 return
 
             # otherwise: STAGE 1: Identify each unit's primary channel
-            unit_to_primary = self._identify_primary_channels()
+            unit_to_primary = self._identify_primary_channels(uids_uncached)
             if unit_to_primary is None:
                 return
-            if not all([unit_to_primary.get(u.uid, -1) >= 0 for u in neurons]):
+            if not all([unit_to_primary.get(uid, -1) >= 0 for uid in uids_uncached]):
                 raise Exception("Missing primary channel for at least one neural unit in recording session.")
 
             # STAGE 2: Compute and cache metrics for all units on 16 channels "near" each unit's primary channel
             self._cache_neural_units_select_channels(unit_to_primary)
 
-        def _cache_neural_units_all_channels(self, neurons: List[Neuron]) -> bool:
+        def _cache_neural_units_all_channels(self, uids: List[str]) -> bool:
             """
             Helper method for cache_neural_units() handles recording sessions where the total number of analog data
             channels is <= 16.
-            :param neurons: The list of all neural units to be cached.
+            :param uids: The uids of all neural units to be cached.
             :return: True if operation succeeded, False on error or task cancellation.
             """
-            uids = [u.uid for u in neurons]
             n_units = len(uids)
             self.mgr.progress.emit(f"Calculating and caching metrics for {n_units} neural units across "
                                    f"{self.work_dir.num_analog_channels()} analog channels...", 0)
@@ -567,37 +564,34 @@ class TaskManager(QObject):
             self.cancel_event = self.mgr._manager.Event()
             progress_q: Queue = self.mgr._manager.Queue()
 
-            # divide the units into N banks, where N is number of available CPUS
+            # divvy up the units to process among one or more processes, with one process per core.
             n_banks = self.mgr.num_cpus
-            if n_units <= n_banks:
-                units_per_bank = 1
-            else:
-                units_per_bank = int(n_units / n_banks)
-                if n_units % n_banks != 0:
-                    units_per_bank += 1
+            units_per_bank = int(n_units / n_banks)
+            if n_units % n_banks != 0:
+                units_per_bank += 1
 
             progress_per_bank: Dict[int, int] = dict()
             next_progress_update_pct = 0
             dir_path = str(self.work_dir.path.absolute())
-            task_args: List[tuple] = list()
-            bank_idx = 0
-            while bank_idx * units_per_bank < n_units:
-                bank_uids = uids[bank_idx*units_per_bank:(bank_idx+1)*units_per_bank]
-                task_args.append((dir_path, bank_idx, bank_uids, progress_q, self.cancel_event))
-                bank_idx += 1
+            task_args = list()
+            task_id = 1
+            for i in range(0, n_units, units_per_bank):
+                task_args.append((dir_path, task_id, uids[i:i+units_per_bank], progress_q, self.cancel_event))
+                progress_per_bank[task_id] = 0
+                task_id += 1
 
             first_error: Optional[str] = None
             result: AsyncResult = self.mgr._process_pool.starmap_async(
                 tfunc.cache_neural_units_all_channels, task_args, chunksize=1)
             while not result.ready():
                 try:
-                    update = progress_q.get(timeout=0.2)  # (task_id, pct_complete, error_msg)
-                    if len(update[2]) > 0:
+                    update = progress_q.get(timeout=0.2)  # (task_id, pct_complete) or (task_id, emsg)
+                    if isinstance(update[1], str):
                         # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
                         # processes stop, then break out
                         if not self.cancel_event.is_set():
                             self.cancel_event.set()
-                            first_error = f"Error caching neural units in subtask {update[0]}: {update[2]}"
+                            first_error = f"Error caching neural units (task_id={update[0]}): {update[1]}"
                     else:
                         progress_per_bank[update[0]] = update[1]
                         total_progress = sum(progress_per_bank.values()) / len(progress_per_bank)
@@ -608,25 +602,23 @@ class TaskManager(QObject):
                     pass
 
             if first_error is not None:
-                self.work_dir.delete_internal_cache_files(analog=False, noise=False, units=True)
                 self.mgr.error.emit(first_error)
                 return False
 
             return not self.cancel_event.is_set()
 
-        def _identify_primary_channels(self, neurons: Optional[List[Neuron]] = None) -> Optional[Dict[str, int]]:
+        def _identify_primary_channels(self, uids: List[str]) -> Optional[Dict[str, int]]:
             """
             Performs a "quick-n-dirty" computation of per-channel spike templates and SNRs across all analog data
-            channels for some or all defined neural units in the XSort working directory to identify the "primary
+            channels for the specified neural units defined in the XSort working directory to identify the "primary
             channel" (channel exhibiting highest SNR) for each unit.
 
-            :param neurons: List of units for which primary channel identification is requested. If None or empty list,
-                will find the primary channel for each unit listed in the original neural unit source file.
+            :param uids: List of UIDs identifying the units for which primary channel identification is requested.
             :return: Dictionary mapping each unit's UID to the index of that unit's primary analog channel. On failure,
                 returns None.
             """
-            uids: List[str] = [u.uid for u in neurons] if isinstance(neurons, list) else list()
-            n_ch = self.work_dir.num_analog_channels()
+            ch_indices = self.work_dir.analog_channel_indices
+            n_ch = len(ch_indices)
             self.mgr.progress.emit(f"Identifying primary channels for {len(uids)} units across {n_ch} "
                                    f"analog channels", 0)
 
@@ -634,37 +626,34 @@ class TaskManager(QObject):
             self.cancel_event = self.mgr._manager.Event()
             progress_q: Queue = self.mgr._manager.Queue()
 
-            # divide the channels into N banks, where N is number of available CPUS
+            # divvy up the channels to process among one or more processes, with one process per core.
             n_banks = self.mgr.num_cpus
-            if n_ch <= n_banks:
-                ch_per_bank = 1
-                n_banks = n_ch
-            else:
-                ch_per_bank = int(n_ch / n_banks)
-                if n_ch % n_banks != 0:
-                    ch_per_bank += 1
-                n_banks = int(n_ch / ch_per_bank) + 1
+            ch_per_bank = int(n_ch / n_banks)
+            if n_ch % n_banks != 0:
+                ch_per_bank += 1
 
             progress_per_bank: Dict[int, int] = dict()
             next_progress_update_pct = 0
             dir_path = str(self.work_dir.path.absolute())
-            task_args: List[tuple] = list()
-            for i in range(n_banks):
-                task_args.append((dir_path, i * ch_per_bank, ch_per_bank, progress_q, uids, self.cancel_event))
-                progress_per_bank[i * ch_per_bank] = 0
+            task_args = list()
+            task_id = 1
+            for i in range(0, n_ch, ch_per_bank):
+                task_args.append((dir_path, task_id, ch_indices[i:i+ch_per_bank], uids, progress_q, self.cancel_event))
+                progress_per_bank[task_id] = 0
+                task_id += 1
 
             first_error: Optional[str] = None
             result: AsyncResult = self.mgr._process_pool.starmap_async(
-                tfunc.identify_unit_primary_channels_in_range, task_args, chunksize=1)
+                tfunc.identify_unit_primary_channels, task_args, chunksize=1)
             while not result.ready():
                 try:
-                    update = progress_q.get(timeout=0.2)  # (start_ch, pct_complete, error_msg)
-                    if len(update[2]) > 0:
+                    update = progress_q.get(timeout=0.2)  # (task_id, pct_complete) or (task_id, error_msg)
+                    if isinstance(update[1], str):
                         # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
                         # processes stop, then break out
                         if not self.cancel_event.is_set():
                             self.cancel_event.set()
-                            first_error = f"Error identifying primary channels in subtask {update[0]}: {update[2]}"
+                            first_error = f"Error identifying primary channels (task_id={update[0]}): {update[1]}"
                     else:
                         progress_per_bank[update[0]] = update[1]
                         total_progress = sum(progress_per_bank.values()) / len(progress_per_bank)
@@ -678,8 +667,8 @@ class TaskManager(QObject):
             if first_error is None:
                 while not progress_q.empty():
                     update = progress_q.get_nowait()
-                    if len(update[2]) > 0:
-                        first_error = f"Error identifying primary channels in subtask {update[0]}: {update[2]}"
+                    if isinstance(update[1], str):
+                        first_error = f"Error identifying primary channels (task_id={update[0]}): {update[1]}"
                         break
 
             if first_error is not None:
@@ -724,40 +713,38 @@ class TaskManager(QObject):
             self.cancel_event = self.mgr._manager.Event()
             progress_q: Queue = self.mgr._manager.Queue()
 
-            # divide the units into N banks, where N is number of available CPUS
+            # divvy up the units to process among one or more processes, with one process per core.
             n_banks = self.mgr.num_cpus
-            if n_units <= n_banks:
-                units_per_bank = 1
-            else:
-                units_per_bank = int(n_units / n_banks)
-                if n_units % n_banks != 0:
-                    units_per_bank += 1
+            units_per_bank = int(n_units / n_banks)
+            if n_units % n_banks != 0:
+                units_per_bank += 1
 
             progress_per_bank: Dict[int, int] = dict()
             next_progress_update_pct = 0
             dir_path = str(self.work_dir.path.absolute())
-            task_args: List[tuple] = list()
-            bank_idx = 0
-            while bank_idx * units_per_bank < n_units:
-                bank_uids = uids[bank_idx * units_per_bank:(bank_idx + 1) * units_per_bank]
+            task_args = list()
+            task_id = 1
+            for i in range(0, n_units, units_per_bank):
+                bank_uids = uids[i:i+units_per_bank]
                 uid_2_pc: Dict[str, int] = dict()
                 for uid in bank_uids:
                     uid_2_pc[uid] = unit_to_primary[uid]
-                task_args.append((dir_path, bank_idx, uid_2_pc, progress_q, self.cancel_event))
-                bank_idx += 1
+                task_args.append((dir_path, task_id, bank_uids, uid_2_pc, progress_q, self.cancel_event))
+                progress_per_bank[task_id] = 0
+                task_id += 1
 
             first_error: Optional[str] = None
             result: AsyncResult = self.mgr._process_pool.starmap_async(
                 tfunc.cache_neural_units_select_channels, task_args, chunksize=1)
             while not result.ready():
                 try:
-                    update = progress_q.get(timeout=0.2)  # (task_id, pct_complete, error_msg)
-                    if len(update[2]) > 0:
+                    update = progress_q.get(timeout=0.2)  # (task_id, pct_complete) OR (task_id, error_msg)
+                    if isinstance(update[1], str):
                         # an error has occurred. If not bc task was cancelled, signal cancel now so that remaining
                         # processes stop, then break out
                         if not self.cancel_event.is_set():
                             self.cancel_event.set()
-                            first_error = f"Error caching neural units in subtask {update[0]}: {update[2]}"
+                            first_error = f"Error caching neural units (task_id={update[0]}): {update[1]}"
                     else:
                         progress_per_bank[update[0]] = update[1]
                         total_progress = sum(progress_per_bank.values()) / len(progress_per_bank)
@@ -771,12 +758,11 @@ class TaskManager(QObject):
             if first_error is None:
                 while not progress_q.empty():
                     update = progress_q.get_nowait()
-                    if len(update[2]) > 0:
-                        first_error = f"Error caching neural units in subtask {update[0]}: {update[2]}"
+                    if isinstance(update[1], str):
+                        first_error = f"Error caching neural units (task_id={update[0]}): {update[1]}"
                         break
 
             if first_error is not None:
-                self.work_dir.delete_internal_cache_files(analog=False, noise=False, units=True)
                 self.mgr.error.emit(first_error)
                 return False
 
@@ -914,37 +900,23 @@ class TaskManager(QObject):
             :raise: Exception if operation fails
             """
             # prepare list of units for which a unit metrics cache file is either missing or incomplete
-            emsg, original_units = self.work_dir.load_neural_units()
-            if len(emsg) > 0:
-                raise Exception(emsg)
-            units: List[Neuron] = list()
-            for uid in uids:
-                unit = self.work_dir.load_neural_unit_from_cache(uid)
-                if unit is None:
-                    unit = next((u for u in original_units if u.uid == uid), None)
-                    if unit is None:
-                        raise Exception(f"Nonexistent UID specified: {uid}")
-                if unit.primary_channel is None:
-                    units.append(unit)
-            if len(units) == 0:
+            uids_uncached = self.work_dir.unit_metrics_not_cached()
+            uid_list = list(uids & set(uids_uncached))
+            if len(uid_list) == 0:
                 return True
 
             # CASE 1: Not too many analog channels
-            # TODO: Need to modify tfunc.cache_neural_units_all_channels() to load Neuron from an incomplete metrics
-            #   cache file if it is not found in the original neural unit source -- to handle derived units
             if self.work_dir.num_analog_channels() <= tfunc.N_MAX_TEMPLATES_PER_UNIT:
-                return self._cache_neural_units_all_channels(units)
+                return self._cache_neural_units_all_channels(uid_list)
 
             # otherwise: STAGE 1: Identify each unit's primary channel
-            unit_to_primary = self._identify_primary_channels(units)
+            unit_to_primary = self._identify_primary_channels(uid_list)
             if unit_to_primary is None:
                 return False
-            if not all([unit_to_primary.get(u.uid, -1) >= 0 for u in units]):
+            if not all([unit_to_primary.get(uid, -1) >= 0 for uid in uid_list]):
                 raise Exception("Missing primary channel for at least one neural unit.")
 
             # STAGE 2: Compute and cache metrics for all units on 16 channels "near" each unit's primary channel
-            # TODO: Need to modify tfunc.cache_neural_units_select_channels() to load Neuron from an incomplete metrics
-            #   cache file if it is not found in the original neural unit source -- to handle derived units
             return self._cache_neural_units_select_channels(unit_to_primary)
 
         def test_fixture(self) -> None:

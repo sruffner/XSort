@@ -283,6 +283,8 @@ class WorkingDirectory:
         Metadata extracted from the Omniplex PL2 file if that is the analog data source. Ignored if the analog data 
         source is a flat binary file.
         """
+        self._original_units: List[str] = list()
+        """ List of UIDs identifying the units extracted from the original unit data source file. """
         self._neurons: List[Neuron] = list()
         """ List of neural units extracted from the unit data source file. Cached temporarily at construction time. """
         self._error: Optional[str] = self._validate()
@@ -346,6 +348,7 @@ class WorkingDirectory:
         emsg, units = self.load_neural_units()
         if len(emsg) > 0:
             return emsg
+        self._original_units = [u.uid for u in units]
         self._neurons = units
 
         return None
@@ -672,6 +675,75 @@ class WorkingDirectory:
 
         return "", neurons
 
+    def load_select_neural_units(self, uids: List[str]) -> Tuple[str, Optional[List[Neuron]]]:
+        """
+        Load the specified neural units defined in this working directory. All original units are loaded from the
+        original unit data source, while derived units (UID ends with suffix 'x') must be loaded from the corresponding
+        unit metrics cache file. For such units, XSort will write the unit's spike times to an **incomplete** version
+        of the metrics cache file, leaving the computation of metrics (primary channel, SNR, spike templates) and
+        "completing" the cache file to a background task.
+
+        This method is intended for collecting a list of units for which metrics (primary channel, spike templates, etc)
+        have not yet been calculated and cached.
+
+        :return: On success, a tuple ("", L), where L is a list of :class:`Neuron` objects encapsulating the neural
+            units found in the file. Those metrics which are calculated and cached in the backgroun -- mean spike
+            waveforms, SNR, primary analog channel -- are undefined. On failure, returns ('error description', None).
+        """
+        neurons: List[Neuron] = list()
+
+        # load derived units first. It's a fatal error if the (incomplete) cache file for a derived unit is missing.
+        for uid in uids:
+            if Neuron.is_derived_uid(uid):
+                unit = self.load_neural_unit_from_cache(uid)
+                if unit is None:
+                    return f"No cache file for derived unit {uid}", None
+                neurons.append(unit)
+
+        # in case we're only looking for derived units
+        if len(neurons) == len(uids):
+            return "", neurons
+
+        # load all units defined in the original unit data source
+        emsg, original_units = self.load_neural_units()
+        if len(emsg) > 0:
+            return emsg, None
+
+        # augment our list with the original units requested
+        for u in original_units:
+            if u.uid in uids:
+                neurons.append(u)
+
+        return ("", neurons) if (len(neurons) == len(uids)) else (f"At least one UID was invalid/not found", None)
+
+    def unit_metrics_not_cached(self) -> List[str]:
+        """
+        Scan this XSort working directory and check for any missing or incomplete unit metrics cache files.
+
+        The cache generator task that runs when the working directory is opened will identify the primary channel for
+        each defined unit, calculate spike templates for up to 16 channels "near" the primary channel, then save the
+        unit spike train, primary channel index, unit SNR on that channel, and spike templates to a "complete" unit
+        metrics cache file. Additionally, when XSort creates a derived unit by a merge or split, it will immediately
+        write the new unit's spike times to an "incomplete" metrics file.
+
+        :return: List of UIDs identifying all original or derived units for which the unit metrics cache file is
+            either missing or incomplete.
+        """
+        out: List[str] = list()
+        if self.is_valid:
+            out.extend(self._original_units)
+            for child in self._folder.iterdir():
+                if child.is_file() and child.name.startswith(UNIT_CACHE_FILE_PREFIX):
+                    uid = child.name[len(UNIT_CACHE_FILE_PREFIX):]
+                    try:
+                        out.remove(uid)
+                    except ValueError:
+                        # not an original unit cache file -- check for an incomplete cache file for a derived unit
+                        unit: Neuron = self.load_neural_unit_from_cache(uid)
+                        if (unit is None) or (unit.primary_channel is None):
+                            out.append(uid)
+        return out
+
     @property
     def need_analog_cache(self) -> bool:
         """
@@ -687,24 +759,34 @@ class WorkingDirectory:
         """
         return self.uses_omniplex_as_analog_source or (not self.is_analog_data_prefiltered)
 
-    @property
-    def analog_channel_cache_files_exist(self) -> bool:
+    def analog_channel_cache_files_missing(self) -> bool:
         """
-        Have all analog data channels recorded in this XSort working directory's original analog source file been
-        separately cached within the directory?
+        If per-channel cache files required, scan this XSort working directory to check for any missing files.
 
-        The method only checks for the existence of the internal cache file for each analog data channel; it does not
-        validate the contents of the files, which are typically quite large.
-        :return: True if a cache file exists for each analog channel recorded; False if at least one is missing.
+        :return: True if analog channel caching is required and at least one channel cache file does not exist.
         """
-        ok = False
-        if self.is_valid:
+        if self.is_valid and self.need_analog_cache:
             for i in self._analog_channel_indices:
-                f = Path(self._folder, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i)}")
-                if not f.is_file():
-                    return False
-            ok = True
-        return ok
+                if not Path(self._folder, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i)}").is_file():
+                    return True
+        return False
+
+    def channels_not_cached(self) -> List[int]:
+        """
+        If this XSort working directory is valid and analog channel caching is required, scan the directory and return
+        the list of all analog channels that have not been cached.
+        :return: List of channel indices of those analog channels that need to be cached internally, in ascending
+            order. Returns an empty list if working directory is invalid, if analog source does not require channel
+            caching, or if all channel cache files are present.
+        """
+        out: List[int] = list()
+        if not (self.is_valid and self.need_analog_cache):
+            return out
+        for i in self._analog_channel_indices:
+            if not Path(self._folder, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i)}").is_file():
+                out.append(i)
+        out.sort()
+        return out
 
     def retrieve_cached_channel_trace(
             self, idx: int, start: int, count: int, suppress: bool = False) -> Optional[ChannelTraceSegment]:
