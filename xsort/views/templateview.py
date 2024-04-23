@@ -21,6 +21,12 @@ class TemplateView(BaseView):
     assigned a pen color depending on the unit's position in the display focus list. All of the data items will have
     empty data sets initially,  and it is only the data sets that get updated when the display focus list changes or
     neuron metrics are updated.
+        **NOTE**: When there are more than 16 recorded analog channels, XSort computes templates on a maximum of
+    16 channels "near" a unit's primary channel. If two different units do not have the same primary channel, their
+    templates are not computed on the same set of channels. By design, this view displays all 16 templates for the
+    primary unit (the first unit in the focus list), as well any templates for other units in the focus list that were
+    computed on any channel among the primary unit's 16 template channel indices. This makes sense -- it's highly
+    unlikely the user will need to compare unites with very different template channel sets.
     """
 
     trace_pen_width: int = 3
@@ -38,7 +44,7 @@ class TemplateView(BaseView):
     """ Maximum template span in milliseconds. """
     _MIN_VSPAN_UV: int = 30
     """ Minimum +/- voltage range for templates, in microvolts. """
-    _MAX_VSPAN_UV: int = 250
+    _MAX_VSPAN_UV: int = 1000
     """ Msximum +/- voltage range for templates, in microvolts. """
     _DEF_VSPAN_UV: int = 75
     """ Default +/- voltage range for templates, in microvolts. """
@@ -188,8 +194,14 @@ class TemplateView(BaseView):
     def on_focus_neurons_changed(self) -> None:
         """
         Whenever the subset of neural units holding the display focus changes, update the plot to show the spike
-        templates for each unit in the focus set that across all available analog channels.
+        templates for each unit in the focus set that across all displayable analog channels.
         """
+        # if the set of displayable channels does not match the channel labels cached here, then we need to rebuild
+        # the view first
+        ch_set = {k for k in self._channel_labels.keys()}
+        if ch_set != set(self.data_manager.channel_indices):
+            self._reset()
+
         self._refresh()
 
     @Slot()
@@ -206,14 +218,16 @@ class TemplateView(BaseView):
     def _refresh(self, tspan_changed: bool = False, vspan_changed: bool = False,
                  uid_updated: Optional[str] = None) -> None:
         """
-        Refresh the view in response to a change in the set of displayed neurons, a change in the template span, or
-        upon retrieval of the metrics for a neuron.
-            If the template span has changed, the plot data items for all templates are updated IAW the new span, the
-        channel labels in the plot are repositioned accordingly, and the size of the time scale bar adjusted. If the
-        set of displayed neurons has changed, all plot data items are updated accordingly. When a neuron's metrics
-        (including spike template waveforms) are retrieved, no action is taken it that neuron is not currently selected
-        for display. If it is, then only the plot data items associated with that unit's templates are refreshed.
-        Note that only one of these changes will occur at a time.
+        Refresh the view in response to a change in the set of displayed neurons, a change in the template span, a
+        user-initiated change in the voltage span, or upon retrieval of the metrics for a neuron.
+            If the template span or voltage span has changed, the plot data items for all templates are updated
+        accordingly, the channel labels in the plot are repositioned, and the size of the time scale bar is adjusted if
+        necessary. If the set of displayed neurons has changed, all plot data items are updated accordingly. When a
+        neuron's metrics (including spike template waveforms) are retrieved, no action is taken it that neuron is not
+        currently selected for display. If it is, then only the plot data items associated with that unit's templates
+        are refreshed. Note that only one of these changes will occur at a time.
+            When the primary neuron is changed or its metrics updated, the current voltage span is auto-adjusted to
+        one-half of that unit's peak-to-peak amplitude.
 
         :param tspan_changed: True if template time (X) span was changed. Default is False.
         :param vspan_changed: True if template voltage (Y) span was changed. Default is False.
@@ -222,6 +236,7 @@ class TemplateView(BaseView):
         """
         if len(self.data_manager.channel_indices) == 0:
             return
+
         t_span_ms = self._tspan_slider.sliderPosition()
         t_span_ticks = int(self.data_manager.channel_samples_per_sec * t_span_ms * 0.001)
         v_span_uv = self._vspan_slider.sliderPosition()
@@ -237,6 +252,20 @@ class TemplateView(BaseView):
                 continue
             row: int = 0
             col: int = 0
+
+            # if the identity of the primary neuron (first unit in focus list) has changed or its metrics updated,
+            # auto-adjust voltage span to 1/2 that unit's peak-to-peak amplutude.
+            if (k == 0) and not (vspan_changed or tspan_changed):
+                vspan_auto = int(displayed[k].amplitude / 2.0)
+                vspan_auto = max(self._MIN_VSPAN_UV, min(vspan_auto, self._MAX_VSPAN_UV))
+                if v_span_uv != vspan_auto:
+                    self._vspan_slider.valueChanged.disconnect(self._on_voltage_range_change)
+                    self._vspan_slider.setSliderPosition(vspan_auto)
+                    self._vspan_readout.setText(f"+/-{vspan_auto} \u00b5v")
+                    self._vspan_slider.valueChanged.connect(self._on_voltage_range_change)
+                    v_span_uv = vspan_auto
+                    vspan_changed = True  # to fix channel labels as a result of auto adjustment of voltage span
+
             for idx in self.data_manager.channel_indices:
                 t0 = col * (t_span_ms * self._H_OFFSET_REL)
                 y0 = row * (2 * v_span_uv)

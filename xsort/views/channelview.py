@@ -11,15 +11,11 @@ from xsort.data.neuron import Neuron, ChannelTraceSegment
 from xsort.views.baseview import BaseView
 
 
-_DEFAULT_TRACE_OFFSET: int = 200
-""" Default vertical separation between channel trace segments, in microvolts. """
-
-
 class ChannelView(BaseView):
     """
-    This view displays a 1-sec trace for each of the analog wideband and narrowband channels available from the Omniplex
-    EPhys recording. For each neuron currently selected for display in XSort, the view superimposes -- on the trace for
-    the neuron's 'primary channel' -- 10-ms clips indicating the occurrence of spikes on that neuron.
+    This view displays a 1-sec trace for each of up selected set of recorded analog channels. For each neuron currently
+    selected for display in XSort, the view superimposes -- on the trace for the neuron's 'primary channel' -- 10-ms
+    clips indicating the occurrence of spikes on that neuron.
 
         A slider at the bottom of the view lets the user choose any 1-sec segment over the entire EPhys recording. The
     companion readouts reflect the elapsed recording time -- in the format MM:SS.mmm (minutes, seconds, milliseconds) --
@@ -40,6 +36,12 @@ class ChannelView(BaseView):
     Width of pen used to render spike clips on top of channel traces. IMPORTANT - Any value other than 1
     dramatically worsened rendering times!
     """
+    _DEFAULT_TRACE_OFFSET: int = 200
+    """ Default vertical separation between channel trace segments, in microvolts. """
+    _MIN_TRACE_OFFSET: int = 100
+    """ Minimum vertical separation between channel trace segments, in microvolts. """
+    _MAX_TRACE_OFFSET: int = 1000
+    """ Minimum vertical separation between channel trace segments, in microvolts. """
 
     def __init__(self, data_manager: Analyzer) -> None:
         super().__init__('Channels', None, data_manager)
@@ -50,20 +52,19 @@ class ChannelView(BaseView):
         """ The graphics item within the plot widget that manages the plotting. """
         self._message_label: pg.LabelItem = pg.LabelItem("", size="24pt", color="#808080")
         """ This label is displayed centrally when channel data is not available. """
-        self._trace_offset: int = _DEFAULT_TRACE_OFFSET
+        self._trace_offset: int = self._DEFAULT_TRACE_OFFSET
         """ Vertical separation between channel trace segments in the view, in microvolts. """
         self._trace_start: int = 0
         """ Sample index, relative to start of recording, for the first sample in each trace segment. """
         self._trace_segments: Dict[int, pg.PlotDataItem] = dict()
         """ 
-        The rendered trace segments, indexed by channel index. Each segment is assigned a name reflecting the
-        Omniplex analog channel label -- 'WB<N>' or SPKC<N>' 
+        The rendered trace segments, indexed by analog channel index. 
         """
         self._unit_spike_clips: List[pg.PlotDataItem] = list()
         """ 
         The plot data item at pos N renders the spike clips for the N-th neuron in the list of neurons with the display
         focus. The 10ms clips **[T-1 .. T_9]** are plotted on top of the trace segment for the unit's primary analog 
-        source channel at each spike occurrence time T that fallw within that trace segment. The clip color matches
+        source channel at each spike occurrence time T that falls within that trace segment. The clip color matches
         the color assigned to each neuron in the display list, albeit semi-transparent to help visualize overlaps among
         units having the same primary channel.
         """
@@ -113,7 +114,7 @@ class ChannelView(BaseView):
         self._t0_slider.valueChanged.connect(self.on_t0_slider_value_changed)
         self._t0_slider.sliderMoved.connect(self._on_t0_slider_moved)
 
-        self._vspan_slider.setRange(100, 300)
+        self._vspan_slider.setRange(self._MIN_TRACE_OFFSET, self._MAX_TRACE_OFFSET)
         self._vspan_slider.setSliderPosition(self._trace_offset)
         self._vspan_slider.setTickPosition(QSlider.TickPosition.NoTicks)
         self._vspan_slider.setTracking(False)
@@ -140,8 +141,8 @@ class ChannelView(BaseView):
         """
         Reset and reinitialize this view. All plot data items representing existing channel trace segments, as well as
         spike clips for each slot in the neuron display list, are removed and then repopulated. If there are no analog
-        channels available, the Y-axis is hidden and a static centered message label is shown indicating that there is
-        no data. Otherwise, a "flat line" trace is drawn in [0, 1] for each available analog channel, and the Y-axis
+        channels displayable, the Y-axis is hidden and a static centered message label is shown indicating that there is
+        no data. Otherwise, a "flat line" trace is drawn in [0, 1] for each displayable analog channel, and the Y-axis
         tick labels reflect the channel indices. The traces are separated vertically IAW the view's current trace
         offset. The plot data items for the displayed neuron spike clips will all be empty initially.
             The slider and label widgets that set and display the elapsed start time for the trace segments are reset
@@ -196,33 +197,36 @@ class ChannelView(BaseView):
 
     def on_working_directory_changed(self) -> None:
         """
-        When the working directory changes, the number of analog data channels should be known, but analog data for
-        each channel will not be ready, nor any neural unit metrics. The view is reset, preparing 'empty' data items
-        for each channel trace segment and the spike clips for each slot in the neuron display list. The actual data
-        will be inserted at a later time, as channel trace segments and neuron metrics are retrieved from XSort's
-        internal cache.
+        Whenever the working directory has changed, the unit focus list will be empty and the initial set of analog data
+        channel traces should be ready. The view is reset, preparing 'empty' data items for each channel trace segment
+        and the spike clips for each slot in the neuron display list. The actual data channel trace segments are then
+        inserted.
         """
         self._reset()
+        offset = 0
+        for ch_idx, pdi in self._trace_segments.items():
+            seg = self.data_manager.channel_trace(ch_idx)
+            if seg is None:
+                pdi.setData(x=[0, 1], y=[offset, offset])
+            else:
+                pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
+                            y=offset + seg.trace_in_microvolts)
+            offset += self._trace_offset
 
-    def on_channel_trace_segment_updated(self, idx: int) -> None:
+    def on_channel_traces_updated(self) -> None:
         """
-        When a channel trace segment is retrieved, this handler sets the X,Y data for the corresponding
-        :class:`pyqtgraph.PlotDataItem` that renders the trace segment. If the specified channel is the so-called
-        primary channel for any neuron in the current display list, the spike clips for that neuron are also updated.
-        :param idx: Index of analog source channel for which the trace segment was retreived.
+        Handler updates the X,Y data for each :class:`pyqtgraph.PlotDataItem` that renders a trace segment or a set
+        of spike clips for a neuron in the current focus list.
         """
         offset = 0
         for k, pdi in self._trace_segments.items():
-            if k == idx:
-                seg = self.data_manager.channel_trace(idx)
-                if seg is None:
-                    pdi.setData(x=[0, 1], y=[offset, offset])
-                else:
-                    pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
-                                y=offset + seg.trace_in_microvolts)
-                break
+            seg = self.data_manager.channel_trace(k)
+            if seg is None:
+                pdi.setData(x=[0, 1], y=[offset, offset])
             else:
-                offset += self._trace_offset
+                pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
+                            y=offset + seg.trace_in_microvolts)
+            offset += self._trace_offset
 
         displayed = self.data_manager.neurons_with_display_focus
         for k, pdi in enumerate(self._unit_spike_clips):
@@ -235,13 +239,12 @@ class ChannelView(BaseView):
                     offset = self._trace_offset * self.data_manager.channel_indices.index(ch_idx)
                 except Exception:
                     continue
-            if ch_idx == idx:
-                seg = self.data_manager.channel_trace(ch_idx)
-                if seg is None:
-                    pdi.setData(x=[], y=[])
-                else:
-                    x, y = self._prepare_clip_data(unit, seg, offset)
-                    pdi.setData(x=x, y=y)
+            seg = self.data_manager.channel_trace(ch_idx)
+            if seg is None:
+                pdi.setData(x=[], y=[])
+            else:
+                x, y = self._prepare_clip_data(unit, seg, offset)
+                pdi.setData(x=x, y=y)
 
     def on_neuron_metrics_updated(self, uid: str) -> None:
         """
@@ -263,9 +266,15 @@ class ChannelView(BaseView):
 
     def on_focus_neurons_changed(self) -> None:
         """
-        When the neuron display list changes, this handler refreshes the spike clip data for **all** slots in the
-        display list. For unused slots, the clip data will be empty.
+        When the neuron display list changes, the set of displayable channels could change -- in which case this view
+        is reset. If the displayable channel set is unchanged, then only the spike clip data is refreshed for **all**
+        slots in the display list. For unused slots, the clip data will be empty.
         """
+        ch_set = {k for k in self._trace_segments.keys()}
+        if ch_set != set(self.data_manager.channel_indices):
+            self._reset()
+            return
+
         displayed = self.data_manager.neurons_with_display_focus
         for k, pdi in enumerate(self._unit_spike_clips):
             x = []

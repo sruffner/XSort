@@ -1,6 +1,6 @@
 from importlib import resources as impresources
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Set
 
 from PySide6.QtCore import Slot, QStandardPaths, QSettings, QCoreApplication, QByteArray, Qt, QObject, QSize
 from PySide6.QtGui import QAction
@@ -83,10 +83,11 @@ class _UserGuideView(BaseView):
 
 class ViewManager(QObject):
     """
-    TODO: UNDER DEV -- This is essentially the view + controller for XSort. It builds the UI in the main application
-        window and responds to signals from the Analyzer, which serves as the master data model.
-    TODO: Avoided native settings format so I can examine INI file during development. Can stick with INI or
-        eventually switch to native format:  'settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)'
+    XSort's view manager. It is essentially the view + controller for XSort. It builds the UI in the main application
+    window and responds to signals from the Analyzer, which serves as the master data model.
+
+    NOTE: Avoided native settings format so I can examine INI file during development. Can stick with INI or
+    eventually switch to native format:  'settings = QSettings(xs.ORG_DOMAIN, xs.APP_NAME)'
     """
 
     _MRU_DIR_MAX_SIZE: int = 5
@@ -112,14 +113,26 @@ class ViewManager(QObject):
         """ The application's 'About' dialog. """
 
         self._neuron_view = NeuronView(self.data_analyzer)
+        """ 
+        View displaying tabular list of all defined neural units. User selects units comprising the display focus
+        list via this view.
+        """
         self._templates_view = TemplateView(self.data_analyzer)
+        """ View displaying computed spike templates for units in the current display focus list. """
         self._correlogram_view = CorrelogramView(self.data_analyzer)
+        """ View displaying ACG/CCG for units in the current display focus list. """
         self._isi_view = ISIView(self.data_analyzer)
+        """ View displaying interspike interval histograms for units in the current focus list. """
         self._acg_vs_rate_view = ACGRateView(self.data_analyzer)
+        """ View displaying 3D ACG as a function of firing rate for units in the current focus list. """
         self._firingrate_view = FiringRateView(self.data_analyzer)
+        """ View displaying firing rate histograms for units in the current focus list. """
         self._pca_view = PCAView(self.data_analyzer)
+        """ View displaying results of principal component analysis on units in the current focus list. """
         self._channels_view = ChannelView(self.data_analyzer)
+        """ View displaying channel trace segments for a selected set of recorded analog channels. """
         self._user_guide_view = _UserGuideView(self.data_analyzer)
+        """ View displaying a small help guide for XSort. """
 
         self._all_views = [self._neuron_view, self._templates_view, self._correlogram_view, self._isi_view,
                            self._acg_vs_rate_view, self._firingrate_view, self._pca_view, self._channels_view,
@@ -150,7 +163,8 @@ class ViewManager(QObject):
         # connect to Analyzer signals
         self.data_analyzer.working_directory_changed.connect(self.on_working_directory_changed)
         self.data_analyzer.progress_updated.connect(self.on_background_task_updated)
-        self.data_analyzer.data_ready.connect(self.on_data_ready)
+        self.data_analyzer.unit_data_ready.connect(self.on_unit_data_ready)
+        self.data_analyzer.channel_traces_updated.connect(self.on_channel_traces_updated)
         self.data_analyzer.focus_neurons_changed.connect(self.on_focus_neurons_changed)
         self.data_analyzer.channel_seg_start_changed.connect(self.on_channel_seg_start_changed)
         self.data_analyzer.neuron_label_updated.connect(self.on_neuron_label_updated)
@@ -238,6 +252,11 @@ class ViewManager(QObject):
                 dock.setHidden(True)
             self._view_menu.addAction(dock.toggleViewAction())
 
+            # whenever a unit statistics view dock widget is hidden or shown, we need to inform the data model so
+            # that it knows which statistics need not be computed at any given time.
+            if v in [self._isi_view, self._correlogram_view, self._acg_vs_rate_view, self._pca_view]:
+                dock.visibilityChanged.connect(self.on_dock_widget_visibility_changed)
+
         self._main_window.setDockNestingEnabled(True)
         self._main_window.setCorner(Qt.Corner.BottomRightCorner, Qt.DockWidgetArea.RightDockWidgetArea)
 
@@ -311,23 +330,30 @@ class ViewManager(QObject):
         self._main_window.statusBar().showMessage(msg if isinstance(msg, str) and (len(msg) > 0) else "Ready")
 
     @Slot(DataType, str)
-    def on_data_ready(self, dt: DataType, uid: str) -> None:
+    def on_unit_data_ready(self, dt: DataType, uid: str) -> None:
         """
-        Handler updates relevant views when the data model signals that some data is ready to be accessed.
-        :param dt: The type of data object retrieved or prepared for access.
+        Handler updates relevant views when the data model signals that some information statistics for a particular
+        neural unit is ready to be accessed.
+        :param dt: The type of neural unit information retrieved or prepared for access.
         :param uid: Object identifier -- the unique label of a neural unit, or the integer index (in string form) of
             the analog channel source for a channel trace segment.
         """
         if dt == DataType.NEURON:
             for v in self._all_views:
                 v.on_neuron_metrics_updated(uid)
-        elif dt == DataType.CHANNELTRACE:
-            for v in self._all_views:
-                v.on_channel_trace_segment_updated(int(uid))
-        else:
+        elif not (dt == DataType.CHANNELTRACE):
             for v in self._all_views:
                 v.on_focus_neurons_stats_updated(dt, uid)
         self._refresh_menus()
+
+    @Slot()
+    def on_channel_traces_updated(self) -> None:
+        """
+        Handler notifies all views when the trace segments are ready to be accessed for the current set of displayable
+        analog channels.
+        """
+        for v in self._all_views:
+            v.on_channel_traces_updated()
 
     @Slot()
     def on_focus_neurons_changed(self) -> None:
@@ -337,6 +363,7 @@ class ViewManager(QObject):
         """
         for v in self._all_views:
             v.on_focus_neurons_changed()
+
         self._refresh_menus()
 
     @Slot()
@@ -352,11 +379,31 @@ class ViewManager(QObject):
     @Slot()
     def on_channel_seg_start_changed(self) -> None:
         """
-        Handler notifices all views when there's a change in the elapsed start time at which all analog channel trace
+        Handler notifies all views when there's a change in the elapsed start time at which all analog channel trace
         segments begin.
         """
         for v in self._all_views:
             v.on_channel_trace_segment_start_changed()
+
+    @Slot(bool)
+    def on_dock_widget_visibility_changed(self, _: bool) -> None:
+        """
+        Whenever one of the dock widgets in which neural unit statistics are displayed is hidden or shown, notify the
+        master data model (:class:`Analyzer`), which launches background tasks to compute statistics for units currently
+        in the display focus list. Certain statistics -- particularly the PCA projections -- take a significant amount
+        of time to compute, so the data model will not launch computation tasks for any hidden statistics views.
+        """
+        hide_stats: Set[DataType] = set()
+        show_stats: Set[DataType] = set()
+
+        for k, v in {DataType.ISI: self._isi_view, DataType.ACG: self._correlogram_view,
+                     DataType.ACG_VS_RATE: self._acg_vs_rate_view, DataType.CCG: self._correlogram_view,
+                     DataType.PCA: self._pca_view}.items():
+            if v.is_parent_dock_hidden:
+                hide_stats.add(k)
+            else:
+                show_stats.add(k)
+        self.data_analyzer.update_displayed_stats(show_stats, hide_stats)
 
     def select_working_directory(self, starting_up: bool = False, open_recent: int = -1) -> None:
         """

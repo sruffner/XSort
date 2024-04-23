@@ -166,7 +166,8 @@ class MainWindow(QMainWindow):
             dur = int(self._dur_edit.text())
             samples_per_sec = self.work_dir.analog_sampling_rate
             if (0 <= first_ch < n_ch) and (0 < n_ch) and (0 <= t0 < rec_dur) and (0 < dur):
-                out = (first_ch, n, t0*samples_per_sec, dur*samples_per_sec)
+                ch_indices = {i+first_ch for i in range(n)}
+                out = (ch_indices, t0*samples_per_sec, dur*samples_per_sec)
         except Exception:
             out = None
         return out
@@ -229,13 +230,10 @@ class MainWindow(QMainWindow):
         if not (isinstance(self.work_dir, WorkingDirectory) and self.work_dir.is_valid):
             return
         if not self.task_manager.busy:
-            task_started = self.task_manager.build_internal_cache_if_necessary(self.work_dir)
-            if not task_started:
-                self.progress_edit.append("Cache build not required.")
-            else:
-                self.t_task_start = time.perf_counter()
-                self.progress_edit.append("Building internal cache...")
-                self._refresh_state()
+            self.task_manager.build_internal_cache(self.work_dir)
+            self.t_task_start = time.perf_counter()
+            self.progress_edit.append("Building internal cache...")
+            self._refresh_state()
         else:
             self.task_manager.cancel_all_tasks(self.progress_dlg)
 
@@ -291,7 +289,7 @@ class MainWindow(QMainWindow):
         if self.task_manager.busy or (params is None):
             return
         self.t_task_start = time.perf_counter()
-        self.task_manager.get_channel_traces(self.work_dir, params[0], params[1], params[2], params[3])
+        self.task_manager.get_channel_traces(self.work_dir, params[0], params[1], params[2])
 
     @Slot(str, int)
     def _on_task_progress_update(self, msg: str, pct: int) -> None:
@@ -306,6 +304,13 @@ class MainWindow(QMainWindow):
                                           f"dur={seg.duration:.1f}")
             else:
                 self.progress_edit.append(f"Bad data object returned, should be ChannelTraceSegment")
+        if data_type == DataType.NEURON:
+            if isinstance(data, Neuron):
+                unit: Neuron = data
+                self.progress_edit.append(f"Got unit {unit.uid}, #spikes={unit.num_spikes}, "
+                                          f"primary_ch={unit.primary_channel}, snr={unit.snr:.2f}")
+            else:
+                self.progress_edit.append(f"Bad data object returned, should be Neuron")
         elif isinstance(data, tuple):
             try:
                 uid = data[0]

@@ -108,7 +108,7 @@ class ACGRateView(BaseView):
             pi.hideAxis('left')
 
             color = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[i])
-            rate_bins, acgs = displayed[i].cached_acg_vs_rate()
+            rate_bins, acgs = displayed[i].cached_acg_vs_rate
             if len(rate_bins) > 0:
                 n_bins = len(rate_bins)
                 rate_bin_size = (rate_bins[-1] - rate_bins[0]) / n_bins
@@ -142,7 +142,7 @@ class ACGRateView(BaseView):
             if displayed[i].uid == uid:
                 plot_item: pg.PlotItem = self._layout_widget.ci.getItem(row=0, col=i)
                 color = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[i])
-                rate_bins, acgs = displayed[i].cached_acg_vs_rate()
+                rate_bins, acgs = displayed[i].cached_acg_vs_rate
                 if len(rate_bins) > 0:
                     n_bins = len(rate_bins)
                     rate_bin_size = (rate_bins[-1] - rate_bins[0]) / n_bins

@@ -1,7 +1,7 @@
 from typing import List, Any, Optional
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings
-from PySide6.QtGui import QColor, QAction, QGuiApplication
+from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF
 from PySide6.QtWidgets import QTableView, QHeaderView, QHBoxLayout, QSizePolicy, QMenu
 
 from xsort.data.analyzer import Analyzer
@@ -26,6 +26,9 @@ class _NeuronTableModel(QAbstractTableModel):
                                  'SNR', 'Amp(\u00b5V)', '%ISI<1', 'Similarity']
     """ Column header labels. """
 
+    _col_values_for_sizing: List[str] = ['000', 'Purkinje', '000', '000000', '0000.00', '00.00', '00.0', '0.00', '0.00']
+    """ Typical cell value for each column -- to calculate fixed column sizes. """
+
     LABEL_COL_IDX = 1
     """ Index of the 'Label' column -- unit labels may be edited. """
 
@@ -49,6 +52,13 @@ class _NeuronTableModel(QAbstractTableModel):
     def reload_table_data(self):
         self._resort()
         self.layoutChanged.emit()
+
+    def on_unit_label_changed(self, uid: str) -> None:
+        for r in range(len(self._sorted_indices)):
+            if self._data_manager.neurons[self._sorted_indices[r]].uid == uid:
+                cell_index = self.createIndex(r, self.LABEL_COL_IDX)
+                self.dataChanged.emit(cell_index, cell_index, [Qt.ItemDataRole.DisplayRole])
+                break
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._data_manager.neurons)
@@ -174,6 +184,26 @@ class _NeuronTableModel(QAbstractTableModel):
                 return self._data_manager.neurons[idx].uid
         return None
 
+    @staticmethod
+    def calc_fixed_column_widths(cell_fm: QFontMetricsF, hdr_fm: QFontMetricsF) -> List[int]:
+        """
+        Calculate the fixed widths of each column in the table.
+
+        For each column, the fixed width is the greater of the width of a typical cell value or the width of the
+        corresponding header label. We measure width as the C*(N+4), where C is the average character width according
+        to the provided font metrics and N is the number of characters in the header label or sample cell value.
+
+        :param cell_fm: Font metrics for values in the table cells.
+        :param hdr_fm: Font metrics for the the values in the table header cells.
+        :return: List of fixed column widths.
+        """
+        out: List[int] = list()
+        for hdr in _NeuronTableModel._header_labels:
+            out.append(int(hdr_fm.averageCharWidth() * (len(hdr) + 4)))
+        for i, val in enumerate(_NeuronTableModel._col_values_for_sizing):
+            out[i] = max(out[i], int(cell_fm.averageCharWidth() * (len(val) + 2)))
+        return out
+
 
 class NeuronView(BaseView):
     """
@@ -181,9 +211,13 @@ class NeuronView(BaseView):
     table represents one neural unit, with the unit label and various numerical statistics shown in the columns. The
     table may be sorted on any column, in ascending or descending order. The visibility of selected columns may be
     toggled via a context menu raised when the user clicks anywhere on the column header.
-        The user selects a neuron for the display focus by clicking on it, and removes the focus by clicking it again.
-    The display focus list may contain up to MAX_NUM_FOCUS_NEURONS, and a unique color is assigned to each slot in that
-    list. Most other views in XSort display data for neurons in the current display list, using the assigned colors.
+        The user single-selects a neuron for the display focus by clicking on the corresponding row, and adds a neuron
+    to the display list by clicking on its row by holding down any modifier key. Contiguous range selection is not
+    supported. The display focus list may contain up to MAX_NUM_FOCUS_NEURONS (3), and a unique color is assigned to
+    each slot in that list. Most other views in XSort display data for neurons in the current display list, using the
+    assigned colors.
+        **NOTE**: In a previous version, the QTableView was too slow to "repaint" whenever there was any layout
+    change. Performance was dramatically improved by fixing the row height and the column widths.
     """
 
     def __init__(self, data_manager: Analyzer) -> None:
@@ -200,10 +234,21 @@ class NeuronView(BaseView):
         self._model.sort(0)   # to ensure table view is initially sorted by column 0 in ascending order
         self._table_view.setSelectionBehavior(QTableView.SelectionBehavior.SelectRows)
         self._table_view.setSelectionMode(QTableView.SelectionMode.NoSelection)
-        self._table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+
+        # we use fixed column widths and a fixed row height to speed up performance when there are lots of rows
+        self._table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self._table_view.horizontalHeader().setMinimumSectionSize(30)
+        col_widths = _NeuronTableModel.calc_fixed_column_widths(
+            self._table_view.fontMetrics(), self._table_view.horizontalHeader().fontMetrics())
+        for col, w in enumerate(col_widths):
+            self._table_view.horizontalHeader().resizeSection(col, w)
         self._table_view.horizontalHeader().setStretchLastSection(True)
-        self._table_view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self._table_view.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        min_ht = int(self._table_view.fontMetrics().height()) + 6
+        self._table_view.verticalHeader().setMinimumSectionSize(min_ht)
+        self._table_view.verticalHeader().setDefaultSectionSize(min_ht)
         self._table_view.verticalHeader().setVisible(False)
+
         size = QSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
         size.setHorizontalStretch(1)
         self._table_view.setSizePolicy(size)
@@ -243,7 +288,7 @@ class NeuronView(BaseView):
         self._model.reload_table_data()
 
     def on_neuron_label_updated(self, uid: str) -> None:
-        self._model.reload_table_data()
+        self._model.on_unit_label_changed(uid)
 
     def on_item_clicked(self, index: QModelIndex) -> None:
         uid = self._model.unit_uid_for_row(index.row())

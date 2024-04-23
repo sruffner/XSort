@@ -1,17 +1,17 @@
 import pickle
 import time
 from pathlib import Path
-from typing import Union, Optional, Dict, List, Tuple, Any
+from typing import Union, Optional, Dict, List, Tuple, Any, Set
 
 import numpy as np
-from PySide6.QtCore import QObject, Signal, Slot, QThreadPool, QTimer, QPointF
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, QPointF
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPolygonF
 from PySide6.QtWidgets import QMainWindow, QProgressDialog, QFileDialog, QMessageBox
 
 from xsort.data.edits import UserEdit
-from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType
-from xsort.data.tasks import (Task, TaskType)
+from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType, MAX_CHANNEL_TRACES
+from xsort.data.taskmanager import TaskManager
 from xsort.data.files import WorkingDirectory
 
 
@@ -19,7 +19,6 @@ class Analyzer(QObject):
     """
     The data model manager object for XSort.
     """
-
     MAX_NUM_FOCUS_NEURONS: int = 3
     """ The maximum number of neural units that can be selected simultaneously for display focus. """
     FOCUS_NEURON_COLORS: List[str] = ['#0080FF', '#FF0000', '#FFFF00']
@@ -32,17 +31,23 @@ class Analyzer(QObject):
     Signals a status update from an IO/analysis job running in the background. Arg (str): status message. If message is 
     empty, then background task has finished. 
     """
-    data_ready: Signal = Signal(DataType, str)
+    unit_data_ready: Signal = Signal(DataType, str)
     """ 
-    Signals that some data that was retrieved or prepared in the background. Args: The data object type, and a 
-    string identifier: the unit label for a neuron, or the integer index (as a string) of the analog channel source for
-    a channel trace segment.
+    Signals that neural unit information or statistics are have been prepared. Args: The data object type and the UID
+    of the specific unit.
+    """
+    channel_traces_updated: Signal = Signal()
+    """
+    Signals that channel trace segments have just been updated for the current displayable channel set.
     """
     focus_neurons_changed: Signal = Signal()
     """
     Signals that the set of neural units currently selected for display/comparison purposes has changed in some way.
-    All views should be refreshed accordingly. **NOTE**: This signal is also sent whenever a unit is added or removed
+    All views should be refreshed accordingly. **NOTE**: (1) Signal is also sent whenever a unit is added or removed
     because of a user-initiated delete/merge/split/undo operation -- because the focus list is always changed as well.
+    (2) A change in the focus list could also change the set of displayable analog channels. When the working directory
+    stores more than N = MAX_CHANNEL_TRACES analog channels, only the N channels in the neighborhood of the primary
+    neuron's primary channel will be available for display.
     """
     channel_seg_start_changed: Signal = Signal()
     """ 
@@ -72,6 +77,11 @@ class Analyzer(QObject):
         the analog data source is very large, and each channel's data stream must be extracted, bandpass-filtered if
         necessary, and cached in separate files for faster lookup, the channel trace segments will not be ready upon 
         changing the working directory.
+        
+        In addition, when the number of recorded channels exceeds MAX_CHANNEL_TRACES, the set of channels for which
+        trace segments are those MAX_CHANNEL_TRACES "near" the primary channel for the first neural unit in the current
+        focus list (if not empty). If fewer than MAX_CHANNEL_TRACES channels were recorded, than all analog channel
+        traces are displayed.
         """
         self._channel_seg_start: int = 0
         """ 
@@ -92,13 +102,18 @@ class Analyzer(QObject):
         """
         self._edit_history: List[UserEdit] = list()
         """ The edit history, a record of all user-initiated changes to the list of neural units, in chrono order. """
-        self._thread_pool = QThreadPool()
-        """ Managed thread pool for running slow background tasks. """
-
-        self._background_tasks: Dict[TaskType, Optional[Task]] = {
-            TaskType.BUILDCACHE: None, TaskType.COMPUTESTATS: None, TaskType.GETCHANNELS: None
-        }
-        """ Dictionary of running tasks, by type. """
+        self._displayed_stats: Set[DataType] = \
+            {DataType.ISI, DataType.ACG, DataType.ACG_VS_RATE, DataType.CCG, DataType.PCA}
+        """ 
+        The set of neural unit statistics currently on display in XSort views. To minimize background computations,
+        only currently displayed statistics are computed.
+        """
+        self._task_manager: TaskManager = TaskManager()
+        """ Background task manager. """
+        self._task_manager.progress.connect(self.on_task_progress)
+        self._task_manager.ready.connect(self.on_task_done)
+        self._task_manager.error.connect(self.on_task_failed)
+        self._task_manager.data_available.connect(self.on_data_available)
 
         self._progress_dlg = QProgressDialog("Please wait...", "", 0, 100, self._main_window)
         """ A modal progress dialog used to block further user input when necessary. """
@@ -125,8 +140,14 @@ class Analyzer(QObject):
     @property
     def channel_indices(self) -> List[int]:
         """
-        The indices of the analog channels available in the multielectrode recording. Will be empty if no valid working
-        directory has been set. In ascending order.
+        The indices of the analog channels from the multielectrode recording that are currently available for display.
+        Will be empty if no valid working directory has been set. In ascending order.
+
+        Whenever the number of recorded analog channels exceeds MAX_CHANNEL_TRACES (recording sessions could involve
+        hundreds of channels), the XSort data model only caches channel trace segments for the MAX_CHANNEL_TRACES
+        channels "in the neighborhood" of the primary channel for the first unit in the current focus list, aka the
+        primary neuron. In this scenario, the set of channel indices available for display will change whenever the
+        focus list changes, and a signal is emitted to notify the view manager whenever that happens.
         """
         indices = [k for k in self._channel_segments.keys()]
         indices.sort()
@@ -148,7 +169,7 @@ class Analyzer(QObject):
         """
         Get an analog channel trace segment
         :param idx: The channel index.
-        :return: The trace segment for the specified channel, or None if that channel is not available.
+        :return: The trace segment for the specified channel, or None if that channel is not available for display.
         """
         return self._channel_segments.get(idx)
 
@@ -194,8 +215,32 @@ class Analyzer(QObject):
             self._channel_segments[idx] = None
 
         self.channel_seg_start_changed.emit()
-        self._launch_background_task(TaskType.GETCHANNELS)
+        start = self._channel_seg_start * self.channel_samples_per_sec
+
+        self._task_manager.get_channel_traces(self._working_directory, set(self.channel_indices),
+                                              start, self.channel_samples_per_sec)
         return True
+
+    def update_displayed_stats(self, show: Set[DataType], hide: Set[DataType]) -> None:
+        """
+        Update the shown/hidden state of one of the neural unit statistics -- ISI, ACG, ACG_VS_RATE, CCG, and PCA. When
+        the corresponding view is shown/hidden, XSort's view manager calls this method to notify :class:`Analyzer`.
+        To save time when computing unit statistics in the background, any hidden statistics are not computed. This is
+        particularly important for principal component analysis, which is used less frequently but is by far the most
+        time-consuming computation.
+
+        :param show: The set of unit statistics to show
+        :param hide: The set of unit statistics to hide
+        """
+        stat_added = False
+        for dt in hide:
+            self._displayed_stats.discard(dt)
+        for dt in show:
+            if DataType.is_unit_stat(dt) and not (dt in self._displayed_stats):
+                self._displayed_stats.add(dt)
+                stat_added = True
+        if stat_added and len(self._focus_neurons) > 0:
+            QTimer.singleShot(100, self.compute_statistics_for_focus_list)
 
     @property
     def neurons(self) -> List[Neuron]:
@@ -310,7 +355,7 @@ class Analyzer(QObject):
         if not self.can_save_neurons_to_file():
             return
 
-        self._cancel_background_task(TaskType.COMPUTESTATS)
+        self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         # NOTE: On MacOS Ventura, the native dialog code prints a message ("[CATransaction synchronize] called within
         # transaction") to stderr, but the dialog still appears to work.
@@ -343,66 +388,6 @@ class Analyzer(QObject):
         if len(emsg) > 0:
             QMessageBox.warning(self._main_window, "File save error", emsg)
 
-    def _launch_compute_stats_task(self) -> None:
-        self._launch_background_task(TaskType.COMPUTESTATS)
-
-    def _cancel_background_task(self, t: TaskType) -> None:
-        """
-        Cancel a running background task.
-
-            By design, no two instances of a particular task type can be running in the background at the same time.
-        Certain tasks (building the cache files for a new XSort working directory; computing the PCA projections for
-        units in the display focus list) can take a significant amount of time to complete. To keep XSort as responsive,
-        as possible, all tasks are cancellable. However, in the current framework, we must wait an indeterminate
-        amount of time for a task to "detect" the cancel request and stop.
-            While waiting, the UI should be blocked to prevent further user interactions which could trigger additional
-        background work. Thus, this method raises a modal progress dialog while waiting for the cancelled task to
-        finish.
-        :param t: The task type.
-        """
-        if not (self._background_tasks[t] is None):
-            try:
-                self._background_tasks[t].cancel()
-                i = 0
-                while self._background_tasks[t] is not None:
-                    self._progress_dlg.setValue(i)
-                    time.sleep(0.05)
-                    # in the unlikely event it takes more than 5s for task to stop, reset progress to 0%
-                    i = 0 if i == 99 else i + 1
-            finally:
-                self._background_tasks[t] = None
-                self._progress_dlg.close()
-
-    def _launch_background_task(self, t: TaskType) -> None:
-        """
-        Helper method launches ones of the XSort background tasks. If a task of that type is already running (or was
-        running), it is cancelled before launching a new instance of that task. By design, only one instance of each
-        type of task should run at one time.
-        :param t: The type of task to launch
-        """
-        self._cancel_background_task(t)
-
-        if t == TaskType.BUILDCACHE:
-            task = Task(TaskType.BUILDCACHE, self._working_directory)
-        elif t == TaskType.COMPUTESTATS:
-            focus_list = self.neurons_with_display_focus
-            if len(focus_list) == 0:
-                return
-            task = Task(TaskType.COMPUTESTATS, self._working_directory, units=focus_list)
-        elif t == TaskType.GETCHANNELS:
-            t0 = self._channel_seg_start
-            task = Task(TaskType.GETCHANNELS, self._working_directory, start=t0 * self.channel_samples_per_sec,
-                        count=self.channel_samples_per_sec)
-        else:
-            return
-
-        task.signals.progress.connect(self.on_task_progress)
-        task.signals.error.connect(self.on_task_failed)
-        task.signals.data_available.connect(self.on_data_available)
-        task.signals.finished.connect(self.on_task_done)
-        self._background_tasks[t] = task
-        self._thread_pool.start(task)
-
     def prepare_for_shutdown(self) -> None:
         """
         Prepare for XSort to shutdown. The analyzer saves the edit history for the current working directory and
@@ -410,8 +395,7 @@ class Analyzer(QObject):
         STILL may be a noticeable delay before the application exits because certain tasks may take several seconds
         to respond to the cancel request.
         """
-        for task_type in self._background_tasks:
-            self._cancel_background_task(task_type)
+        self._task_manager.cancel_all_tasks(self._progress_dlg)
         self.save_edit_history()
 
     def save_edit_history(self):
@@ -435,8 +419,7 @@ class Analyzer(QObject):
         """
         self.save_edit_history()
 
-        for task_type in self._background_tasks:
-            self._cancel_background_task(task_type)
+        self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         _p = Path(p) if isinstance(p, str) else p
         if not isinstance(_p, Path):
@@ -455,45 +438,72 @@ class Analyzer(QObject):
         if len(emsg) > 0:
             return f"Error reading edit history: {emsg}"
 
-        # success
-        self._working_directory = work_dir
-        self._channel_segments = {k: None for k in work_dir.analog_channel_indices}
-        self._channel_seg_start = 0
-        _, self._neurons = work_dir.load_neural_units()
-        self._edit_history = edit_history
-        self._focus_neurons.clear()
-
-        # apply full edit history to bring neuron list up-to-date
-        for edit_rec in self._edit_history:
-            edit_rec.apply_to(self._neurons)
-
-        # signal views
-        self.working_directory_changed.emit()
+        # load original units and then apply history to get the current list of units
+        emsg, neurons = work_dir.load_neural_units()
+        if len(emsg) > 0:
+            return emsg
+        for edit_rec in edit_history:
+            edit_rec.apply_to(neurons)
 
         # building the internal cache can take a long time - especially when the directory has not been cached before -
         # block user input with our modal progress dialog. For this particular task, progress messages are displayed in
         # the dialog.
         self._progress_dlg.show()
         self._progress_dlg.setValue(0)
+        self._progress_dlg.setLabelText("Building internal cache files as needed...")
 
         # spawn task to build internal cache if necessary and/or retrieve the data we require: first second's worth
         # of each relevant analog channel trace, and metrics for all neural units
-        self._launch_background_task(TaskType.BUILDCACHE)
+        self._task_manager.build_internal_cache(work_dir)
 
-        # block UI while waing on BUILDCACHE task. The task progress handle will update the progress label and bar
+        # block UI while waing on BUILDCACHE task. The task progress handler will update the progress label and bar
         # irregularly, but we need to call QProgressDialog.setValue() regularly - so we do that here while never
-        # hitting the maximum.
+        # hitting the maximum. NOTE that BUILDCACHE task does not deliver any data.
+        channel_traces: Dict[int, ChannelTraceSegment] = dict()
         try:
-            while self._background_tasks[TaskType.BUILDCACHE] is not None:
-                time.sleep(0.05)
+            while self._task_manager.busy:
+                time.sleep(0.2)
                 next_value = self._progress_dlg.value() + 1
                 if next_value > 99:
                     next_value = 0
                 self._progress_dlg.setValue(next_value)
+
+            # TODO: What if an error occurs during BUILDCACHE task?
+
+            self._progress_dlg.setValue(95)
+            # retrieve first second's worth of samples on each of the first MAX_CHANNEL_TRACES analog channels
+            self._progress_dlg.setLabelText("Loading initial channel traces...")
+            for k in range(min(16, work_dir.num_analog_channels())):
+                channel_traces[k] = work_dir.retrieve_cached_channel_trace(k, 0, work_dir.analog_sampling_rate)
+
+            # load full unit metrics from cache files - inject metrics to preserve any label changes from applying the
+            # edit history!
+            self._progress_dlg.setLabelText("Loading neural unit metrics from cache...")
+            for u in neurons:
+                unit = work_dir.load_neural_unit_from_cache(u.uid)
+                if unit is None or unit.primary_channel is None:
+                    raise Exception(f"Missing or incomplete metrics cache file for unit {u.uid}")
+                templates = {ch_idx: unit.get_template_for_channel(ch_idx) for ch_idx in unit.template_channel_indices}
+                u.update_metrics(unit.primary_channel, unit.snr, templates)
+
+        except Exception as e:
+            return f"An error occurred: {str(e)}"
         finally:
-            self._background_tasks[TaskType.BUILDCACHE] = None
             self._progress_dlg.close()
             self._progress_dlg.setLabelText("Please wait...")
+
+        # success
+        self._working_directory = work_dir
+        self._channel_segments.clear()
+        self._channel_segments = {k: v for k, v in channel_traces.items()}
+        self._channel_seg_start = 0
+        self._neurons.clear()
+        self._neurons = neurons
+        self._edit_history = edit_history
+        self._focus_neurons.clear()
+
+        # signal views
+        self.working_directory_changed.emit()
 
         return None
 
@@ -508,11 +518,12 @@ class Analyzer(QObject):
         label = label.strip()
         try:
             u = self._neurons[idx]
-            prev_label = u.label
-            u.label = label
-            edit_rec = UserEdit(op=UserEdit.LABEL, params=[u.uid, prev_label, label])
-            self._edit_history.append(edit_rec)
-            self.neuron_label_updated.emit(u.uid)
+            if u.label != label:
+                prev_label = u.label
+                u.label = label
+                edit_rec = UserEdit(op=UserEdit.LABEL, params=[u.uid, prev_label, label])
+                self._edit_history.append(edit_rec)
+                self.neuron_label_updated.emit(u.uid)
             return True
         except Exception:
             pass
@@ -547,9 +558,8 @@ class Analyzer(QObject):
         if deleted_idx is None:
             return
 
-        # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
-        # unit list while it is being altered here!
-        self._cancel_background_task(TaskType.COMPUTESTATS)
+        # cancel all background tasks before altering the neural unit list
+        self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         u = self._neurons.pop(deleted_idx)
         if uid in [n.uid for n in self._neurons]:
@@ -593,9 +603,8 @@ class Analyzer(QObject):
             print(f"Unable to save merged unit to internal cache file!")
             return  # TODO: Should report reason operation failed
 
-        # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
-        # unit list while it is being altered here!
-        self._cancel_background_task(TaskType.COMPUTESTATS)
+        # cancel all background tasks before altering the neural unit list
+        self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         edit_rec = UserEdit(op=UserEdit.MERGE, params=[units[0].uid, units[1].uid, merged_unit.uid])
         self._focus_neurons.clear()
@@ -661,9 +670,8 @@ class Analyzer(QObject):
         if not self.can_split_primary_neuron():
             return
 
-        # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
-        # unit list while it is being altered here!
-        self._cancel_background_task(TaskType.COMPUTESTATS)
+        # cancel all background tasks before altering the neural unit list
+        self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         # do the split. This involves finding which spikes project inside the lasso region in PCA space, which can take
         # a few seconds if there 100K spikes or more. So we block user input with the modal progress dialog
@@ -754,10 +762,9 @@ class Analyzer(QObject):
             return False
         edit_rec = self._edit_history.pop()
 
-        # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
-        # unit list while it is being altered here!
+        # cancel all background tasks before altering the neural unit list (changing the label of a unit is ok)
         if edit_rec.operation != UserEdit.LABEL:
-            self._cancel_background_task(TaskType.COMPUTESTATS)
+            self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         if edit_rec.operation == UserEdit.LABEL:
             for u in self._neurons:
@@ -830,9 +837,8 @@ class Analyzer(QObject):
         if len(self._edit_history) == 0:
             return
 
-        # thread conflict: must cancel a COMPUTESTATS task in progress bc its signals can lead to accessing the neural
-        # unit list while it is being altered here!
-        self._cancel_background_task(TaskType.COMPUTESTATS)
+        # cancel all background tasks before altering the neural unit list
+        self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         # special case: only unit labels have been changed
         if all([rec.operation == UserEdit.LABEL for rec in self._edit_history]):
@@ -884,18 +890,90 @@ class Analyzer(QObject):
         signalling the view manager, and then queue a new COMPUTESTATS task (unless the focus list is now empty)
         after a short delay so that the user-facing views have a chance to refresh before that CPU-intensive task
         begins.
-        """
-        # cancel an ongoing COMPUTESTATS task (if any) and clear out stale PCA projections
-        self._cancel_background_task(TaskType.COMPUTESTATS)
-        for u in self._neurons:
-            u.set_cached_pca_projection(None)
 
-        # signal the view manager and associated views
+        If the number of recorded channels is larger than what XSort will display (MAX_CHANNEL_TRACES), then the set of
+        displayable channel indices is adjusted to center around the primary channel of the first neuron in the focus
+        list. Thus, whenever that set changes, the trace segment cache is cleared, the view manager is notified of the
+        change and a task is launched to retrieve trace segments for the new set of channel indices.
+        """
+        self._task_manager.cancel_compute_stats(self._progress_dlg)
+
+        # clear out stale PCA projections
+        for u in self._neurons:
+            u.clear_cached_pca_projection()
+
+        # IMPORTANT: we must update the displayable channel list before notifying the view manager that the focus list
+        # changed -- eg, templates are only shown for the current set of displayable channels, which can change when
+        # there are more than 16 recorded analog channels
+        self._update_displayable_channels_if_necessary()
         self.focus_neurons_changed.emit()
 
         # if the focus list is not empty, trigger a new COMPUTESTATS task after a brief delay
         if len(self._focus_neurons) > 0:
-            QTimer.singleShot(100, self._launch_compute_stats_task)
+            QTimer.singleShot(400, self.compute_statistics_for_focus_list)
+
+    def _update_displayable_channels_if_necessary(self) -> None:
+        """
+        Update the set of displayable analog channel indices if necessary. If there is a change, the previously cached
+        channel trace segments are cleared, and a background task is launched to retrieve trace segments for each
+        channel in the new set.
+
+        By design, XSort limits the number of displayable analog channel traces to MAX_CHANNEL_TRACES. When the number
+        of recorded channels exceeds this limit, the data model updates the displayable channel set to center it around
+        the primary channel for the first unit in the current display focus list, aka, the "primary neuron".
+        """
+        # no change if all channels are displayable, or primary neuron or its primary channel are undefined
+        if ((self._working_directory.num_analog_channels() <= MAX_CHANNEL_TRACES) or (self.primary_neuron is None) or
+                (self.primary_neuron.primary_channel is None)):
+            return
+
+        current_indices = set(self.channel_indices)
+        indices = set(self.primary_neuron.template_channel_indices)
+        if indices == current_indices:
+            return
+
+        self._channel_segments.clear()
+        self._channel_segments = {k: None for k in indices}
+        start = self._channel_seg_start * self.channel_samples_per_sec
+        self._task_manager.get_channel_traces(self._working_directory, indices, start, self.channel_samples_per_sec)
+
+    def compute_statistics_for_focus_list(self) -> None:
+        """
+        Prepare a request for various statistics for neural units in the focus list IAW what statistics are currently
+        on display in XSort. If any requested statistics are NOT already cached in the focus units, then launch a
+        background task to compute the missing statistics.
+
+        By design, XSort only computes the statistics (ISI, ACG, ACG_VS_RATE, CCG, PCA) for those units comprising the
+        current focus list, since the relevant XSort views only display statistics for those units. Other than a unit's
+        PCA projection, the statistic is computed once and cached in the unit from thereon (until the working directory
+        changes again). Furthermore, if the XSort view that displays a particular statistic is currently hidden, there's
+        no reason to compute it. This is particularly important for the PCA projections, which take a relatively long
+        time to compute. The user may hide the PCA view component until that analysis is needed.
+        """
+        focus_units = self.neurons_with_display_focus
+        if len(focus_units) == 0:
+            return
+        needed_stats: List[Tuple] = list()
+        for dt in self._displayed_stats:
+            uids: Set[str] = set()
+            if dt == DataType.CCG:
+                for u in focus_units:
+                    for u2 in focus_units:
+                        if (u.uid != u2.uid) and u.is_statistic_cached(dt, u2.uid):
+                            uids.update({u.uid, u2.uid})
+                    if len(uids) == len(focus_units):
+                        break
+            elif dt == DataType.PCA:
+                if not all([u.is_statistic_cached(dt) for u in focus_units]):
+                    uids.update({u.uid for u in focus_units})
+            else:
+                uids.update({u.uid for u in focus_units if not u.is_statistic_cached(dt)})
+            if len(uids) > 0:
+                needed_stats.append((dt,) + tuple(uids))
+
+        if len(needed_stats) > 0:
+            self._task_manager.cancel_compute_stats(self._progress_dlg)
+            self._task_manager.compute_unit_stats(self._working_directory, needed_stats)
 
     def undo_last_edit_description(self) -> Optional[Tuple[str, str]]:
         """
@@ -912,13 +990,12 @@ class Analyzer(QObject):
     @Slot(str, int)
     def on_task_progress(self, desc: str, pct: int) -> None:
         """
-        This slot is the mechanism by which :class:`Analyzer` receives progress updates from a task running on a
-        background thread. It forwards a progress message to the view manager, and if the modal progress dialog is
-        currently visible, it updates the dialog label and progress bar accordingly.
+        This slot is the mechanism by which :class:`Analyzer` receives progress updates from a background task managed
+        by the :class:`TaskManager`. It forwards a progress message to the view manager, and if the modal progress
+        dialog is currently visible, it updates the dialog label and progress bar accordingly.
 
         :param desc: Progress message.
         :param pct: Percent complete. If this lies in [0..100], then "{pct}%" is appended to the progress message.
-        :return:
         """
         msg = f"{desc} - {pct}%" if (0 <= pct <= 100) else desc
         self.progress_updated.emit(msg)
@@ -928,16 +1005,13 @@ class Analyzer(QObject):
             if 0 <= pct <= 100:
                 self._progress_dlg.setValue(pct)
 
-    @Slot(TaskType)
-    def on_task_done(self, task_type: TaskType) -> None:
+    @Slot()
+    def on_task_done(self) -> None:
         """
-        This slot is the mechanism by which :class:`Analyzer` is notified that a background task has finished. After
-        discarding the task object, it signals the view manager that a background task finished.
-
-        :param task_type: Type of task that finished.
+        This slot is the mechanism by which :class:`Analyzer` is notified that a background task has finished. The
+        Analyzer notifies the view manager of this fact by emitting an empty progress message.
         """
         self.progress_updated.emit("")
-        self._background_tasks[task_type] = None
 
     @Slot(str)
     def on_task_failed(self, emsg: str) -> None:
@@ -949,38 +1023,50 @@ class Analyzer(QObject):
     def on_data_available(self, data_type: DataType, data: object) -> None:
         """
         This slot is the mechanism by which Analyzer, living in the main GUI thread, receives data objects that are
-        prepared/retrieved by a task running on a background thread. Currently, two types of data containers
-        are delivered:
-            - :class:`Neuron` contains metrics, including the spike train, for a specified neural unit. It also caches
-        statistics computed in the background: ISI/ACG/CCG, PCA projection.
-            - :class:`ChannelTraceSegment` is a small contiguous segment of a recorded analog trace.
-        The retrieved data is stored in an internal member, and a signal is emitted to notify the view controller to
-        refresh the GUI appropriately now that the data is immediately available for use.
+        prepared/retrieved by background tasks launched and managed by the :class:`TaskManager`. The data object
+        delivered depends on the :class:`DataType`:
+         - NEURON: A :class:`Neuron` object. Delivered after the unit metrics were calculated and
+           saved to an internal unit cache file.
+         - CHANNELTRACE: A class:`ChannelTraceSegment` object, containig a small contiguous segment of a recorded
+           analog trace for a specific channel.
+         - ISI: A 2-tuple (uid, A), where A is a 1D Numpy array holding the computed interspike interval histogram for
+           the specified neural unit.
+         - ACG: A 2-tuple (uid, A), where A is a 1D Numpy array holding the computed autocorrelogram for the unit.
+         - ACG_VS_RATE: A 2-tuple (uid, (A, B)) where A is a 1D Numpy array of firing rate bin centers and B is a 2D
+           Numpy array containing the computed ACB for each firing rate bin.
+         - CCG: A 3-tuple (uid1, uid2, A), where A is the crosscorrelogram of units uid1 and uid2.
+         - PCA: A 3-tuple (uid, K, P). The PCA projection for unit UID. PCA projections are time-consuming and delivered
+           in chunks. K is the starting spike index for the chunk, and P is the 2D Numpy array of size (N,2) holding the
+           PCA projection for spikes [spk_idx: spk_idx+N].
 
-        :param data_type: Enumeration indicating the type of data made available
-        :param data: The data retrieved.
+        In all cases, Analyzer caches the data object internally, then notifies the view manager. The various statistics
+        are cached in the analyzer's copy of the :class:`Neuron` object.
+
+        :param data_type: Enumeration indicating the type of data made available.
+        :param data: The data retrieved. See details above.
         """
         if (data_type == DataType.NEURON) and isinstance(data, Neuron):
             # neural unit record with SNR, templates and other metrics retrieved from internal cache file
-            unit_with_metrics: Neuron = data
-            found = False
-            for i in range(len(self._neurons)):
-                if self._neurons[i].uid == unit_with_metrics.uid:
-                    # HACK: The Neuron object is created in the background with the added metrics, but it won't
-                    # include the user-specified label. So here we have to restore the label
-                    unit_with_metrics.label = self._neurons[i].label
-                    self._neurons[i] = unit_with_metrics
-                    found = True
+            u: Neuron = data
+            for unit in self._neurons:
+                if unit.uid == u.uid:
+                    templates = {ch_idx: u.get_template_for_channel(ch_idx) for ch_idx in u.template_channel_indices}
+                    unit.update_metrics(u.primary_channel, u.snr, templates)
+                    self.unit_data_ready.emit(DataType.NEURON, unit.uid)
                     break
-            if found:
-                self.data_ready.emit(DataType.NEURON, unit_with_metrics.uid)
         elif (data_type == DataType.CHANNELTRACE) and isinstance(data, ChannelTraceSegment):
             seg: ChannelTraceSegment = data
             if seg.channel_index in self._channel_segments:
                 self._channel_segments[seg.channel_index] = seg
-                self.data_ready.emit(DataType.CHANNELTRACE, str(seg.channel_index))
-        elif (data_type in [DataType.ISI, DataType.ACG, DataType.ACG_VS_RATE, DataType.CCG, DataType.PCA]) and \
-                isinstance(data, Neuron):
-            # statistics cached in neural unit record on background thread -- NOT supplying a new Neuron instance!
-            unit: Neuron = data
-            self.data_ready.emit(data_type, unit.uid)
+                # we only signal the view manager once we've received all channel segments
+                if not any([seg is None for seg in self._channel_segments.values()]):
+                    self.channel_traces_updated.emit()
+        elif DataType.is_unit_stat(data_type) and isinstance(data, tuple):
+            try:
+                for u in self._neurons:
+                    if u.uid == data[0]:
+                        u.cache_statistic(data_type, data)
+                        self.unit_data_ready.emit(data_type, u.uid)
+                        break
+            except Exception:
+                pass

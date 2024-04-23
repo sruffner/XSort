@@ -1,9 +1,7 @@
 from enum import Enum
-from typing import Optional, Dict, Tuple, List
+from typing import Optional, Dict, Tuple, List, Any
 
 import numpy as np
-
-from xsort.data import stats
 
 
 class DataType(Enum):
@@ -15,6 +13,25 @@ class DataType(Enum):
     ACG_VS_RATE = 5,  # 3D autocorrelogram vs firing rate for a neural unit in the focus list
     CCG = 6,   # Crosscorrelogram for a neual unit vs another unit in the focus list
     PCA = 7    # PCA projection for a neural unit in the focus list
+
+    @staticmethod
+    def is_unit_stat(dt: 'DataType') -> bool:
+        """
+        Does this data type represent one of the computed statistics for a neural unit?
+        :param dt: The data type.
+        :return: True for a unit statitics data type; false for a neural unit record or channel trace.
+        """
+        return dt in _UNIT_STATS
+
+
+_UNIT_STATS = (DataType.ISI, DataType.ACG, DataType.ACG_VS_RATE, DataType.CCG, DataType.PCA)
+
+MAX_CHANNEL_TRACES: int = 16
+""" 
+Maximum number of analog channels displayable in XSort at any one time. When the total number of recorded channels 
+exceeds this limit, the set of displayable channels is centered around the primary channel for the first unit in the 
+current unit focus list. Otherwise, all recorded channels are displayable.
+"""
 
 
 class ChannelTraceSegment:
@@ -248,7 +265,7 @@ class Neuron:
         analysis occurs in the background and can take many seconds to complete.
         """
         self._cached_similarity: Dict[str, float] = dict()
-        """ Similarity of this neural unit to another, lazily computed and cached. Keyed by label of other unit. """
+        """ Similarity of this neural unit to another, lazily computed and cached. Keyed by UID of other unit. """
         self._cached_acg_vs_rate: Optional[Tuple[np.ndarray, np.ndarray]] = None
         """ 
         Cached 3D histogram representing the autocorrelogram as a function of firing rate for this unit. The 3D
@@ -395,6 +412,11 @@ class Neuron:
         waveforms of the two units. For each unit, a 1D sequence is formed by concatenating the per-channel spike
         template waveforms. The cross correlation coefficient for the two sequences is the similarity metric.
 
+        By design, when there are more than 16 analog channels, XSort only computes templates for the 16 channels in
+        the neighborhood of a unit's "primary channel". In this scenario, the similarity metric between two units is
+        only computed using templates computed on the channels comprising the intersection of the units' template
+        channel indices.
+
         :param other_unit: The neural unit to which this one is compared.
         :return: The similarity metric, as described. Always returns 1.0 if the `other_unit` refers to this unit. **If
         the per-channel spike template waveforms have not yet been computed for either unit, then this metric is not yet
@@ -407,11 +429,12 @@ class Neuron:
 
         similarity = 0.0
         if len(self._templates) > 0 and len(other_unit._templates) > 0:
+            ch_set = {k for k in self._templates.keys()} & {k for k in other_unit._templates.keys()}
+            if len(ch_set) == 0:
+                return similarity
             x1 = np.array([])
             x2 = np.array([])
-            channels = sorted([k for k in self._templates.keys()])
-            if not all([(idx in other_unit._templates) for idx in channels]):
-                return similarity
+            channels = sorted([k for k in ch_set])
             for idx in channels:
                 x1 = np.hstack((x1, self._templates[idx]))
                 x2 = np.hstack((x2, other_unit._templates[idx]))
@@ -508,6 +531,7 @@ class Neuron:
         """
         return np.array([]) if self._cached_acg is None else np.copy(self._cached_acg)
 
+    @property
     def cached_acg_vs_rate(self) -> Tuple[np.ndarray, np.ndarray]:
         """
         The autocorrelogram for this unit's spike train as a function of firing rate -- a measure of firing regularity
@@ -544,63 +568,6 @@ class Neuron:
         out = self._cached_ccgs.get(other_unit)
         return np.array([]) if out is None else np.copy(out)
 
-    def cache_isi_if_necessary(self) -> bool:
-        """
-        Compute and cache the 200-ms ISI histogram for this unit if it has not already been computed.
-        :return: True if ISI was computed, False if it was already cached.
-        """
-        if self._cached_isi is None:
-            out = stats.generate_isi_histogram(self.spike_times, self.FIXED_HIST_SPAN_MS)
-            max_count = max(out)
-            if max_count > 0:
-                out = out * (1.0 / max_count)
-            self._cached_isi = out
-            return True
-        return False
-
-    def cache_acg_if_necessary(self) -> bool:
-        """
-        Compute and cache the 200-ms autocorrelogram for this unit if it has not already been computed. **As the
-        computation can take a significant amount of time, only invoke this method on a background thread.**
-        :return: True if ACG was computed, False if it was already cached.
-        """
-        if self._cached_acg is None:
-            out, n = stats.generate_cross_correlogram(self.spike_times, self.spike_times, self.FIXED_HIST_SPAN_MS)
-            if n > 0:
-                out = out * (1.0 / n)
-            self._cached_acg = out
-            return True
-        return False
-
-    def cache_acg_vs_rate_if_necessary(self) -> bool:
-        """
-        Compute and cache the 3D histogram representing this unit's +/-100-ms autocorrelogram as a function of firing
-        rate, if it has not already been computed. **As the computation can take a significant amount of time, only
-        invoke this method on a background thread.**
-        :return: True if ACG-vs-firing-rate 3D histogram was computed, False if it was already cached.
-        """
-        if self._cached_acg_vs_rate is None:
-            self._cached_acg_vs_rate = stats.gen_cross_correlogram_vs_firing_rate(
-                self.spike_times, self.spike_times, span_ms=self.ACG_VS_RATE_SPAN_MS)
-            return True
-        return False
-
-    def cache_ccg_if_necessary(self, other_unit: 'Neuron') -> bool:
-        """
-        If it is not already cached, compute and cache the 200-ms cross-correlogram for this unit vs the specified unit.
-        **As the computation can take a significant amount of time, only invoke this method on a background thread.**
-        :param other_unit: The other neural unit.
-        :return: True if the CCG was computed, False if it was already cached.
-        """
-        ccg = self._cached_ccgs.get(other_unit.uid)
-        if ccg is None:
-            out, n = stats.generate_cross_correlogram(self.spike_times, other_unit.spike_times, self.FIXED_HIST_SPAN_MS)
-            if n > 0:
-                out = out * (1.0 / n)
-            self._cached_ccgs[other_unit.uid] = out
-            return True
-        return False
-
     def cached_pca_projection(self) -> np.ndarray:
         """
         Get the projection of this unit's spike "clips" onto the 2D space defined by the first two principal components
@@ -626,21 +593,91 @@ class Neuron:
     @property
     def is_pca_projection_cached(self) -> bool:
         """
-        Iw the PCA projection for this neural unit cached in its entirety in this object? Since the PCA projection can
+        Is the PCA projection for this neural unit cached in its entirety in this object? Since the PCA projection can
         take a significant amount of time to compute, it may be cached in chunks.
         :return: True if the PCA projection for this unit is cached in its entirety.
         """
-        return self.num_spikes == len(self.cached_pca_projection())
+        return False if (self._cached_pca_projection is None) else self.num_spikes == len(self.cached_pca_projection())
 
-    def set_cached_pca_projection(self, prj: Optional[np.ndarray] = None) -> None:
-        """
-        Cache the current PCA projection for this neural unit, or clear a previously computed projection.
-            This method is intended only for cacheing the result of PC analysis in the background, or clearing a
-        a previously cached projection that is no longer valid because the neural unit focus list has changed. Note
-        that the background task may populate this array in chunks so that the GUI can be updated on the fly as the
-        computation proceeds -- useful when a unit a very long spike train.
+    def clear_cached_pca_projection(self) -> None:
+        """ Clear the cached PCA projection for this neural unit, if any. """
+        self._cached_pca_projection = None
 
-        :param prj: An Nx2 array representing the PCA projection for this unit's N spikes, or None to clear a
-            previously cached projection.
+    def is_statistic_cached(self, dt: DataType, uid_other: Optional[str] = None) -> bool:
         """
-        self._cached_pca_projection = prj
+        Has the specified neural unit statistic been computed and cached in this :class:`Neuron` object?
+        :param dt: Data type identifying one of the unit statistics.
+        :param uid_other: For crosscorrelogram only, the UID of the other unit.
+        :return: True if requested statistic is cached here; else False.
+        """
+        if dt == DataType.ISI:
+            return not (self._cached_isi is None)
+        elif dt == DataType.ACG:
+            return not (self._cached_acg is None)
+        elif dt == DataType.ACG_VS_RATE:
+            return not (self._cached_acg_vs_rate is None)
+        elif dt == DataType.CCG:
+            return not (self._cached_ccgs.get(uid_other, None) is None)
+        elif dt == DataType.PCA:
+            return self.is_pca_projection_cached
+        else:
+            return False
+
+    def cache_statistic(self, dt: DataType, params: Tuple[Any]) -> bool:
+        """
+        Cache one of the statistics for this neural unit that are generated on a background task in XSort.
+
+        The :class:`Neuron` object serves as a runtime cache for various statistics that may be displayed in XSort:
+        the interspike interval histogram (DataType.ISI), autocorrelogram of the unit's spike train (ACG), 3D
+        autocorrelogram as a function of firing rate (ACG_VS_RATE), crosscorrelogram of the spike trains of two
+        distinct units (CCG), and the projection of a unit's spikes onto the 2D space defined by a principal component
+        analysis of the units comprising the current focus list (PCA). These various statistics get computed in the
+        background on an as-needed basis, and then cached in the relevent Neuron object by calling this function. With
+        the exception of the PCA projection, the various statistics remain cached in the neural unit object until it
+        is destroyed. PCA projections are cleared whenever the current focus list changes, since the principal
+        component analysis is based on the units comprising that list.
+
+        The data tuple provided has the exact form prepared by the background task:
+         - ISI: (UID, S). S is a 1D Numpy array holding the interspike interval histogram for unit UID.
+         - ACG: (UID, S). S is a 1D Numpy array holding the autocorrelogram for unit UID.
+         - ACG_VS_RATE: (UID, (B, S)). B is a 10x1 Numpy array of firing rate bins, and S is the autocorrelogram of
+           unit UID for each firing rate bin in B.
+         - CCG: (UID, UID2, S). S is a 1D Numpy array holding the correlogram of unit UID with UID2 (not the same).
+         - PCA: (UID, K, P). P is a Nx2 Numpy array holding a "chunk" of the PCA projection for unit UID for spikes
+           K:K+N. The PCA projection takes a relatively long time to compute -- especially for 100K+ spikes -- so it
+           is computed and delivered in chunks to allow progressive updates in XSort.
+
+        :param dt: The data type -- must be one of DataType.ISI, ACG, ACG_VS_RATE, CCG, or PCA.
+        :param params: A 2- or 3-tuple containing the statistic as described. In all cases, the first element should be
+            the UID of this neural unit.
+        :return: True if statistic was successfully cached; False if **params** argument is invalid or does not
+            contain statistics for this unit.
+        """
+        try:
+            assert (2 <= len(params) <= 3)
+            assert (params[0] == self._uid)
+            assert DataType.is_unit_stat(dt)
+            if dt == DataType.ISI:
+                assert isinstance(params[1], np.ndarray)
+                self._cached_isi = np.copy(params[1])
+            elif dt == DataType.ACG:
+                assert isinstance(params[1], np.ndarray)
+                self._cached_acg = np.copy(params[1])
+            elif dt == DataType.ACG_VS_RATE:
+                assert isinstance(params[1][0], np.ndarray) and isinstance(params[1][1], np.ndarray)
+                self._cached_acg_vs_rate = np.copy(params[1][0]), np.copy(params[1][1])
+            elif dt == DataType.CCG:
+                assert isinstance(params[1], str) and isinstance(params[2], np.ndarray)
+                self._cached_ccgs[params[1]] = np.copy(params[2])
+            else:  # PCA
+                assert isinstance(params[1], int) and isinstance(params[2], np.ndarray)
+                arr: np.ndarray = np.copy(params[2])
+                if self._cached_pca_projection is None:
+                    assert params[1] == 0 and len(arr) < self.num_spikes
+                    self._cached_pca_projection = np.copy(arr)
+                else:
+                    assert params[1] == len(self._cached_pca_projection) and (params[1] + len(arr) < self.num_spikes)
+                    self._cached_pca_projection = np.vstack((self._cached_pca_projection, arr))
+            return True
+        except Exception:
+            return False

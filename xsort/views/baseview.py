@@ -2,7 +2,7 @@ from typing import Optional
 
 from PySide6.QtCore import QSize, QObject, QSettings
 from PySide6.QtGui import QPalette, QColor
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QDockWidget
 
 from xsort.data.analyzer import Analyzer
 from xsort.data.neuron import DataType
@@ -45,6 +45,14 @@ class BaseView(QObject):
         return self._title
 
     @property
+    def is_parent_dock_hidden(self) -> bool:
+        """ True if the docking widget containing this view is currently hidden. """
+        widget = self.view_container.parentWidget()
+        if isinstance(widget, QDockWidget):
+            return widget.isHidden()
+        return True
+
+    @property
     def container(self) -> QWidget:
         """ The widget container for this view. """
         return self.view_container
@@ -65,12 +73,12 @@ class BaseView(QObject):
         """
         pass
 
-    def on_channel_trace_segment_updated(self, idx: int) -> None:
+    def on_channel_traces_updated(self) -> None:
         """
-        Refresh view contents after the data for an analog channel trace segment has been retrieved from the working
-        directory contents. Degault implementation takes no action.
-
-        :param idx: Index of the analog channel for which data is available.
+        Refresh view contents after the channel trace segments have been retrieved for the current set of displayable
+        analog channels. The trace segments are retrieved by a background task each time the user changes the segment
+        start time, or whenever the displayable channel set changes because of a change in the current unit focus list.
+        Default implementation takes no action.
         """
         pass
 
@@ -78,6 +86,11 @@ class BaseView(QObject):
         """
         Refresh view contents after a change in the list of neurons selected for display/comparison purposes. Default
         implementation takes no action.
+
+        **NOTE**: For a working directory in which more than 16 analog channels were recorded, the set of 16
+        "displayable" channels is the set of 16 channels on which the primary unit's spike templates were computed. The
+        primary unit is the first selected unit in the focus list, so the set of displayable channels could also change
+        whenever the focus list changes!
         """
         pass
 

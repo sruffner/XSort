@@ -714,7 +714,7 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
             if snr > best_snr:
                 best_snr = snr
                 primary_ch = i
-            template *= work_dir.analog_channel_sample_to_uv(i)
+            template_dict[i] = template * work_dir.analog_channel_sample_to_uv(i)
 
         # cache unit metrics to internal file
         unit.update_metrics(primary_ch, best_snr, template_dict)
