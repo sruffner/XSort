@@ -30,7 +30,8 @@ MAX_CHANNEL_TRACES: int = 16
 """ 
 Maximum number of analog channels displayable in XSort at any one time. When the total number of recorded channels 
 exceeds this limit, the set of displayable channels is centered around the primary channel for the first unit in the 
-current unit focus list. Otherwise, all recorded channels are displayable.
+current unit focus list. Otherwise, all recorded channels are displayable. **This is also the maximum number of 
+per-channel templates computed for each neural unit.**
 """
 
 

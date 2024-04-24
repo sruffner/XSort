@@ -281,7 +281,10 @@ class ChannelView(BaseView):
             y = []
             if k < len(displayed):
                 u = displayed[k]
-                if isinstance(u.primary_channel, int):
+                # NOTE: the set of 16 displayable channels is governed by the primary channel of the primary neuron. If
+                # there are additional units in the focus list those units' primary channels may not be in the set of
+                # displayable channels!
+                if isinstance(u.primary_channel, int) and (u.primary_channel in self.data_manager.channel_indices):
                     offset = self._trace_offset * self.data_manager.channel_indices.index(u.primary_channel)
                     seg = self.data_manager.channel_trace(u.primary_channel)
                     if seg is not None:

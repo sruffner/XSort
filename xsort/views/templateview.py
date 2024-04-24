@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 import numpy as np
 from PySide6.QtCore import Slot, QSettings
@@ -7,11 +7,17 @@ from PySide6.QtWidgets import QHBoxLayout, QGraphicsTextItem, QSlider, QVBoxLayo
 import pyqtgraph as pg
 
 from xsort.data.analyzer import Analyzer
+from xsort.data.neuron import MAX_CHANNEL_TRACES, Neuron
 from xsort.views.baseview import BaseView
 
 
 class TemplateView(BaseView):
     """
+    TODO: Attempting optimization -- Precreate MAX_FOCUS_NEURONS * MAX_CHANNEL_TRACES PlotDataItems, all with wmpty
+       data sets initially, then update these data sets in _refresh() as needed. Similarly with the precreated
+       channel label items. Currently, we do NOT do things this way. Every time _reset() is called, the PlotDataItems
+       and LabelItems are recreated!
+
     This view displays the per-channel spike template waveforms for all neurons currently selected for display in
     XSort. The displayed template span is user-configurable between 3-10ms. The per-channel templates are rendered in
     a single :class:`pyqtgraph.PlotWidget`, populated in order from the bottom to top and left to right by source
@@ -48,6 +54,7 @@ class TemplateView(BaseView):
     """ Msximum +/- voltage range for templates, in microvolts. """
     _DEF_VSPAN_UV: int = 75
     """ Default +/- voltage range for templates, in microvolts. """
+
     def __init__(self, data_manager: Analyzer) -> None:
         super().__init__('Templates', None, data_manager)
 
@@ -59,22 +66,26 @@ class TemplateView(BaseView):
         """ This label is displayed centrally when template data is not available. """
         self._scale_bar: pg.ScaleBar = pg.ScaleBar(size=10, suffix='ms')
         """ Horizontal calibration bar indicating time scale in lieu of a visible X-axis. """
-        self._channel_labels: Dict[int, pg.TextItem] = dict()
+        self._channel_labels: List[pg.TextItem] = list()
+        """ The text items that render the channel label in each of the up to MAX_CHANNEL_TRACES template plots. """
+        self._template_pdis: List[pg.PlotDataItem] = list()
         """ 
-        Dictionary maps analog channel index to corresponding text item that renders the channel label in the template
-        plot. We keep track of these text items so we can reposition them when the user changes the template span.
+        Plot data items rendering up to M*N template plots, where M=MAX_FOCUS_NEURONS and N=MAX_CHANNEL_TRACES. These
+        are precreated with empty data sets. The first N correspond to the templates for the first unit in the current 
+        display/focus list, and so on. Position within a bank of N serves as a index into the sorted list of displayable
+        channel indices -- so we can get the unit template that is rendered by that particular data item.
         """
-        self._spike_templates: List[Dict[int, pg.PlotDataItem]] = list()
+        self._displayable_channel_indices: Set[int] = set()
         """ 
-        Each dictionary in this list represents the plotted spike templates for a neural unit with the display focus,
-        keyed by index of the analog source channel for each channel on which templates are computed. Position in the 
-        list matches the position of the corresponding neuron in the display focus list.
+        The current set of displayable analog channel indices. We keep a private copy so we can detect whenever
+        there's a change in the displayable channel set.
         """
         self._tspan_slider = QSlider(orientation=Qt.Orientation.Horizontal)
         """ Slider controls the displayed span of each template in milliseconds. """
         self._vspan_slider = QSlider(orientation=Qt.Orientation.Horizontal)
         """ Slider controls the displayed height of each template in microvolts. """
         self._vspan_readout = QLabel(f"+/-{self._DEF_VSPAN_UV} \u00b5v")
+        """ A label reflecting the current height of each template in microvolts. """
 
         # one-time only configuration of the plot: disable the context menu; hide axes; position message
         # label centered over the plot (to indicate when no data is available); use a scale bar to indicate timescale.
@@ -106,6 +117,8 @@ class TemplateView(BaseView):
         self._vspan_slider.setSliderPosition(self._DEF_VSPAN_UV)
         self._vspan_slider.valueChanged.connect(self._on_voltage_range_change)
 
+        self._reset()  # precreate all graphics items we need (text items and plot data items)
+
         main_layout = QVBoxLayout()
         main_layout.addWidget(self._plot_widget)
         control_line = QHBoxLayout()
@@ -131,45 +144,64 @@ class TemplateView(BaseView):
         templates per row, in ascending order by source channel index. Channel labels are created and positioned near
         the end of the template waveforms computed from that channel.
         """
-        self._plot_item.clear()  # this does not remove _message_label or scale bar, which are in the internal viewbox
-        self._channel_labels.clear()
-        self._spike_templates.clear()
-        if len(self.data_manager.channel_indices) == 0:
-            self._message_label.setText("No channel data available")
-        else:
-            self._message_label.setText("No template data available")
-
-            pen_colors: List[QColor] = list()
-            for k in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
-                self._spike_templates.append(dict())
-                color = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[k])
-                pen_colors.append(color)
-
-            t_span_ms = self._tspan_slider.sliderPosition()
-            v_span_uv = self._vspan_slider.sliderPosition()
-            row: int = 0
-            col: int = 0
-            for idx in self.data_manager.channel_indices:
-                x = col * (t_span_ms * self._H_OFFSET_REL)
-                y = row * (v_span_uv * 2)
-                for k in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
-                    pen = pg.mkPen(pen_colors[k], width=self.trace_pen_width)
-                    self._spike_templates[k][idx] = self._plot_item.plot(x=[], y=[], pen=pen)
-
-                label = pg.TextItem(text=str(idx), anchor=(1, 1))
+        # one-time only: create all the template plot data items and channel label text items
+        if len(self._template_pdis) == 0:
+            for unit_idx in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
+                pen_color = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[unit_idx])
+                pen = pg.mkPen(pen_color, width=self.trace_pen_width)
+                for template_idx in range(MAX_CHANNEL_TRACES):
+                    self._template_pdis.append(self._plot_item.plot(x=[], y=[], pen=pen))
+            for _ in range(MAX_CHANNEL_TRACES):
+                label = pg.TextItem(text="", anchor=(1, 1))
                 ti: QGraphicsTextItem = label.textItem
                 font: QFont = ti.font()
                 font.setBold(True)
                 label.setFont(font)
-                label.setPos(x + t_span_ms, y + 5)
+                label.setPos(0, 0)
                 self._plot_item.addItem(label)
-                self._channel_labels[idx] = label
+                self._channel_labels.append(label)
+            self._message_label.setText("No channel data available")
+            return
 
-                col = col + 1
-                if col == self._NUM_TEMPLATES_PER_ROW:
-                    col = 0
-                    row = row + 1
-            num_channels = len(self.data_manager.channel_indices)
+        # every time: empty all data items and configure channel labels for the current displayable channel list
+        displayable = self.data_manager.channel_indices
+        if len(displayable) == 0:
+            self._message_label.setText("No channel data available")
+            for pdi in self._template_pdis:
+                pdi.setData(x=[], y=[])
+            for label in self._channel_labels:
+                label.setText("")
+            self._displayable_channel_indices.clear()
+        else:
+            self._displayable_channel_indices = set(displayable)
+            self._message_label.setText("No template data available")
+            t_span_ms = self._tspan_slider.sliderPosition()
+            v_span_uv = self._vspan_slider.sliderPosition()
+            row: int = 0
+            col: int = 0
+            for pos in range(MAX_CHANNEL_TRACES):
+                x = col * (t_span_ms * self._H_OFFSET_REL)
+                y = row * (v_span_uv * 2)
+                for unit_idx in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
+                    pdi_idx = unit_idx * Analyzer.MAX_NUM_FOCUS_NEURONS + pos
+                    self._template_pdis[pdi_idx].setData(x=[], y=[])
+
+                ch_label = str(displayable[pos]) if pos < len(displayable) else ""
+                self._channel_labels[pos].setText(ch_label)
+                self._channel_labels[pos].setPos(x + t_span_ms, y + 5)
+
+                if pos < len(displayable):
+                    self._channel_labels[pos].setText(str(displayable[pos]))
+                    self._channel_labels[pos].setPos(x + t_span_ms, y + 5)
+                    col = col + 1
+                    if col == self._NUM_TEMPLATES_PER_ROW:
+                        col = 0
+                        row = row + 1
+                else:
+                    self._channel_labels[pos].setText("")
+                    self._channel_labels[pos].setPos(0, 0)
+
+            num_channels = len(displayable)
             num_rows = (int(num_channels/self._NUM_TEMPLATES_PER_ROW) +
                         (0 if (num_channels % self._NUM_TEMPLATES_PER_ROW == 0) else 1))
             self._plot_item.setYRange(-v_span_uv, (num_rows - 0.5) * (2 * v_span_uv))
@@ -196,10 +228,8 @@ class TemplateView(BaseView):
         Whenever the subset of neural units holding the display focus changes, update the plot to show the spike
         templates for each unit in the focus set that across all displayable analog channels.
         """
-        # if the set of displayable channels does not match the channel labels cached here, then we need to rebuild
-        # the view first
-        ch_set = {k for k in self._channel_labels.keys()}
-        if ch_set != set(self.data_manager.channel_indices):
+        # if the set of displayable channels has changed, then we need to do a full reset
+        if self._displayable_channel_indices != set(self.data_manager.channel_indices):
             self._reset()
 
         self._refresh()
@@ -240,23 +270,23 @@ class TemplateView(BaseView):
         t_span_ms = self._tspan_slider.sliderPosition()
         t_span_ticks = int(self.data_manager.channel_samples_per_sec * t_span_ms * 0.001)
         v_span_uv = self._vspan_slider.sliderPosition()
-        displayed = self.data_manager.neurons_with_display_focus
+        displayed_units = self.data_manager.neurons_with_display_focus
 
         # if refresh is because a unit's metrics were updated, but that unit is not displayed, there's nothing to do.
-        if isinstance(uid_updated, str) and not (uid_updated in [u.uid for u in displayed]):
+        if isinstance(uid_updated, str) and not (uid_updated in [u.uid for u in displayed_units]):
             return
 
-        for k, template_dict in enumerate(self._spike_templates):
+        # update all template plot data item and channel label text items in use.
+        for unit_idx in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
+            u: Optional[Neuron] = displayed_units[unit_idx] if unit_idx < len(displayed_units) else None
             # when refresing because a unit's metrics were updated, only update the templates for that unit
-            if isinstance(uid_updated, str) and ((k >= len(displayed)) or (displayed[k].uid != uid_updated)):
+            if isinstance(uid_updated, str) and isinstance(u, Neuron) and (u.uid != uid_updated):
                 continue
-            row: int = 0
-            col: int = 0
 
-            # if the identity of the primary neuron (first unit in focus list) has changed or its metrics updated,
-            # auto-adjust voltage span to 1/2 that unit's peak-to-peak amplutude.
-            if (k == 0) and not (vspan_changed or tspan_changed):
-                vspan_auto = int(displayed[k].amplitude / 2.0)
+            # if the focus list has changed or the metrics of the primary neuron were updated, auto-adjust voltage
+            # span to 1/2 that unit's peak-to-peak amplitude
+            if (unit_idx == 0) and (u is not None) and not (vspan_changed or tspan_changed):
+                vspan_auto = int(u.amplitude / 2.0)
                 vspan_auto = max(self._MIN_VSPAN_UV, min(vspan_auto, self._MAX_VSPAN_UV))
                 if v_span_uv != vspan_auto:
                     self._vspan_slider.valueChanged.disconnect(self._on_voltage_range_change)
@@ -266,11 +296,13 @@ class TemplateView(BaseView):
                     v_span_uv = vspan_auto
                     vspan_changed = True  # to fix channel labels as a result of auto adjustment of voltage span
 
-            for idx in self.data_manager.channel_indices:
+            row: int = 0
+            col: int = 0
+            for ch_pos, ch_idx in enumerate(self.data_manager.channel_indices):
                 t0 = col * (t_span_ms * self._H_OFFSET_REL)
                 y0 = row * (2 * v_span_uv)
-                pdi = template_dict[idx]
-                template = displayed[k].get_template_for_channel(idx) if (k < len(displayed)) else None
+                pdi = self._template_pdis[unit_idx*MAX_CHANNEL_TRACES + ch_pos]
+                template = u.get_template_for_channel(ch_idx) if isinstance(u, Neuron) else None
                 if template is None:
                     pdi.setData(x=[], y=[])
                 else:
@@ -279,8 +311,8 @@ class TemplateView(BaseView):
                                 y=y0 + template)
 
                 # fix corresponding channel label when template time or voltage span changes
-                if (tspan_changed or vspan_changed) and (k == 0):
-                    label = self._channel_labels[idx]
+                if (tspan_changed or vspan_changed) and (unit_idx == 0):
+                    label = self._channel_labels[ch_pos]
                     label.setPos(t0 + t_span_ms, y0 + 5)
 
                 col = col + 1
@@ -288,6 +320,7 @@ class TemplateView(BaseView):
                     col = 0
                     row = row + 1
 
+        # fix y-axis range IAW the # of template rows and the current voltage span
         num_channels = len(self.data_manager.channel_indices)
         num_rows = (int(num_channels / self._NUM_TEMPLATES_PER_ROW) +
                     (0 if (num_channels % self._NUM_TEMPLATES_PER_ROW == 0) else 1))
@@ -300,7 +333,7 @@ class TemplateView(BaseView):
             self._scale_bar.updateBar()
             self._plot_item.setXRange(0, self._NUM_TEMPLATES_PER_ROW * (t_span_ms * self._H_OFFSET_REL))
 
-        self._message_label.setText("" if len(displayed) > 0 else "No units selected for display")
+        self._message_label.setText("" if len(displayed_units) > 0 else "No units selected for display")
 
     def save_settings(self, settings: QSettings) -> None:
         """ Overridden to preserve the current template time and voltage spans, which are user selectable. """
