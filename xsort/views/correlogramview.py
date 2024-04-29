@@ -142,7 +142,7 @@ class CorrelogramView(BaseView):
     def on_working_directory_changed(self) -> None:
         self._reset()
 
-    def on_focus_neurons_changed(self) -> None:
+    def on_focus_neurons_changed(self, _: bool) -> None:
         self._reset()
 
     def on_focus_neurons_stats_updated(self, data_type: DataType, uid: str) -> None:

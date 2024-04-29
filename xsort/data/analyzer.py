@@ -40,14 +40,14 @@ class Analyzer(QObject):
     """
     Signals that channel trace segments have just been updated for the current displayable channel set.
     """
-    focus_neurons_changed: Signal = Signal()
+    focus_neurons_changed: Signal = Signal(bool)
     """
     Signals that the set of neural units currently selected for display/comparison purposes has changed in some way.
     All views should be refreshed accordingly. **NOTE**: (1) Signal is also sent whenever a unit is added or removed
     because of a user-initiated delete/merge/split/undo operation -- because the focus list is always changed as well.
-    (2) A change in the focus list could also change the set of displayable analog channels. When the working directory
-    stores more than N = MAX_CHANNEL_TRACES analog channels, only the N channels in the neighborhood of the primary
-    neuron's primary channel will be available for display.
+    (2) The boolean argument is True if the change in the focus list causes a in change the set of displayable analog 
+    channels. When the working directory stores more than N = MAX_CHANNEL_TRACES analog channels, only the N channels 
+    in the neighborhood of the primary neuron's primary channel will be available for display.
     """
     channel_seg_start_changed: Signal = Signal()
     """ 
@@ -905,14 +905,14 @@ class Analyzer(QObject):
         # IMPORTANT: we must update the displayable channel list before notifying the view manager that the focus list
         # changed -- eg, templates are only shown for the current set of displayable channels, which can change when
         # there are more than 16 recorded analog channels
-        self._update_displayable_channels_if_necessary()
-        self.focus_neurons_changed.emit()
+        channels_changed = self._update_displayable_channels_if_necessary()
+        self.focus_neurons_changed.emit(channels_changed)
 
         # if the focus list is not empty, trigger a new COMPUTESTATS task after a brief delay
         if len(self._focus_neurons) > 0:
             QTimer.singleShot(400, self.compute_statistics_for_focus_list)
 
-    def _update_displayable_channels_if_necessary(self) -> None:
+    def _update_displayable_channels_if_necessary(self) -> bool:
         """
         Update the set of displayable analog channel indices if necessary. If there is a change, the previously cached
         channel trace segments are cleared, and a background task is launched to retrieve trace segments for each
@@ -921,21 +921,24 @@ class Analyzer(QObject):
         By design, XSort limits the number of displayable analog channel traces to MAX_CHANNEL_TRACES. When the number
         of recorded channels exceeds this limit, the data model updates the displayable channel set to center it around
         the primary channel for the first unit in the current display focus list, aka, the "primary neuron".
+
+        :return: True if the set of displayable channels has changed.
         """
         # no change if all channels are displayable, or primary neuron or its primary channel are undefined
         if ((self._working_directory.num_analog_channels() <= MAX_CHANNEL_TRACES) or (self.primary_neuron is None) or
                 (self.primary_neuron.primary_channel is None)):
-            return
+            return False
 
         current_indices = set(self.channel_indices)
         indices = set(self.primary_neuron.template_channel_indices)
         if indices == current_indices:
-            return
+            return False
 
         self._channel_segments.clear()
         self._channel_segments = {k: None for k in indices}
         start = self._channel_seg_start * self.channel_samples_per_sec
         self._task_manager.get_channel_traces(self._working_directory, indices, start, self.channel_samples_per_sec)
+        return True
 
     def compute_statistics_for_focus_list(self) -> None:
         """

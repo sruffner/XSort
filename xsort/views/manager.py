@@ -355,14 +355,17 @@ class ViewManager(QObject):
         for v in self._all_views:
             v.on_channel_traces_updated()
 
-    @Slot()
-    def on_focus_neurons_changed(self) -> None:
+    @Slot(bool)
+    def on_focus_neurons_changed(self, channels_changed: bool) -> None:
         """
         Handler notifies all views when there's any change in the subset of neurons having the display focus. It also
         refreshes the state of the edit actions, which depend on whether and how many units are selected.
+        :param channels_changed: True if the set of displayable analog channels has changed as a result of the change
+            in the unit focus list. This can only happen if the number of recorded analog channels > 16, in which case
+            the displayable set is the 16 channels on which the primary unit's spike templates were computed.
         """
         for v in self._all_views:
-            v.on_focus_neurons_changed()
+            v.on_focus_neurons_changed(channels_changed)
 
         self._refresh_menus()
 

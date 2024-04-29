@@ -155,7 +155,7 @@ class FiringRateView(BaseView):
     def on_working_directory_changed(self) -> None:
         self._refresh()
 
-    def on_focus_neurons_changed(self) -> None:
+    def on_focus_neurons_changed(self, _: bool) -> None:
         self._refresh()
 
     def on_channel_trace_segment_start_changed(self) -> None:

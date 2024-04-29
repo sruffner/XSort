@@ -82,15 +82,14 @@ class BaseView(QObject):
         """
         pass
 
-    def on_focus_neurons_changed(self) -> None:
+    def on_focus_neurons_changed(self, channels_changed: bool) -> None:
         """
         Refresh view contents after a change in the list of neurons selected for display/comparison purposes. Default
         implementation takes no action.
 
-        **NOTE**: For a working directory in which more than 16 analog channels were recorded, the set of 16
-        "displayable" channels is the set of 16 channels on which the primary unit's spike templates were computed. The
-        primary unit is the first selected unit in the focus list, so the set of displayable channels could also change
-        whenever the focus list changes!
+        :param channels_changed: True if the set of displayable analog channels has changed as a result of the change
+            in the unit focus list. This can only happen if the number of recorded analog channels > 16, in which case
+            the displayable set is the 16 channels on which the primary unit's spike templates were computed.
         """
         pass
 

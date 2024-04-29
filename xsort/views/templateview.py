@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Set
+from typing import List, Optional
 
 import numpy as np
 from PySide6.QtCore import Slot, QSettings
@@ -13,18 +13,12 @@ from xsort.views.baseview import BaseView
 
 class TemplateView(BaseView):
     """
-    TODO: Attempting optimization -- Precreate MAX_FOCUS_NEURONS * MAX_CHANNEL_TRACES PlotDataItems, all with wmpty
-       data sets initially, then update these data sets in _refresh() as needed. Similarly with the precreated
-       channel label items. Currently, we do NOT do things this way. Every time _reset() is called, the PlotDataItems
-       and LabelItems are recreated!
-
     This view displays the per-channel spike template waveforms for all neurons currently selected for display in
     XSort. The displayed template span is user-configurable between 3-10ms. The per-channel templates are rendered in
     a single :class:`pyqtgraph.PlotWidget`, populated in order from the bottom to top and left to right by source
     channel index, with 4 templates per 'row'.
-        Our strategy is to pre-create a list of :class:`pyqtgraph.PlotDataItem` representing the per-channel templates
-    for the the first neuron in the display focus set, another list for the second unit, and so on. Each data item is
-    assigned a pen color depending on the unit's position in the display focus list. All of the data items will have
+        Our strategy is to pre-create a list of 48 :class:`pyqtgraph.PlotDataItem` representing up to 16 per-channel
+    templates for each of up to 3 neural units in the current display focus list.  All of the plot data items will have
     empty data sets initially,  and it is only the data sets that get updated when the display focus list changes or
     neuron metrics are updated.
         **NOTE**: When there are more than 16 recorded analog channels, XSort computes templates on a maximum of
@@ -32,7 +26,7 @@ class TemplateView(BaseView):
     templates are not computed on the same set of channels. By design, this view displays all 16 templates for the
     primary unit (the first unit in the focus list), as well any templates for other units in the focus list that were
     computed on any channel among the primary unit's 16 template channel indices. This makes sense -- it's highly
-    unlikely the user will need to compare unites with very different template channel sets.
+    unlikely the user will need to compare units with very different template channel sets.
     """
 
     trace_pen_width: int = 3
@@ -74,11 +68,6 @@ class TemplateView(BaseView):
         are precreated with empty data sets. The first N correspond to the templates for the first unit in the current 
         display/focus list, and so on. Position within a bank of N serves as a index into the sorted list of displayable
         channel indices -- so we can get the unit template that is rendered by that particular data item.
-        """
-        self._displayable_channel_indices: Set[int] = set()
-        """ 
-        The current set of displayable analog channel indices. We keep a private copy so we can detect whenever
-        there's a change in the displayable channel set.
         """
         self._tspan_slider = QSlider(orientation=Qt.Orientation.Horizontal)
         """ Slider controls the displayed span of each template in milliseconds. """
@@ -133,16 +122,22 @@ class TemplateView(BaseView):
 
     def _reset(self) -> None:
         """
-        Reset and reinitialize this view. All plot data items rendering per-channel spike templates are removed and then
-        repopulated. If there are no analog channels, a static centered message label is shown indicating that there is
-        no data. If the available analog channels are known, empty plot data items are created as 'placeholders' for
-        all the per-channel spike templates for each of MAX_NUM_FOCUS_NEURONS neural units. The trace color for each
-        plot data item matches the display color assigned to the corresponding unit (based on its position in the
-        displayed neurons list). The centered message label will indicate that template data is not yet available. The
-        actual template data are set later, as the data is retrieved.
+        Reset and reinitialize this view.
+
+        On first call, all plot data items rendering up to 3*16 per-channel spike templates are created, initially with
+        empty data sets (up to 16 per-channel spike templates for up to 3 units in the unit display/focus list). In
+        addition, 16 text items are created that will display the analog channel index for each template plot. The trace
+        color for each plot data item matches the display color assigned to the corresponding unit (based on the unit's
+        position in the focus list).
+
+        On all future calls, the data set for every plot data item is emptied (if it wasn't already), and the position
+        and contents of each text item are updated IAW the current set of displayable channels and the current
+        composition of the unit focus list. If there are no displayable analog channels, a static centered message label
+        is shown indicating that there is no data. Otherwise the centered message label will indicate that template data
+        is not yet available. The actual template data are set later, as the data is retrieved.
             All template plots are distributed across the view box from bottom to top and left to right, with four
-        templates per row, in ascending order by source channel index. Channel labels are created and positioned near
-        the end of the template waveforms computed from that channel.
+        templates per row, in ascending order by source channel index. Channel labels are positioned near the end of the
+        per-channel template waveforms for the primary unit.
         """
         # one-time only: create all the template plot data items and channel label text items
         if len(self._template_pdis) == 0:
@@ -163,17 +158,19 @@ class TemplateView(BaseView):
             self._message_label.setText("No channel data available")
             return
 
-        # every time: empty all data items and configure channel labels for the current displayable channel list
+        # all future calls: empty all data items and configure channel labels for the current displayable channel list
+        for pdi in self._template_pdis:
+            # only empty the PlotDataItem if it is not already empty!
+            if not (pdi.xData is None):
+                pdi.setData(x=[], y=[])
+
         displayable = self.data_manager.channel_indices
+
         if len(displayable) == 0:
             self._message_label.setText("No channel data available")
-            for pdi in self._template_pdis:
-                pdi.setData(x=[], y=[])
             for label in self._channel_labels:
                 label.setText("")
-            self._displayable_channel_indices.clear()
         else:
-            self._displayable_channel_indices = set(displayable)
             self._message_label.setText("No template data available")
             t_span_ms = self._tspan_slider.sliderPosition()
             v_span_uv = self._vspan_slider.sliderPosition()
@@ -182,14 +179,6 @@ class TemplateView(BaseView):
             for pos in range(MAX_CHANNEL_TRACES):
                 x = col * (t_span_ms * self._H_OFFSET_REL)
                 y = row * (v_span_uv * 2)
-                for unit_idx in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
-                    pdi_idx = unit_idx * Analyzer.MAX_NUM_FOCUS_NEURONS + pos
-                    self._template_pdis[pdi_idx].setData(x=[], y=[])
-
-                ch_label = str(displayable[pos]) if pos < len(displayable) else ""
-                self._channel_labels[pos].setText(ch_label)
-                self._channel_labels[pos].setPos(x + t_span_ms, y + 5)
-
                 if pos < len(displayable):
                     self._channel_labels[pos].setText(str(displayable[pos]))
                     self._channel_labels[pos].setPos(x + t_span_ms, y + 5)
@@ -223,15 +212,14 @@ class TemplateView(BaseView):
         """
         self._refresh(uid_updated=uid)
 
-    def on_focus_neurons_changed(self) -> None:
+    def on_focus_neurons_changed(self, channels_changed: bool) -> None:
         """
         Whenever the subset of neural units holding the display focus changes, update the plot to show the spike
         templates for each unit in the focus set that across all displayable analog channels.
         """
         # if the set of displayable channels has changed, then we need to do a full reset
-        if self._displayable_channel_indices != set(self.data_manager.channel_indices):
+        if channels_changed:
             self._reset()
-
         self._refresh()
 
     @Slot()
@@ -304,7 +292,9 @@ class TemplateView(BaseView):
                 pdi = self._template_pdis[unit_idx*MAX_CHANNEL_TRACES + ch_pos]
                 template = u.get_template_for_channel(ch_idx) if isinstance(u, Neuron) else None
                 if template is None:
-                    pdi.setData(x=[], y=[])
+                    # only empty the PlotDataItem if it is not already empty!
+                    if not (pdi.xData is None):
+                        pdi.setData(x=[], y=[])
                 else:
                     template = template[0:t_span_ticks]
                     pdi.setData(x=np.linspace(start=t0, stop=t0+t_span_ms, num=len(template)),

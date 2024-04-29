@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from PySide6.QtCore import Qt, Slot
@@ -7,28 +7,33 @@ from PySide6.QtWidgets import QSlider, QVBoxLayout, QLabel, QHBoxLayout, QFrame
 import pyqtgraph as pg
 
 from xsort.data.analyzer import Analyzer
-from xsort.data.neuron import Neuron, ChannelTraceSegment
+from xsort.data.neuron import Neuron, ChannelTraceSegment, MAX_CHANNEL_TRACES
 from xsort.views.baseview import BaseView
 
 
 class ChannelView(BaseView):
     """
-    This view displays a 1-sec trace for each of up selected set of recorded analog channels. For each neuron currently
-    selected for display in XSort, the view superimposes -- on the trace for the neuron's 'primary channel' -- 10-ms
-    clips indicating the occurrence of spikes on that neuron.
+    TODO: Attempting optimization -- Precreate MAX_CHANNEL_TRACES PlotDataItems, all with empty data sets initially,
+     then update these data sets in _refresh() as needed. Currently, we do NOT do things this way. Every time _reset()
+     is called, the PlotDataItems are recreated!
+
+    This view displays a 1-sec trace for each of up to MAX_CHANNEL_TRACES channels in the displayable channel set. For
+    each neuron currently selected for display in XSort, the view superimposes -- on the trace for the neuron's
+    'primary channel' -- 10-ms clips indicating the occurrence of spikes on that neuron.
 
         A slider at the bottom of the view lets the user choose any 1-sec segment over the entire EPhys recording. The
     companion readouts reflect the elapsed recording time -- in the format MM:SS.mmm (minutes, seconds, milliseconds) --
     at the start and end of the currently visible portion of the traces. Using the mouse scroll wheel, the user can
     zoom in on the plotted traces both horizontally in time and vertically in voltage. The plot's x- and y-axis range
-    limits are configured so the user can zoom in ony 100ms portion of the 1-second segment, and on any 2 adjacent
+    limits are configured so the user can zoom in on ony 100ms portion of the 1-second segment, and on any 2 adjacent
     channel traces.
 
-        Our strategy is to pre-create a dictionary of :class:`pyqtgraph.PlotDataItem` representing the channel trace
-    segments (:class:`ChannelTraceSegment`), indexed by the analog source channel index. Similarly, we pre-create a
-    list of data items that render the 10-ms spike clips for neurons in the display focus list. All of the data items
-    will have empty data sets initially, and it is only the data sets that get updated when channel trace segments or
-    neural metrics are retrieved from XSort's internal cache, or when the neuron focus list changes in any way.
+        Our strategy is to pre-create a list of MAX_CHANNEL_TRACES (16) :class:`pyqtgraph.PlotDataItem`s representing
+    the channel trace segments (:class:`ChannelTraceSegment`) for each of the analog channels in the current displayable
+    chanel set. Similarly, we pre-create a list of Analyzer.MAX_FOCUS_NEURONS (3) data items that render the 10-ms spike
+    clips for neurons in the display focus list. All of the plot data items will have empty data sets initially, and it
+    is only the data sets that get updated when channel trace segments or neural metrics are retrieved from XSort's
+    internal cache, or when the neuron focus list changes in any way.
     """
 
     spike_clip_pen_width: int = 1
@@ -40,7 +45,7 @@ class ChannelView(BaseView):
     """ Default vertical separation between channel trace segments, in microvolts. """
     _MIN_TRACE_OFFSET: int = 100
     """ Minimum vertical separation between channel trace segments, in microvolts. """
-    _MAX_TRACE_OFFSET: int = 1000
+    _MAX_TRACE_OFFSET: int = 1500
     """ Minimum vertical separation between channel trace segments, in microvolts. """
 
     def __init__(self, data_manager: Analyzer) -> None:
@@ -56,11 +61,11 @@ class ChannelView(BaseView):
         """ Vertical separation between channel trace segments in the view, in microvolts. """
         self._trace_start: int = 0
         """ Sample index, relative to start of recording, for the first sample in each trace segment. """
-        self._trace_segments: Dict[int, pg.PlotDataItem] = dict()
+        self._trace_pdis: List[pg.PlotDataItem] = list()
         """ 
-        The rendered trace segments, indexed by analog channel index. 
+        List of plot data items rendering channel trace segments for up to MAX_CHANNEL_TRACES analog channels.
         """
-        self._unit_spike_clips: List[pg.PlotDataItem] = list()
+        self._spike_clip_pdis: List[pg.PlotDataItem] = list()
         """ 
         The plot data item at pos N renders the spike clips for the N-th neuron in the list of neurons with the display
         focus. The 10ms clips **[T-1 .. T_9]** are plotted on top of the trace segment for the unit's primary analog 
@@ -139,19 +144,40 @@ class ChannelView(BaseView):
 
     def _reset(self) -> None:
         """
-        Reset and reinitialize this view. All plot data items representing existing channel trace segments, as well as
-        spike clips for each slot in the neuron display list, are removed and then repopulated. If there are no analog
-        channels displayable, the Y-axis is hidden and a static centered message label is shown indicating that there is
-        no data. Otherwise, a "flat line" trace is drawn in [0, 1] for each displayable analog channel, and the Y-axis
-        tick labels reflect the channel indices. The traces are separated vertically IAW the view's current trace
-        offset. The plot data items for the displayed neuron spike clips will all be empty initially.
-            The slider and label widgets that set and display the elapsed start time for the trace segments are reset
-        for a start time of 0 and configured IAW the analog channel duration (if known).
+        Reset and reinitialize this view.
+
+        On first call, all plot data items (PDI) rendering up to MAX_CHANNEL_TRACES analog channel trace segments are
+        created, initially with empty data sets. Additional empty PDIs are created to render the spike clips for up to
+        Analyzer.MAX_FOCUS_NEURONS in the display/focus list. The trace color for each spike clip PDI matches the
+        display color assigned to the corresponding position in the focus list.
+
+        On all future calls, the view is reset IAW the number of displayable analog channels.
+         - The data set for each trace segment PDI is set to the corresponding channel trace segment, a "flat line"
+           trace if that trace segment is not yet available, or an empty set if that PDI will not be used because there
+           are fewer than MAX_CHANNEL_TRACES displayable channels. The traces are offset vertically IAW the view's
+           current trace offset.
+         - The data set for every spike clip PDI is emptied (if it wasn't already).
+         - If there are no displayable analog channels, the Y-axis is hidden and a static centered message label is
+           shown indicaeing that there is no data. Otherwise, the Y-axis tick labels are updated to reflect the analog
+           channel indices of the corresponding "flat line" traces.
+         - The slider and label widgets that set and display the elapsed start time for the trace segments are reset
+           for a start time of 0 and configured IAW the analog channel duration (if known).
         """
-        self._plot_item.clear()  # this does not remove _message_label, which is in the internal viewbox
-        self._trace_segments.clear()
-        self._unit_spike_clips.clear()
-        if len(self.data_manager.channel_indices) == 0:
+        # one-time only: create all the trace segment and spike clip plot data items. The latter PDIs are configured so
+        # that NaN introduces gaps between the individual clips, with a semi-transparent version of the color assigned
+        # to each slot in the unit focus list.
+        if len(self._trace_pdis) == 0:
+            for _ in range(MAX_CHANNEL_TRACES):
+                self._trace_pdis.append(self._plot_item.plot(x=[], y=[]))
+            for k in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
+                color = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[k])
+                color.setAlpha(128)
+                pen = pg.mkPen(color, width=self.spike_clip_pen_width)
+                self._spike_clip_pdis.append(self._plot_item.plot(x=[], y=[], name=f"spike-clips-{k}", pen=pen,
+                                                                  connect='finite'))
+
+        n_traces = len(self.data_manager.channel_indices)
+        if n_traces == 0:
             self._plot_item.hideAxis('left')
             self._message_label.setText("No channels available")
         else:
@@ -159,27 +185,32 @@ class ChannelView(BaseView):
             self._plot_item.showAxis('left')
             ticks = []
             offset = 0
-            for idx in self.data_manager.channel_indices:
-                self._trace_segments[idx] = self._plot_item.plot(x=[0, 1], y=[offset, offset],
-                                                                 name=self.data_manager.channel_label(idx))
-                ticks.append((offset, str(idx)))
-                offset += self._trace_offset
+            for k, pdi in enumerate(self._trace_pdis):
+                if k >= n_traces:
+                    if not (pdi.xData is None):
+                        pdi.setData(x=[], y=[])
+                else:
+                    ch_idx = self.data_manager.channel_indices[k]
+                    seg = self.data_manager.channel_trace(ch_idx)
+                    if seg is None:
+                        pdi.setData(x=[0, 1], y=[offset, offset])
+                    else:
+                        pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
+                                    y=offset + seg.trace_in_microvolts)
+                    ticks.append((offset, str(ch_idx)))
+                    offset += self._trace_offset
+
             self._plot_item.getAxis('left').setTicks([ticks])
 
             self._plot_item.getViewBox().setLimits(
                 xMin=0, xMax=1, minXRange=0.1, maxXRange=1, yMin=-self._trace_offset, yMax=offset,
-                minYRange=2*self._trace_offset, maxYRange=offset + self._trace_offset)
+                minYRange=2 * self._trace_offset, maxYRange=offset + self._trace_offset)
             self._plot_item.getViewBox().enableAutoRange()  # resets the zoom (if user previously zoomed in on view)
 
-            # initialize list of plot data items that render spike clips for neurons in display list. Configured so
-            # that NaN introduces a gap in the trace, and configured with a semi-transparent version of the color
-            # assigned to each slot in the display list.
-            for k in range(Analyzer.MAX_NUM_FOCUS_NEURONS):
-                color = QColor.fromString(Analyzer.FOCUS_NEURON_COLORS[k])
-                color.setAlpha(128)
-                pen = pg.mkPen(color, width=self.spike_clip_pen_width)
-                self._unit_spike_clips.append(
-                    self._plot_item.plot(x=[], y=[], name=f"spike-clips-{k}", pen=pen, connect='finite'))
+            # clear out any spike clips data, if any
+            for pdi in self._spike_clip_pdis:
+                if not (pdi.xData is None):
+                    pdi.setData(x=[], y=[])
 
         self._t0_readout.setText(ChannelView.digital_readout(0))
         self._t1_readout.setText(ChannelView.digital_readout(1))
@@ -198,20 +229,9 @@ class ChannelView(BaseView):
     def on_working_directory_changed(self) -> None:
         """
         Whenever the working directory has changed, the unit focus list will be empty and the initial set of analog data
-        channel traces should be ready. The view is reset, preparing 'empty' data items for each channel trace segment
-        and the spike clips for each slot in the neuron display list. The actual data channel trace segments are then
-        inserted.
+        channel traces should be ready. The view is reset accordingly.
         """
         self._reset()
-        offset = 0
-        for ch_idx, pdi in self._trace_segments.items():
-            seg = self.data_manager.channel_trace(ch_idx)
-            if seg is None:
-                pdi.setData(x=[0, 1], y=[offset, offset])
-            else:
-                pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
-                            y=offset + seg.trace_in_microvolts)
-            offset += self._trace_offset
 
     def on_channel_traces_updated(self) -> None:
         """
@@ -219,8 +239,10 @@ class ChannelView(BaseView):
         of spike clips for a neuron in the current focus list.
         """
         offset = 0
-        for k, pdi in self._trace_segments.items():
-            seg = self.data_manager.channel_trace(k)
+        ch_indices = self.data_manager.channel_indices
+        for k, ch_idx in enumerate(ch_indices):
+            pdi = self._trace_pdis[k]
+            seg = self.data_manager.channel_trace(ch_idx)
             if seg is None:
                 pdi.setData(x=[0, 1], y=[offset, offset])
             else:
@@ -228,55 +250,53 @@ class ChannelView(BaseView):
                             y=offset + seg.trace_in_microvolts)
             offset += self._trace_offset
 
-        displayed = self.data_manager.neurons_with_display_focus
-        for k, pdi in enumerate(self._unit_spike_clips):
-            unit: Optional[Neuron] = displayed[k] if k < len(displayed) else None
-            ch_idx = -1
+        for k, unit in enumerate(self.data_manager.neurons_with_display_focus):
+            spike_clip_pdi = self._spike_clip_pdis[k]
+            seg: Optional[ChannelTraceSegment] = None
             offset = 0
-            if unit and isinstance(unit.primary_channel, int):
-                try:
-                    ch_idx = unit.primary_channel
-                    offset = self._trace_offset * self.data_manager.channel_indices.index(ch_idx)
-                except Exception:
-                    continue
-            seg = self.data_manager.channel_trace(ch_idx)
+            if unit.primary_channel in ch_indices:
+                seg = self.data_manager.channel_trace(unit.primary_channel)
+                offset = self._trace_offset * ch_indices.index(unit.primary_channel)
             if seg is None:
-                pdi.setData(x=[], y=[])
+                if not (spike_clip_pdi.xData is None):
+                    spike_clip_pdi.setData(x=[], y=[])
             else:
                 x, y = self._prepare_clip_data(unit, seg, offset)
-                pdi.setData(x=x, y=y)
+                spike_clip_pdi.setData(x=x, y=y)
 
     def on_neuron_metrics_updated(self, uid: str) -> None:
         """
         When the metrics of a neural unit are updated, this handler refreshes the spike clips for that unit IF it is
         in the current neuron display list.
         """
-        displayed = self.data_manager.neurons_with_display_focus
-        for k, pdi in enumerate(self._unit_spike_clips):
-            if (k < len(displayed)) and (displayed[k].uid == uid):
-                u = displayed[k]
-                offset = self._trace_offset * self.data_manager.channel_indices.index(u.primary_channel)
-                seg = self.data_manager.channel_trace(u.primary_channel)
+        ch_indices = self.data_manager.channel_indices
+        for k, unit in enumerate(self.data_manager.neurons_with_display_focus):
+            if unit.uid == uid:
+                spike_clip_pdi = self._spike_clip_pdis[k]
+                seg: Optional[ChannelTraceSegment] = None
+                offset = 0
+                if unit.primary_channel in ch_indices:
+                    seg = self.data_manager.channel_trace(unit.primary_channel)
+                    offset = self._trace_offset * ch_indices.index(unit.primary_channel)
                 if seg is None:
-                    pdi.setData(x=[], y=[])
+                    if not (spike_clip_pdi.xData is None):
+                        spike_clip_pdi.setData(x=[], y=[])
                 else:
-                    x, y = self._prepare_clip_data(u, seg, offset)
-                    pdi.setData(x=x, y=y)
+                    x, y = self._prepare_clip_data(unit, seg, offset)
+                    spike_clip_pdi.setData(x=x, y=y)
                 break
 
-    def on_focus_neurons_changed(self) -> None:
+    def on_focus_neurons_changed(self, channels_changed: True) -> None:
         """
         When the neuron display list changes, the set of displayable channels could change -- in which case this view
         is reset. If the displayable channel set is unchanged, then only the spike clip data is refreshed for **all**
         slots in the display list. For unused slots, the clip data will be empty.
         """
-        ch_set = {k for k in self._trace_segments.keys()}
-        if ch_set != set(self.data_manager.channel_indices):
+        if channels_changed:
             self._reset()
-            return
 
         displayed = self.data_manager.neurons_with_display_focus
-        for k, pdi in enumerate(self._unit_spike_clips):
+        for k, pdi in enumerate(self._spike_clip_pdis):
             x = []
             y = []
             if k < len(displayed):
@@ -284,12 +304,14 @@ class ChannelView(BaseView):
                 # NOTE: the set of 16 displayable channels is governed by the primary channel of the primary neuron. If
                 # there are additional units in the focus list those units' primary channels may not be in the set of
                 # displayable channels!
-                if isinstance(u.primary_channel, int) and (u.primary_channel in self.data_manager.channel_indices):
+                if u.primary_channel in self.data_manager.channel_indices:
                     offset = self._trace_offset * self.data_manager.channel_indices.index(u.primary_channel)
                     seg = self.data_manager.channel_trace(u.primary_channel)
                     if seg is not None:
                         x, y = self._prepare_clip_data(u, seg, offset)
-            pdi.setData(x=x, y=y)
+            # update PDI data set if we got clip data, OR there's no clip data and the PDI has a non-empty data set
+            if (len(x) > 0) or not (pdi.xData is None):
+                pdi.setData(x=x, y=y)
 
     def on_channel_trace_segment_start_changed(self) -> None:
         """
@@ -298,14 +320,19 @@ class ChannelView(BaseView):
         the digital readouts to reflect the new segment starting and ending times.
         """
         offset = 0
-        for k, pdi in self._trace_segments.items():
-            pdi.setData(x=[0, 1], y=[offset, offset])
-            offset += self._trace_offset
-        for pdi in self._unit_spike_clips:
-            pdi.setData(x=[], y=[])
+        n_traces = len(self.data_manager.channel_indices)
+        for k, pdi in enumerate(self._trace_pdis):
+            if k < n_traces:
+                pdi.setData(x=[0, 1], y=[offset, offset])
+                offset += self._trace_offset
+        for pdi in self._spike_clip_pdis:
+            if not (pdi.xData is None):
+                pdi.setData(x=[], y=[])
 
         t0 = self.data_manager.channel_trace_seg_start
+        self._t0_slider.valueChanged.disconnect(self.on_t0_slider_value_changed)
         self._t0_slider.setSliderPosition(t0)
+        self._t0_slider.valueChanged.connect(self.on_t0_slider_value_changed)
         rng = self._plot_item.getViewBox().viewRange()
         self._t0_readout.setText(ChannelView.digital_readout(t0 + rng[0][0]))
         self._t1_readout.setText(ChannelView.digital_readout(t0 + rng[0][1]))
@@ -397,10 +424,11 @@ class ChannelView(BaseView):
 
         :param ofs: The new slider position = the offset between consecutive channel traces in microvolts.
         """
-
         # compute current visible Y range as a fraction of the previous limits
+        ch_indices = self.data_manager.channel_indices
+        n_traces = len(ch_indices)
         y_rng = self._plot_item.getViewBox().viewRange()[1]
-        y_span = 2 * self._trace_offset + (len(self._trace_segments) - 1) * self._trace_offset
+        y_span = 2 * self._trace_offset + (n_traces - 1) * self._trace_offset
         y_min_frac = (y_rng[0] + self._trace_offset) / y_span
         y_max_frac = (y_rng[1] + self._trace_offset) / y_span
 
@@ -408,15 +436,16 @@ class ChannelView(BaseView):
         self._vspan_readout.setText(f"+/-{int(ofs/2)} \u00b5v")
         ticks = []
         offset = 0
-        for k, pdi in self._trace_segments.items():
-            seg = self.data_manager.channel_trace(k)
-            if seg is None:
-                pdi.setData(x=[0, 1], y=[offset, offset])
-            else:
-                pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
-                            y=offset + seg.trace_in_microvolts)
-            ticks.append((offset, str(k)))
-            offset += self._trace_offset
+        for k, pdi in enumerate(self._trace_pdis):
+            if k < n_traces:
+                seg = self.data_manager.channel_trace(ch_indices[k])
+                if seg is None:
+                    pdi.setData(x=[0, 1], y=[offset, offset])
+                else:
+                    pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
+                                y=offset + seg.trace_in_microvolts)
+                ticks.append((offset, str(k)))
+                offset += self._trace_offset
 
         self._plot_item.getAxis('left').setTicks([ticks])
         self._plot_item.getViewBox().setLimits(
@@ -424,25 +453,25 @@ class ChannelView(BaseView):
             minYRange=2 * self._trace_offset, maxYRange=offset + self._trace_offset)
 
         displayed = self.data_manager.neurons_with_display_focus
-        for k, pdi in enumerate(self._unit_spike_clips):
-            unit: Optional[Neuron] = displayed[k] if k < len(displayed) else None
-            ch_idx = -1
-            offset = 0
-            if unit and isinstance(unit.primary_channel, int):
-                try:
-                    ch_idx = unit.primary_channel
-                    offset = self._trace_offset * self.data_manager.channel_indices.index(ch_idx)
-                except Exception:
-                    continue
-            seg = self.data_manager.channel_trace(ch_idx)
-            if seg is None:
-                pdi.setData(x=[], y=[])
-            else:
-                x, y = self._prepare_clip_data(unit, seg, offset)
+        for k, pdi in enumerate(self._spike_clip_pdis):
+            x = []
+            y = []
+            if k < len(displayed):
+                u = displayed[k]
+                # NOTE: the set of 16 displayable channels is governed by the primary channel of the primary neuron. If
+                # there are additional units in the focus list those units' primary channels may not be in the set of
+                # displayable channels!
+                if u.primary_channel in self.data_manager.channel_indices:
+                    offset = self._trace_offset * self.data_manager.channel_indices.index(u.primary_channel)
+                    seg = self.data_manager.channel_trace(u.primary_channel)
+                    if seg is not None:
+                        x, y = self._prepare_clip_data(u, seg, offset)
+            # update PDI data set if we got clip data, OR there's no clip data and the PDI has a non-empty data set
+            if (len(x) > 0) or not (pdi.xData is None):
                 pdi.setData(x=x, y=y)
 
         # adjust visible Y range so that the same traces are in view (in case user has zoomed in on view)
-        y_span = 2 * self._trace_offset + (len(self._trace_segments) - 1) * self._trace_offset
+        y_span = 2 * self._trace_offset + (n_traces - 1) * self._trace_offset
         y_min = y_span * y_min_frac - self._trace_offset
         y_max = y_span * y_max_frac - self._trace_offset
         self._plot_item.getViewBox().setYRange(y_min, y_max)

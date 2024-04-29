@@ -284,7 +284,7 @@ class NeuronView(BaseView):
     def on_neuron_metrics_updated(self, uid: str) -> None:
         self._model.reload_table_data()
 
-    def on_focus_neurons_changed(self) -> None:
+    def on_focus_neurons_changed(self, _: bool) -> None:
         self._model.reload_table_data()
 
     def on_neuron_label_updated(self, uid: str) -> None:
