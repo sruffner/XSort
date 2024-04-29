@@ -182,7 +182,8 @@ def gen_cross_correlogram_vs_firing_rate(
         num_per_bin[bin_num] = num_per_bin[bin_num] + 1
 
     # normalize by dividing by the number of samples contributing to each firing rate bin
-    counts = counts / num_per_bin[:, np.newaxis]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        counts = counts / num_per_bin[:, np.newaxis]
 
     # for ACG case, set to 0 at spike occurrence time (t=0) in each firing rate bin
     if is_acg:

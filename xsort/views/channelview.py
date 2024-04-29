@@ -45,7 +45,7 @@ class ChannelView(BaseView):
     """ Default vertical separation between channel trace segments, in microvolts. """
     _MIN_TRACE_OFFSET: int = 100
     """ Minimum vertical separation between channel trace segments, in microvolts. """
-    _MAX_TRACE_OFFSET: int = 1500
+    _MAX_TRACE_OFFSET: int = 2000
     """ Minimum vertical separation between channel trace segments, in microvolts. """
 
     def __init__(self, data_manager: Analyzer) -> None:
@@ -156,9 +156,9 @@ class ChannelView(BaseView):
            trace if that trace segment is not yet available, or an empty set if that PDI will not be used because there
            are fewer than MAX_CHANNEL_TRACES displayable channels. The traces are offset vertically IAW the view's
            current trace offset.
-         - The data set for every spike clip PDI is emptied (if it wasn't already).
+         - The data set for every spike clip PDI is refreshed if it is available, else it is cleared if necessary.
          - If there are no displayable analog channels, the Y-axis is hidden and a static centered message label is
-           shown indicaeing that there is no data. Otherwise, the Y-axis tick labels are updated to reflect the analog
+           shown indicating that there is no data. Otherwise, the Y-axis tick labels are updated to reflect the analog
            channel indices of the corresponding "flat line" traces.
          - The slider and label widgets that set and display the elapsed start time for the trace segments are reset
            for a start time of 0 and configured IAW the analog channel duration (if known).
@@ -183,34 +183,8 @@ class ChannelView(BaseView):
         else:
             self._message_label.setText("")
             self._plot_item.showAxis('left')
-            ticks = []
-            offset = 0
-            for k, pdi in enumerate(self._trace_pdis):
-                if k >= n_traces:
-                    if not (pdi.xData is None):
-                        pdi.setData(x=[], y=[])
-                else:
-                    ch_idx = self.data_manager.channel_indices[k]
-                    seg = self.data_manager.channel_trace(ch_idx)
-                    if seg is None:
-                        pdi.setData(x=[0, 1], y=[offset, offset])
-                    else:
-                        pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
-                                    y=offset + seg.trace_in_microvolts)
-                    ticks.append((offset, str(ch_idx)))
-                    offset += self._trace_offset
 
-            self._plot_item.getAxis('left').setTicks([ticks])
-
-            self._plot_item.getViewBox().setLimits(
-                xMin=0, xMax=1, minXRange=0.1, maxXRange=1, yMin=-self._trace_offset, yMax=offset,
-                minYRange=2 * self._trace_offset, maxYRange=offset + self._trace_offset)
-            self._plot_item.getViewBox().enableAutoRange()  # resets the zoom (if user previously zoomed in on view)
-
-            # clear out any spike clips data, if any
-            for pdi in self._spike_clip_pdis:
-                if not (pdi.xData is None):
-                    pdi.setData(x=[], y=[])
+        self._refresh(traces=True, clips=True, vspan_changed=True, reset_zoom=True)
 
         self._t0_readout.setText(ChannelView.digital_readout(0))
         self._t1_readout.setText(ChannelView.digital_readout(1))
@@ -226,11 +200,78 @@ class ChannelView(BaseView):
             self._t0_slider.setTickInterval(dur)
             self._t0_slider.setEnabled(True)
 
+    def _refresh(self, traces: bool = False, clips: bool = False, vspan_changed: bool = False,
+                 reset_zoom: bool = False) -> None:
+        """
+        Helper method optionally refreshes various aspects of this view.
+
+        :param traces: If True, the data sets for all channel trace plot items are refreshed.
+        :param clips: If True, the data sets for all spike clip plot items are refreshed.
+        :param vspan_changed: If True, the tick labels on the Y-axis and the plot's X/Y range are refreshed IAW a
+            change in the vertical range. (The tick labels identify the channel indices for the traces displayed.)
+        :param reset_zoom: If True, resets the plot's zoom and pan state.
+        :return:
+        """
+        ch_indices = self.data_manager.channel_indices
+        if len(ch_indices) == 0:
+            return
+
+        if traces:
+            offset = 0
+            for k, pdi in enumerate(self._trace_pdis):
+                if k >= len(ch_indices):
+                    if not (pdi.xData is None):
+                        pdi.setData(x=[], y=[])
+                else:
+                    ch_idx = ch_indices[k]
+                    seg = self.data_manager.channel_trace(ch_idx)
+                    if seg is None:
+                        pdi.setData(x=[0, 1], y=[offset, offset])
+                    else:
+                        pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
+                                    y=offset + seg.trace_in_microvolts)
+                    offset += self._trace_offset
+
+        if clips:
+            displayed = self.data_manager.neurons_with_display_focus
+            for k, pdi in enumerate(self._spike_clip_pdis):
+                x = []
+                y = []
+                if k < len(displayed):
+                    u = displayed[k]
+                    # NOTE: Set of 16 displayable channels is governed by primary channel of the primary neuron. The
+                    # primary channel of other units in the focus list may not be in the set of displayable channels!
+                    if u.primary_channel in ch_indices:
+                        offset = self._trace_offset * ch_indices.index(u.primary_channel)
+                        seg = self.data_manager.channel_trace(u.primary_channel)
+                        if seg is not None:
+                            x, y = self._prepare_clip_data(u, seg, offset)
+                # update PDI data set if we got clip data, OR there's no clip data and the PDI has a non-empty data set
+                if (len(x) > 0) or not (pdi.xData is None):
+                    pdi.setData(x=x, y=y)
+
+        if vspan_changed:
+            ticks = []
+            offset = 0
+            for ch_idx in ch_indices:
+                ticks.append((offset, str(ch_idx)))
+                offset += self._trace_offset
+            self._plot_item.getAxis('left').setTicks([ticks])
+
+            self._plot_item.getViewBox().setLimits(
+                xMin=0, xMax=1, minXRange=0.1, maxXRange=1, yMin=-self._trace_offset, yMax=offset,
+                minYRange=2 * self._trace_offset, maxYRange=offset + self._trace_offset)
+
+        if reset_zoom:
+            self._plot_item.getViewBox().enableAutoRange()  # resets the zoom (if user previously zoomed in on view)
+
     def on_working_directory_changed(self) -> None:
         """
         Whenever the working directory has changed, the unit focus list will be empty and the initial set of analog data
         channel traces should be ready. The view is reset accordingly.
         """
+        if self._auto_adjust_trace_offset():
+            self._vspan_readout.setText(f"+/-{int(self._trace_offset / 2)} \u00b5v")
         self._reset()
 
     def on_channel_traces_updated(self) -> None:
@@ -238,31 +279,31 @@ class ChannelView(BaseView):
         Handler updates the X,Y data for each :class:`pyqtgraph.PlotDataItem` that renders a trace segment or a set
         of spike clips for a neuron in the current focus list.
         """
-        offset = 0
-        ch_indices = self.data_manager.channel_indices
-        for k, ch_idx in enumerate(ch_indices):
-            pdi = self._trace_pdis[k]
-            seg = self.data_manager.channel_trace(ch_idx)
-            if seg is None:
-                pdi.setData(x=[0, 1], y=[offset, offset])
-            else:
-                pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
-                            y=offset + seg.trace_in_microvolts)
-            offset += self._trace_offset
+        # auto adjust trace offset IAW worst-case peak-to-peak amplitude across channel traces
+        if self._auto_adjust_trace_offset():
+            self._on_vspan_slider_changed(self._trace_offset)
+            self._plot_item.getViewBox().enableAutoRange()  # reset zoom
+        else:
+            self._refresh(traces=True, clips=True)
 
-        for k, unit in enumerate(self.data_manager.neurons_with_display_focus):
-            spike_clip_pdi = self._spike_clip_pdis[k]
-            seg: Optional[ChannelTraceSegment] = None
-            offset = 0
-            if unit.primary_channel in ch_indices:
-                seg = self.data_manager.channel_trace(unit.primary_channel)
-                offset = self._trace_offset * ch_indices.index(unit.primary_channel)
-            if seg is None:
-                if not (spike_clip_pdi.xData is None):
-                    spike_clip_pdi.setData(x=[], y=[])
-            else:
-                x, y = self._prepare_clip_data(unit, seg, offset)
-                spike_clip_pdi.setData(x=x, y=y)
+    def _auto_adjust_trace_offset(self) -> bool:
+        """
+        Helper method adjusts the current trace offset to accommodate worst-case peak-to-peak amplitude across
+        channel traces. The trace offset slider position is updated, but otherwise the view is not refreshed.
+        :return: True if trace offset was adjusted; else False.
+        """
+        max_amp = 0
+        for ch_idx in self.data_manager.channel_indices:
+            seg = self.data_manager.channel_trace(ch_idx)
+            if seg:
+                max_amp = max(max_amp, seg.amplitude_in_microvolts)
+        ofs_auto = self._trace_offset if max_amp == 0 else max(self._MIN_TRACE_OFFSET, min(int(max_amp),
+                                                                                           self._MAX_TRACE_OFFSET))
+        if ofs_auto != self._trace_offset:
+            self._vspan_slider.setSliderPosition(ofs_auto)
+            self._trace_offset = ofs_auto
+            return True
+        return False
 
     def on_neuron_metrics_updated(self, uid: str) -> None:
         """
@@ -294,24 +335,8 @@ class ChannelView(BaseView):
         """
         if channels_changed:
             self._reset()
-
-        displayed = self.data_manager.neurons_with_display_focus
-        for k, pdi in enumerate(self._spike_clip_pdis):
-            x = []
-            y = []
-            if k < len(displayed):
-                u = displayed[k]
-                # NOTE: the set of 16 displayable channels is governed by the primary channel of the primary neuron. If
-                # there are additional units in the focus list those units' primary channels may not be in the set of
-                # displayable channels!
-                if u.primary_channel in self.data_manager.channel_indices:
-                    offset = self._trace_offset * self.data_manager.channel_indices.index(u.primary_channel)
-                    seg = self.data_manager.channel_trace(u.primary_channel)
-                    if seg is not None:
-                        x, y = self._prepare_clip_data(u, seg, offset)
-            # update PDI data set if we got clip data, OR there's no clip data and the PDI has a non-empty data set
-            if (len(x) > 0) or not (pdi.xData is None):
-                pdi.setData(x=x, y=y)
+        else:
+            self._refresh(clips=True)
 
     def on_channel_trace_segment_start_changed(self) -> None:
         """
@@ -319,20 +344,10 @@ class ChannelView(BaseView):
         all spike clip data items, since the new channel trace segments will not be immediately available. Also update
         the digital readouts to reflect the new segment starting and ending times.
         """
-        offset = 0
-        n_traces = len(self.data_manager.channel_indices)
-        for k, pdi in enumerate(self._trace_pdis):
-            if k < n_traces:
-                pdi.setData(x=[0, 1], y=[offset, offset])
-                offset += self._trace_offset
-        for pdi in self._spike_clip_pdis:
-            if not (pdi.xData is None):
-                pdi.setData(x=[], y=[])
+        self._refresh(traces=True, clips=True)
 
         t0 = self.data_manager.channel_trace_seg_start
-        self._t0_slider.valueChanged.disconnect(self.on_t0_slider_value_changed)
         self._t0_slider.setSliderPosition(t0)
-        self._t0_slider.valueChanged.connect(self.on_t0_slider_value_changed)
         rng = self._plot_item.getViewBox().viewRange()
         self._t0_readout.setText(ChannelView.digital_readout(t0 + rng[0][0]))
         self._t1_readout.setText(ChannelView.digital_readout(t0 + rng[0][1]))
@@ -425,8 +440,7 @@ class ChannelView(BaseView):
         :param ofs: The new slider position = the offset between consecutive channel traces in microvolts.
         """
         # compute current visible Y range as a fraction of the previous limits
-        ch_indices = self.data_manager.channel_indices
-        n_traces = len(ch_indices)
+        n_traces = len(self.data_manager.channel_indices)
         y_rng = self._plot_item.getViewBox().viewRange()[1]
         y_span = 2 * self._trace_offset + (n_traces - 1) * self._trace_offset
         y_min_frac = (y_rng[0] + self._trace_offset) / y_span
@@ -434,41 +448,9 @@ class ChannelView(BaseView):
 
         self._trace_offset = ofs
         self._vspan_readout.setText(f"+/-{int(ofs/2)} \u00b5v")
-        ticks = []
-        offset = 0
-        for k, pdi in enumerate(self._trace_pdis):
-            if k < n_traces:
-                seg = self.data_manager.channel_trace(ch_indices[k])
-                if seg is None:
-                    pdi.setData(x=[0, 1], y=[offset, offset])
-                else:
-                    pdi.setData(x=np.linspace(start=0, stop=seg.duration, num=seg.length),
-                                y=offset + seg.trace_in_microvolts)
-                ticks.append((offset, str(k)))
-                offset += self._trace_offset
 
-        self._plot_item.getAxis('left').setTicks([ticks])
-        self._plot_item.getViewBox().setLimits(
-            xMin=0, xMax=1, minXRange=0.1, maxXRange=1, yMin=-self._trace_offset, yMax=offset,
-            minYRange=2 * self._trace_offset, maxYRange=offset + self._trace_offset)
-
-        displayed = self.data_manager.neurons_with_display_focus
-        for k, pdi in enumerate(self._spike_clip_pdis):
-            x = []
-            y = []
-            if k < len(displayed):
-                u = displayed[k]
-                # NOTE: the set of 16 displayable channels is governed by the primary channel of the primary neuron. If
-                # there are additional units in the focus list those units' primary channels may not be in the set of
-                # displayable channels!
-                if u.primary_channel in self.data_manager.channel_indices:
-                    offset = self._trace_offset * self.data_manager.channel_indices.index(u.primary_channel)
-                    seg = self.data_manager.channel_trace(u.primary_channel)
-                    if seg is not None:
-                        x, y = self._prepare_clip_data(u, seg, offset)
-            # update PDI data set if we got clip data, OR there's no clip data and the PDI has a non-empty data set
-            if (len(x) > 0) or not (pdi.xData is None):
-                pdi.setData(x=x, y=y)
+        # refresh current traces and spike clips IAW change in vertical range
+        self._refresh(traces=True, clips=True, vspan_changed=True)
 
         # adjust visible Y range so that the same traces are in view (in case user has zoomed in on view)
         y_span = 2 * self._trace_offset + (n_traces - 1) * self._trace_offset

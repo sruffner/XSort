@@ -1,9 +1,44 @@
 # Changelog
 
-## v0.1.5 (TBD)
-- Tweaked `ChannelView` implementation to adjust the visible Y-axis range whenever the user changes the vertical 
-separation between trace so that -- if the user has zoomed in on a few traces -- those traces remain approximately in
-the same place within the view after changing the vertical separation. 
+## v0.1.5 (04/29/2024)
+- Extend support to non-Omniplex recordings in which the analog source is a flat binary file. The file may be
+interleaved (or not), and prefiltered (or not). Splitting analog channel streams into separate internal cache
+files is unnecessary when the analog source is a flat, prefiltered binary file.
+- When "opening" a working directory for the first time, XSort will query user via dialog if there are multiple
+possible analog and/or unit source files, and/or if the analog source is a flat binary file. In the case of a flat
+binary source, the user must specify the sampling rate and number of channels recorded, the scale factor converting
+a raw binary sample to volts, whether or not the analog channel streams are interleaved, and whether or not the
+data is prefiltered. Once a valid directory configuration is specified, the configuration info is saved to an
+internal file (`.xs.directory.txt`) so that the user does not have to reenter the information the next time XSort 
+visits the directory.
+- Major redesign of the infrastructure/strategy for background task processing to improve performance and handle 
+recording sessions with hundreds of analog channels and hundreds of neural units.
+  - Divide up work among multiple processses where possible -- especially helpful for the building the internal
+  cache for an XSort directory, and for computing statistics for units in the current _display/focus list_.
+  - Evaluated a number of different approaches to handle the "build internal cache" task, using a Neuropixel
+  session with 385 analog channels and 482 units.
+  - We now only compute a unit's per-channel spike templates on up to 16 analog channels "in the neighborhood" of
+  the unit's primary channel (channel exhibiting highest SNR). Since XSort does not yet support the notion of probe
+  geometry, we use channel indices [P-8 .. P+7], where P is the primary channel index.
+  - Greatly improved the algorithm for computing noise levels on each analog channel. The per-channel noise levels 
+  are calculated and cached as part of the "build internal cache" task -- after caching analog channels (if needed),
+  but before caching neural unit metrics.
+  - When there are more than 16 recorded analog channels, building the unit metrics cache files has two phases. First,
+  a background task identifies the primary channel P for each unit. Then, a second background task computes the spike
+  templates for the channels near each unit's primary channel and writes each unit's metrics (spike times, templates,
+  snr, primary channel) to an internal cache file (`.xs.unit.<uid>`).
+- Modified `TemplateView` implementation:
+  - Precreate and reuse graphics items that render the templates and display channel labels. This is more efficient 
+  than destroying and recreating them every time -- improving overall GUI responsiveness.
+  - Vertical span is auto-adjusted whenever there is a change in the displayed templates. User can still readjust the
+  span using the slider provided.
+- Modified `ChannelView` implementation:
+  - Adjusts the visible Y-axis range whenever the user explicitly changes the vertical separation between trace so that,
+  if the user has zoomed in on a few traces, those traces remain approximately in the same place after the change.
+  - Precreate and reused graphics items that render channel traces and spike clips. Again, this is more efficient and
+  improved overall GUI responsiveness.
+  - Vertical trace offset is auto-adjusted whenever the channel traces are updated (this also resets the zoom/pan
+  state). User can still readjust the trace offset using the slider provided.
 
 ## v0.1.4 (02/08/2024)
 - Finished implementation of the **Help** view, which offers a small user guide for XSort. The guide is divided into

@@ -92,6 +92,11 @@ class ChannelTraceSegment:
         """ The channel trace segment, converted to microvolts. """
         return self._seg * self._scale
 
+    @property
+    def amplitude_in_microvolts(self) -> float:
+        """ Peak-to-peak amplitude of the channel trace segmennt, in microvolts. """
+        return (np.max(self._seg) - np.min(self._seg)) * self._scale
+
 
 class Neuron:
     """
