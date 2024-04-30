@@ -962,7 +962,7 @@ class Analyzer(QObject):
             if dt == DataType.CCG:
                 for u in focus_units:
                     for u2 in focus_units:
-                        if (u.uid != u2.uid) and u.is_statistic_cached(dt, u2.uid):
+                        if (u.uid != u2.uid) and not u.is_statistic_cached(dt, u2.uid):
                             uids.update({u.uid, u2.uid})
                     if len(uids) == len(focus_units):
                         break

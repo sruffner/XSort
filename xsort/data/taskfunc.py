@@ -1492,6 +1492,19 @@ def compute_statistics(dir_path: str, task_id: int, request: Tuple[Any], progres
     :param cancel: A process-safe event object which is set to request premature cancellation of this task function.
         The function returns as soon as the cancellation is detected without taking further action.
     """
+    # function passed to report progress and prematurely cancel long-running stats calculations
+    def progress(frac_done: float) -> bool:
+        """
+        Callback function to update progress and check for task cancellation within stats methods
+        :param frac_done Fraction of computation completed in [0..1.0].
+        :return: True to continue computation, False to cancel.
+        """
+        if cancel.is_set():
+            return False
+        _p = int(100.0 * frac_done)
+        progress_q.put_nowait((task_id, _p))
+        return True
+
     try:
         emsg, work_dir = WorkingDirectory.load_working_directory(Path(dir_path))
         if work_dir is None:
@@ -1506,39 +1519,49 @@ def compute_statistics(dir_path: str, task_id: int, request: Tuple[Any], progres
         which: DataType = request[0]
         uids = [request[i] for i in range(1, len(request))]
         if which == DataType.ISI:
+            sub_task_frac = 1.0 / len(uids)
             for k, uid in enumerate(uids):
                 u = work_dir.load_neural_unit_from_cache(uid)
                 if u is None:
                     raise Exception(f"Missing or invalid unit metrics cache file (uid={uid})")
                 if cancel.is_set():
                     return
-                out = stats.generate_isi_histogram(u.spike_times, Neuron.FIXED_HIST_SPAN_MS)
+
+                out = stats.generate_isi_histogram(u.spike_times, Neuron.FIXED_HIST_SPAN_MS,
+                                                   lambda x: progress(x*sub_task_frac))
+                if cancel.is_set():
+                    return
+
                 max_count = max(out)
                 if max_count > 0:
                     out = out * (1.0 / max_count)
-                if cancel.is_set():
-                    return
                 progress_q.put_nowait((which, (uid, out)))
-                pct = int((k + 1) * 100 / len(uids))
+                pct = int((k + 1) * sub_task_frac * 100)
                 progress_q.put_nowait((task_id, pct))
 
         elif which == DataType.ACG:
+            sub_task_frac = 1.0 / len(uids)
             for k, uid in enumerate(uids):
                 u = work_dir.load_neural_unit_from_cache(uid)
                 if u is None:
                     raise Exception(f"Missing or invalid unit metrics cache file (uid={uid})")
                 if cancel.is_set():
                     return
-                out, n = stats.generate_cross_correlogram(u.spike_times, u.spike_times, Neuron.FIXED_HIST_SPAN_MS)
-                if n > 0:
-                    out = out * (1.0 / n)
+
+                res = stats.generate_cross_correlogram(u.spike_times, u.spike_times, Neuron.FIXED_HIST_SPAN_MS,
+                                                       lambda x: progress(x*sub_task_frac))
                 if cancel.is_set():
                     return
+
+                out, n = res[0], res[1]
+                if n > 0:
+                    out = out * (1.0 / n)
                 progress_q.put_nowait((which, (uid, out)))
-                pct = int((k + 1) * 100 / len(uids))
+                pct = int((k + 1) * sub_task_frac * 100)
                 progress_q.put_nowait((task_id, pct))
 
         elif which == DataType.ACG_VS_RATE:
+            sub_task_frac = 1.0/len(uids)
             for k, uid in enumerate(uids):
                 u = work_dir.load_neural_unit_from_cache(uid)
                 if u is None:
@@ -1546,11 +1569,12 @@ def compute_statistics(dir_path: str, task_id: int, request: Tuple[Any], progres
                 if cancel.is_set():
                     return
                 out = stats.gen_cross_correlogram_vs_firing_rate(u.spike_times, u.spike_times,
-                                                                 span_ms=Neuron.ACG_VS_RATE_SPAN_MS)
+                                                                 span_ms=Neuron.ACG_VS_RATE_SPAN_MS,
+                                                                 progress=lambda x: progress(x*sub_task_frac))
                 if cancel.is_set():
                     return
                 progress_q.put_nowait((which, (uid, out)))
-                pct = int((k + 1) * 100 / len(uids))
+                pct = int((k + 1) * sub_task_frac * 100)
                 progress_q.put_nowait((task_id, pct))
 
         elif which == DataType.CCG:
@@ -1568,15 +1592,17 @@ def compute_statistics(dir_path: str, task_id: int, request: Tuple[Any], progres
             progress_q.put_nowait((task_id, 10))
 
             n_ccgs, n_done = len(units) * (len(units) - 1), 0
+            sub_task_frac = 0.9 / n_ccgs
             for u in units:
                 for u2 in units:
                     if u.uid != u2.uid:
-                        out, n = stats.generate_cross_correlogram(u.spike_times, u2.spike_times,
-                                                                  Neuron.FIXED_HIST_SPAN_MS)
-                        if n > 0:
-                            out = out * (1.0 / n)
+                        res = stats.generate_cross_correlogram(u.spike_times, u2.spike_times, Neuron.FIXED_HIST_SPAN_MS,
+                                                               lambda x: progress(x*sub_task_frac + 0.1))
                         if cancel.is_set():
                             return
+                        out, n = res[0], res[1]
+                        if n > 0:
+                            out = out * (1.0 / n)
                         progress_q.put_nowait((which, (u.uid, u2.uid, out)))
                         n_done += 1
                         pct = int(n_done * 90 / n_ccgs) + 10
@@ -1664,6 +1690,18 @@ def _compute_pca_projections(
     :raises Exception: If any required files are missing from the current working directory, such as the
         analog channel data cache files, or if an IO error or other unexpected failure occurs.
     """
+    def progress(frac_done: float) -> bool:
+        """
+        Callback function to update progress and check for task cancellation within stats methods
+        :param frac_done Fraction of computation completed in [0..1.0].
+        :return: True to continue computation, False to cancel.
+        """
+        if cancel.is_set():
+            return False
+        _p = int(100.0 * frac_done)
+        progress_q.put_nowait((task_id, _p))
+        return True
+
     # find the set of analog channels on which to perform the analysis. For multiple units, only perform on channels
     # shared by all units. If no shared units, then PCA cannot be performed.
     channel_set: Set[int] = set(units[0].template_channel_indices)
@@ -1702,12 +1740,12 @@ def _compute_pca_projections(
                 all_clips[i_unit, i * clip_dur:(i + 1) * clip_dur] = u.get_template_for_channel(ch_idx)[0:clip_dur]
     if cancel.is_set():
         return
-    progress_q.put_nowait((task_id, 20))
+    progress_q.put_nowait((task_id, 10))
 
-    pc_matrix = stats.compute_principal_components(all_clips)
+    pc_matrix = stats.compute_principal_components(all_clips, progress=lambda x: progress(x*0.1 + 0.1))
     if cancel.is_set():
         return
-    progress_q.put_nowait((task_id, 50))
+    progress_q.put_nowait((task_id, 20))
 
     # phase 2: compute the projection of each unit's spikes onto the 2D space defined by the 2 principal components
     # determine how many spike clips to be extracted across all units in the analysis. We omit clips that are cut off at
@@ -1737,8 +1775,8 @@ def _compute_pca_projections(
             n_spikes_in_chunk = min(SPIKES_PER_BATCH, n - k)
             clip_starts = [int((u.spike_times[i + k] - PRE_SPIKE_SEC) * samples_per_sec)
                            for i in range(n_spikes_in_chunk)]
-            pct_start = int(50 + 50*total_spikes_so_far/total_spike_count)
-            pct_end = int(50 + 50*(total_spikes_so_far + n_spikes_in_chunk)/total_spike_count)
+            pct_start = int(20 + 80*total_spikes_so_far/total_spike_count)
+            pct_end = int(20 + 80*(total_spikes_so_far + n_spikes_in_chunk)/total_spike_count)
             clips_in_chunk = _retrieve_multi_clips(work_dir, channel_list, clip_starts, clip_dur, task_id,
                                                    pct_start=pct_start, pct_end=pct_end, progress_q=progress_q,
                                                    cancel=cancel)

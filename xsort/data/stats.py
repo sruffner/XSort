@@ -1,62 +1,69 @@
 """
 stats.py: A collection of functions implementing various statistical calculations
 
-    NOTE: Copied from sglportalapi package on 10/2/2023.
+NOTE: Copied from sglportalapi package on 10/2/2023. Modified on 4/30/2024 to allow for progress reporting and
+cancellation via a callback function provided as an argument to the different methods defined here.
 """
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Callable
 import numpy as np
 
 
-def generate_isi_histogram(spike_times: np.ndarray, max_isi_ms: int = 100) -> np.ndarray:
+def generate_isi_histogram(spike_times: np.ndarray, max_isi_ms: int = 100,
+                           progress: Optional[Callable[[float], bool]] = None) -> Optional[np.ndarray]:
     """
     Generate an inter-spike interval (ISI) histogram for a specified series of spike times.
 
-    Args:
-        spike_times: Array of spike times in seconds. Need not be in chronological order.
-        max_isi_ms: The maximum inter-spike interval M included in the histogram, in milliseconds. Default = 100. This
-            parameter defines an array of evenly spaced times between 0 and M inclusive, representing the centers of the
-            1ms histogram bins over which the ISIs are counted. Minimum value of 20 ms.
-
-    Returns:
-        The computed histogram as an array of counts per bin (same length as 'bin_centers').
+    :param spike_times: Array of spike times in seconds. Need not be in chronological order.
+    :param max_isi_ms: The maximum inter-spike interval M included in the histogram, in milliseconds. Default = 100.
+        This parameter defines an array of evenly spaced times between 0 and M inclusive, representing the centers of
+        the 1ms histogram bins over which the ISIs are counted. Minimum value of 20 ms.
+    :param progress: Optional function to report progress and cancel prematurely. Function should take one float
+        argument indicating the fraction of work completed in [0..1.0] and should return False to cancel.
+    :return: The computed histogram as an array of counts per bin (same length as 'bin_centers'). **Returns None if the
+        function is cancelled prematurely.**
     """
     max_isi_ms = max(20, max_isi_ms)
     # noinspection PyUnresolvedReferences
     bin_centers = np.linspace(0, max_isi_ms*1e-3, max_isi_ms + 1)
     half_width = 1e-3 / 2.0
+    n_bins = len(bin_centers)
 
     diff_times = np.diff(spike_times)
     diff_times = diff_times[~np.isnan(diff_times)]
-    bin_values = np.zeros(len(bin_centers))
+    bin_values = np.zeros(n_bins)
     if len(diff_times) > 0:
-        for i in range(len(bin_centers)):
+        for i in range(n_bins):
             select = np.logical_and(diff_times > (bin_centers[i] - half_width),
                                     diff_times <= (bin_centers[i] + half_width))
             bin_values[i] = len(select.nonzero()[0])
+            if (progress is not None) and i > 0:
+                if not progress(i/n_bins):
+                    return None
     return bin_values
 
 
 def generate_cross_correlogram(
-        spike_times_1: np.ndarray, spike_times_2: np.ndarray, span_ms: int = 100) -> Tuple[np.ndarray, int]:
+        spike_times_1: np.ndarray, spike_times_2: np.ndarray, span_ms: int = 100,
+        progress: Optional[Callable[[float], bool]] = None) -> Optional[Tuple[np.ndarray, int]]:
     """
     Generate a cross correlogram for two series of spike times.
 
         **NOTE**: If the two spike trains are identical, the result is an auto-correlogram. In this case, by convention,
     the bin corresponding to a time delta of 0 is set to 0.
 
-    Args:
-        spike_times_1: Array of spike times for a neural unit, in seconds. Need not be in chronological order.
-        spike_times_2: Array of spike times for a second neural unit, in seconds. Passing the same array into both
-            arguments yields the auto-correlogram for a single neuron.
-        span_ms: Correlogram span in milliseconds. Default = 100. Minimum value of 20.
-    Returns:
-        A 2-tuple (C, n). C is a Numpy array containing the computed correlogram, while n is the # of spikes in the
-            first neuron that were included in the analysis (spikes within 'span_ms' of the beginning or end of the
-            recorded time frame must be excluded). The correlogram is essentially a histogram of how likely a spike
-            occurs in the second neuron at some time before or after a spike occurred in the first neuron at t=0. The
-            histogram will have 2S+1 1-ms bins between -S and S, inclusive, where S is the specified correlogram span.
-            Each element contains the count of unit 2 spikes in the corresponding time bin. To get a relative measure of
-            the likelihood of a spike occurring in each bin, divide each bin count by n.
+    :param spike_times_1: Array of spike times for a neural unit, in seconds. Need not be in chronological order.
+    :param spike_times_2: Array of spike times for a second neural unit, in seconds. Passing the same array into both
+        arguments yields the auto-correlogram for a single neuron.
+    :param span_ms: Correlogram span in milliseconds. Default = 100. Minimum value of 20.
+    :param progress: Optional function to report progress and cancel prematurely. Function should take one float
+        argument indicating the fraction of work completed in [0..1.0] and should return False to cancel.
+    :return: A 2-tuple (C, n). C is a Numpy array containing the computed correlogram, while n is the # of spikes in the
+        first neuron that were included in the analysis (spikes within 'span_ms' of the beginning or end of the recorded
+        time frame must be excluded). The correlogram is essentially a histogram of how likely a spike occurs in the
+        second neuron at some time before or after a spike occurred in the first neuron at t=0. The histogram will have
+        2S+1 1-ms bins between -S and S, inclusive, where S is the specified correlogram span. Each element contains the
+        count of unit 2 spikes in the corresponding time bin. To get a relative measure of the likelihood of a spike
+        occurring in each bin, divide each bin count by n. **Returns None if the function is cancelled prematurely.**
     Raises:
         ValueError: If either array of spike times is empty, or contains a non-finite value.
     """
@@ -73,8 +80,14 @@ def generate_cross_correlogram(
     train_len = int(np.ceil(max(np.nanmax(spikes_ms_1, axis=0), np.nanmax(spikes_ms_2, axis=0))))
     spike_train_2 = np.zeros(train_len+1, dtype=np.uint8)
 
+    if (progress is not None) and not progress(0.1):
+        return None
+
     for i in range(len(spikes_ms_2)):
         spike_train_2[spikes_ms_2[i]] += 1
+
+    if (progress is not None) and not progress(0.2):
+        return None
 
     # compute the correlogram
     span_ms = max(20, span_ms)
@@ -89,6 +102,10 @@ def generate_cross_correlogram(
             counts += spike_train_2[start:stop]
             n = n + 1
 
+        if (progress is not None) and (i % 1000 == 0):
+            if not progress(0.2 + 0.8*i/len(spikes_ms_1)):
+                return None
+
     # set t=0 bin to 0 for ACG
     if is_acg:
         counts[span_ms] = 0
@@ -98,7 +115,8 @@ def generate_cross_correlogram(
 
 def gen_cross_correlogram_vs_firing_rate(
         spike_times_1: np.ndarray, spike_times_2: np.ndarray, span_ms: int = 100, num_fr_bins: int = 10,
-        smooth: Optional[float] = 250e-3) -> Tuple[np.ndarray, np.ndarray]:
+        smooth: Optional[float] = 250e-3, progress: Optional[Callable[[float], bool]] = None) \
+        -> Optional[Tuple[np.ndarray, np.ndarray]]:
     """
     Generate a series of cross-correlograms of the spike trains for two neural units across the observed instantaneous
     firing rates. The result is a 2D matrix: the first dimension is binned firing rate, while the second is time
@@ -115,8 +133,11 @@ def gen_cross_correlogram_vs_firing_rate(
     :param num_fr_bins: Number of bins, N, for the firing rate axis. Default = 10.
     :param smooth: Width of the boxcar filter used to smooth the calculated instantaneous firing rate, in seconds. If
         None, firing rate is not filtered. Default = 0.25s.
+    :param progress: Optional function to report progress and cancel prematurely. Function should take one float
+        argument indicating the fraction of work completed in [0..1.0] and should return False to cancel.
     :return: 2-tuple (A, B), where A is a 1D Numpy array of length N holding the bin centers for the firing rate axis,
-        and B is a NxM matrix holding the result, where M = span_ms*2 + 1.
+        and B is a NxM matrix holding the result, where M = span_ms*2 + 1. **Returns None if the function is cancelled
+        prematurely.**
     :raises ValueError: If there are fewer than 2 spikes in either spike train, or if either spike train contains a
         non-finite (NaN, infinite) value.
     """
@@ -138,6 +159,7 @@ def gen_cross_correlogram_vs_firing_rate(
 
     # compute instantaneous firing rate for the second unit using the inverse ISI method.
     firing_rate = np.zeros(spike_train_2.shape)
+    n_proc = len(spikes_ms_2) - 1
     for i in range(len(spikes_ms_2)-1):
         t0_ms, t1_ms = spikes_ms_2[i], spikes_ms_2[i+1]
         if t0_ms == t1_ms:
@@ -148,6 +170,10 @@ def gen_cross_correlogram_vs_firing_rate(
             firing_rate[0:int(t0_ms)] = current_fr
         elif i == len(spikes_ms_2) - 2:
             firing_rate[int(t1_ms):] = current_fr
+
+        if (progress is not None) and (i % 1000 == 0):
+            if not progress(0.3*i/n_proc):
+                return None
 
     # smooth the instantaneous firing rate waveform if requested
     if isinstance(smooth, float):
@@ -167,6 +193,7 @@ def gen_cross_correlogram_vs_firing_rate(
     # that bin IAW the spikes found in the segment [T-span_ms:T+span_ms] in the second unit's binned spike train...
     counts = np.zeros(shape=(len(firing_rate_axis), 2*span_ms+1))
     num_per_bin = np.zeros(len(firing_rate_axis))
+    n_proc = len(spikes_ms_1)
     for i, t_ms in enumerate(spikes_ms_1):
         start = int(t_ms) - span_ms
         stop = start + 2 * span_ms + 1
@@ -181,6 +208,10 @@ def gen_cross_correlogram_vs_firing_rate(
         counts[bin_num, :] += spike_train_2[start:stop]
         num_per_bin[bin_num] = num_per_bin[bin_num] + 1
 
+        if (progress is not None) and (i % 1000 == 0):
+            if not progress(0.7*i/n_proc + 0.3):
+                return None
+
     # normalize by dividing by the number of samples contributing to each firing rate bin
     with np.errstate(divide='ignore', invalid='ignore'):
         counts = counts / num_per_bin[:, np.newaxis]
@@ -192,7 +223,8 @@ def gen_cross_correlogram_vs_firing_rate(
     return firing_rate_axis, counts
 
 
-def compute_principal_components(samples: np.ndarray, num_cmpts: int = 2) -> np.ndarray:
+def compute_principal_components(samples: np.ndarray, num_cmpts: int = 2,
+                                 progress: Optional[Callable[[float], bool]] = None) -> Optional[np.ndarray]:
     """
     Given N samples of M variables, compute the first P principal components of the data set.
 
@@ -205,16 +237,27 @@ def compute_principal_components(samples: np.ndarray, num_cmpts: int = 2) -> np.
 
     :param samples: An NxM matrix containing N samples of M variables; N,M >= 2.
     :param num_cmpts: The number of principal components to be computed. Maximum of 10.
+    :param progress: Optional function to report progress and cancel prematurely. Function should take one float
+        argument indicating the fraction of work completed in [0..1.0] and should return False to cancel.
     :return: An MXP matrix containing the first P principal components (in order of decreasing variance) of the
         M variables. In this form, multiplying the original NxM matrix by this matrix "reduces the dimensionality" of
-        the data set from M to P.
+        the data set from M to P. **Returns None if the function is cancelled prematurely.**
     """
     if (len(samples.shape) != 2) or (samples.shape[0] < 2) or (samples.shape[1] < 2):
         raise Exception("Input matrix must be NxM with N >= 2 and M >= 2.")
     num_cmpts = max(1, min(num_cmpts, 10))
     num_cmpts = min(num_cmpts, min(samples.shape))
     std_samples = (samples - np.mean(samples, axis=0)) / np.std(samples, axis=0)
+    if (progress is not None) and not progress(0.1):
+        return None
+
     covariance = np.cov(std_samples, rowvar=False)
+    if (progress is not None) and not progress(0.2):
+        return None
+
     res = np.linalg.eig(covariance)
+    if (progress is not None) and not progress(0.99):
+        return None
+
     desc_var_indices = np.flip(np.argsort(res.eigenvalues))
     return np.real(res.eigenvectors[:, desc_var_indices[0:num_cmpts]])
