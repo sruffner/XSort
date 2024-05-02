@@ -29,46 +29,67 @@ Individual docked views are separated from each other and the units table by hor
 and drag the splitter to change how much horizontal or vertical space is allocated to the docked components.
 
 ### Selecting the working directory
+When you select a _working directory_, **XSort** examines the directory contents to verify it contains the required 
+data files.
+- Analog source file:
+    - An Omniplex recording session (`.pl2` file), OR 
+    - A flat binary file (`.bin` or `.dat`) containing the analog channel data streams, interleaved or not, and
+      prefiltered or not (`int16` samples).
+- Neural unit soure file:
+    - A Python pickle file (`.pkl` or `.pickle`) containing the spike times for each neural unit extracted from the 
+      analog channel data via spike sorting applications employed in the Lisberger lab.
 
-**XSort** maintains the notion of a current _working directory_ which must contain the following files:
-1. A **single** Omniplex PL2 file in which the Omniplex system's analog channel data streams are recorded.
-2. A **single** Python pickle file containing the original spike sorter results in a particular format
+Future versions of **XSort** may support additional source file formats.
 
-When you launch **XSort** for the first time, you will have to specify a valid working directory. To switch to a 
-different directory, use the **File | Open** menu command. **XSort** will scan the selected directory, read the header 
-and file structure metadata from the PL2 file, and load all neural units defined in the pickle file. If an error occurs,
-you will be asked to specify another directory.
+If there are multiple analog source files or multiple unit source files, or if the analog source is a flat binary file,
+then **XSort** will ask you to select which files to use. In the case of a flat binary analog source, you must also 
+specify the number of channels recorded, the sampling rate in Hz, the scale factor converting raw 16-bit samples to 
+microvolts, whether the data is prefiltered, and whether the individual analog channel streams are interleaved in the 
+file. **XSort** saves the directory configuration information to a file (`.xs.directory.txt`) within the directory 
+itself -- so you'll need to provide it the first time you "open" a working directory.
 
-**XSort** stores the working directory's path in your preference file on exit, so the next time you run the application it
-will open that directory initially.
+If the working directory is invalid or if it cannot read the analog or unit data source file, **XSort** will ask you to
+select another directory. Note that, when you launch **XSort** for the first time, you must specify a valid working 
+directory. To switch to a different directory, use the **File | Open** menu command. **XSort** stores the working 
+directory's path in your preference file on exit, so the next time you run the application it will open that directory 
+initially.
 
-When **XSort** opens a working directory for the first time, it must do a lot of work initially:
-- Extract each recorded analog data channel stream from the PL2 file and cache it in separate flat binary file. These 
-channel cache files are written to the working directory and are named `.xs.ch.N`, where `N` is the data channel index.
-- Calculate the mean spike waveform or "template" for each unit on each recorded analog data channel, and cache the
-unit's spike train, templates, and other metrics in a "unit cache file" in the working directory: `.xs.unit.uid`, where
-`uid` is the unique ID assigned to the neural unit.
+### Internal cache files
+**XSort** must process possibly hundreds of neural units recorded across hundreds of analog channels at sampling rates 
+of 30KHz or more. The analog source file size will typically be in the tens of gigabytes, and the analog data may need 
+to be bandpass-filtered. The **XSort** visualizations require expedient access to the **filtered** analog channel 
+streams and to certain neural unit metrics, particularly a unit's primary channel and spike templates on the 16 channels
+"in the neighborhood" of that channel.
+
+To that end, when **XSort** first opens a working directory, it will build a set of internal cache files:
+- `.xs.ch.<N>`: Contains the bandpass-filtered data stream recorded on analog channel `<N>`. If the analog source is a
+  prefiltered flat binary file, channel caching is unnecessary.
+- `.xs.noise`: Contains the estimated noise level on each analog channel.
+- `.xs.unit.<UID>`: Contains the original spike train and computed metrics for neural unit `<UID>`.
+
+Building the internal cache can take several minutes when there are hundreds of analog channels and hundreds of neural 
+units. But once it is complete, **XSort** will "load" the directory very quickly the next time you open it -- so long as
+you do not delete any of these cache files!
 
 This internal cache is essential to **XSort** so that it can quickly load short segments of the analog channel data 
 streams at any point along the recorded timeline, quickly display spike templates for any selected unit, and use those
 templates for principal component analysis without having to recompute them every time. You cannot really do much "work"
 with the application until the cache is generated, so a modal progress dialog blocks further user input and displays
-progress messages as the cache generation task proceeds on a background thread. 
+progress messages as the cache generation task proceeds in the background.
 
 Once the internal cache has been generated for a working directory, switching to that directory is much faster -- the
 background task merely loads the neural unit metrics and the 1-sec channel trace segments from the individual cache
 files, which typically takes less than a second on a reasonably up-to-date system.
 
 ### Comparing neural units
-
 Whenever you change the working directory -- and after the cache generation task has finished --, the **Channels** view 
-will show one-second segments from each of the recorded Omniplex analog channels and the other views will be essentially 
+will show one-second segments from each of the first 16 analog channels and the other views will be essentially 
 blank. These views display statistical graphs for one or more units selected from the units table -- the _display list_.
 
 When you select a unit in the table, the corresponding row is highlighted, and the various views are gradually updated
 to display per-channel spike templates, an autocorrelogram, firing rate-vs-time histogram, and other statistics for that
-unit. You will notice that some statistics are not available immediately but must be computed on a background thread. 
-The user interface is not blocked in this case, but you will see progress messages posted in the status bar, and the 
+unit. You will notice that some statistics are not available immediately but must be computed in the background. The 
+user interface is not blocked in this case, but you will see progress messages posted in the status bar, and the 
 various views will be updated once the relevant statistics are ready for display.
 
 For more information on the units table, the display list, and the various views, see the sections **Neural Units 

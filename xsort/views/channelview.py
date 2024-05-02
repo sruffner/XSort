@@ -13,10 +13,6 @@ from xsort.views.baseview import BaseView
 
 class ChannelView(BaseView):
     """
-    TODO: Attempting optimization -- Precreate MAX_CHANNEL_TRACES PlotDataItems, all with empty data sets initially,
-     then update these data sets in _refresh() as needed. Currently, we do NOT do things this way. Every time _reset()
-     is called, the PlotDataItems are recreated!
-
     This view displays a 1-sec trace for each of up to MAX_CHANNEL_TRACES channels in the displayable channel set. For
     each neuron currently selected for display in XSort, the view superimposes -- on the trace for the neuron's
     'primary channel' -- 10-ms clips indicating the occurrence of spikes on that neuron.

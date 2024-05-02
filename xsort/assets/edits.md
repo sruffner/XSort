@@ -64,4 +64,17 @@ any prior state. If you need to restore it to its original state before any chan
 
 ### Saving the changes to file
 
-TODO.
+To save the current state of the neural units list to a Python pickle file, use **File | Save as...** and select the
+destination for the Python pickle file (`.pkl` or `.pickle` extension). **XSort** will block the UI with a modal
+progress dialog while the current contents of the neural list are written to the pickle file. If there are multiple 
+units, with several hundred thousand spikes each, this operation could take a noticeable amount of time to finish.
+
+The units are saved as a `List[Dict[str, Any]]`, where each dictionary in the list represents one neural unit
+and contains the following key-value pairs:
+- 'uid': The UID assigned to the neural unit (str).
+- 'spikes': A 1D Numpy array holding the unit's spike timestamps in chronological order, in seconds.
+- 'primary': The integer index identifying the primary channel on which the best signal-to-noise ratio was
+  observed for the unit.
+- 'snr': The signal-to-noise observed on the unit's primary channel (float).
+- 'template': A 1D Numpy array holding the unit's mean spike waveform as recorded on the primary channel. The
+  waveform spans 10-ms and is in microvolts..

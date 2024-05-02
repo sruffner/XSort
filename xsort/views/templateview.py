@@ -273,7 +273,8 @@ class TemplateView(BaseView):
 
             # if the focus list has changed or the metrics of the primary neuron were updated, auto-adjust voltage
             # span to 1/2 that unit's peak-to-peak amplitude
-            if (unit_idx == 0) and (u is not None) and not (vspan_changed or tspan_changed):
+            if ((unit_idx == 0) and isinstance(u, Neuron) and (u.amplitude is not None) and
+                    not (vspan_changed or tspan_changed)):
                 vspan_auto = int(u.amplitude / 2.0)
                 vspan_auto = max(self._MIN_VSPAN_UV, min(vspan_auto, self._MAX_VSPAN_UV))
                 if v_span_uv != vspan_auto:

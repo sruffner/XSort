@@ -23,14 +23,15 @@ ISI less than the typical refractory period is an indication that some of the sp
 are simply noise or should be assigned to another unit.
 9. **Similarity** -- The degree of similarity of this unit to the first selected unit in the table -- the _primary 
 unit_. For each unit in the table, a 1D sequence is formed by concatenating the unit's per-channel spike templates.
-the similarity metric for unit **A** is the cross-correlation cofficient of unit **A's** sequence with the analogous 
+The similarity metric for unit **A** is the cross-correlation cofficient of unit **A's** sequence with the analogous 
 sequence for the primary unit. A value of 1 indicates perfect correlation; units may be negatively correlated. Of
 course, the similarity metric is unknown if no unit is currently selected in the table.
 
-Some of these metrics cannot be calculated until the unit's mean spike waveform, or "template", has been computed for
-each Omniplex analog data channel available. The spike templates are computed and cached in a unit metrics cache file
-in the working directory the first time that directory is "opened". While the templates are being computed, most of 
-the columns in the table will be blank.
+NOTE: Per-channel spike templates are only computed on the 16 channels "near" a unit's primary channel (**XSort** does 
+not yet support probe geometry information, so "near" means channels [P-8 .. P+7], where P is the primary channel
+index). This is the unit's _template channel set_. The similarity metric for unit A vs B only includes the templates 
+for those channels in the intersection of unit A's template channel set with unit B's. If that intersection is empty,
+then the similarity is 0.
 
 ### Hiding columns and sorting on a given column
 
@@ -44,7 +45,7 @@ so the same columns will be hidden the next time you run the program.
 To sort the table on any column, simply click on that column's header. Click again to sort in reverse order. The 
 identity of the sort column is not persisted in user settings; **XSort** always sorts on the **UID** column initially.
 
-### The current display list.
+### The current display list
 
 The _display list_ is the subset of units currently selected in the neural units table. Up to 3 units may be selected 
 for display at any one time for comparison purposes, and a highlight color is assigned to each: blue for the first 
@@ -61,7 +62,12 @@ statistics for the selected unit(s). Some statistics, once computed, are cached 
 the correlograms and spike templates. The principal component analyis, however, must be redone each time the display
 list changes. 
 
-Whenever any statistics need to be computed, those calculations happen on a background thread and the views are updated
+Whenever any statistics need to be computed, those calculations happen in the background and the views are updated
 as the background task delivers its results. If a background task is still running and you change the display list again 
 or actually edit the units table, that task is cancelled and a modal dialog blocks user input until that task stops,
 typically in a few seconds or less.
+
+While a recording session may include hundreds of analog channels, the **Templates** view only displays unit spike 
+templates on a maximum of 16 channels, and the **Channels** view only displays a maximum of 16 individual analog 
+channel traces. The first selection in the display list, the **_primary unit_**, determines the range of channels 
+selected: the 16 channels in the neighborhood of the unit's primary channel.
