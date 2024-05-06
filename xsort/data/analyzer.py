@@ -415,7 +415,7 @@ class Analyzer(QObject):
 
         :param p: The file system path for the candidate directory.
         :return: An error description if the cancdidate directory does not exist or does not contain the expected data
-            files; else None.
+            files, or if an error occurred while building internal cache files. Returns None if successful.
         """
         self.save_edit_history()
 
@@ -468,7 +468,10 @@ class Analyzer(QObject):
                     next_value = 0
                 self._progress_dlg.setValue(next_value)
 
-            # TODO: What if an error occurs during BUILDCACHE task?
+            # if an error occurs during the BUILDCACHE task, the progress dialog is closed and a modal dialog box
+            # will have reported the error. Abort.
+            if self._progress_dlg.isHidden():
+                raise Exception("Unable to build internal cache!")
 
             self._progress_dlg.setValue(95)
             # retrieve first second's worth of samples on each of the first MAX_CHANNEL_TRACES analog channels
@@ -600,8 +603,8 @@ class Analyzer(QObject):
         units = self.neurons_with_display_focus
         merged_unit = Neuron.merge(units[0], units[1], self._find_next_assignable_unit_index())
         if not self._working_directory.save_neural_unit_to_cache(merged_unit):
-            print(f"Unable to save merged unit to internal cache file!")
-            return  # TODO: Should report reason operation failed
+            QMessageBox.warning(self._main_window, "Merge failed", "Unable to save merged unit to internal cache file!")
+            return
 
         # cancel all background tasks before altering the neural unit list
         self._task_manager.cancel_all_tasks(self._progress_dlg)
@@ -716,8 +719,9 @@ class Analyzer(QObject):
             if not cached:
                 for u in split_units:
                     self._working_directory.delete_unit_cache_file(u.uid)
-                print("Unable to save one or both split units to internal cache!")
-                return  # TODO: Should report reason operation failed
+                QMessageBox.warning(self._main_window, "Split failed",
+                                    "Unable to save one or both split units to internal cache!")
+                return
         finally:
             self._progress_dlg.close()
 
@@ -1019,8 +1023,13 @@ class Analyzer(QObject):
     @Slot(str)
     def on_task_failed(self, emsg: str) -> None:
         """ This slot is the mechanism by which :class:`Analyzer` is notified that a background task has failed. """
-        print(f"Background task failed: {emsg}")
-        # TODO: WHen this happens, the UI needs to raise a modal dialog? How should these errors be handled?
+        # close modal progress dialog if it is raised
+        if self._progress_dlg.isVisible():
+            self._progress_dlg.close()
+            self._progress_dlg.setLabelText("Please wait...")
+
+        # warn user of the error that occured
+        QMessageBox.warning(self._main_window, "Background task failed", emsg)
 
     @Slot(DataType, object)
     def on_data_available(self, data_type: DataType, data: object) -> None:
