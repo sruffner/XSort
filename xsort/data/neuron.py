@@ -601,9 +601,15 @@ class Neuron:
         """
         Is the PCA projection for this neural unit cached in its entirety in this object? Since the PCA projection can
         take a significant amount of time to compute, it may be cached in chunks.
+
+        **NOTE**: The length of the complete PCA projection will not necessarily match the length of the unit's spike
+        train; spikes too close to the beginning or end of the analog recording are omitted from the analysis.
+        Therefore, this  method indicates the projection is fully cached so long as the projection length is within 5
+        of the spike train length.
         :return: True if the PCA projection for this unit is cached in its entirety.
         """
-        return False if (self._cached_pca_projection is None) else self.num_spikes == len(self.cached_pca_projection())
+        n = len(self.cached_pca_projection())
+        return self.num_spikes - 5 < n <= self.num_spikes
 
     def clear_cached_pca_projection(self) -> None:
         """ Clear the cached PCA projection for this neural unit, if any. """
@@ -682,7 +688,7 @@ class Neuron:
                     assert params[1] == 0 and len(arr) < self.num_spikes
                     self._cached_pca_projection = np.copy(arr)
                 else:
-                    assert params[1] == len(self._cached_pca_projection) and (params[1] + len(arr) < self.num_spikes)
+                    assert params[1] == len(self._cached_pca_projection) and (params[1] + len(arr) <= self.num_spikes)
                     self._cached_pca_projection = np.vstack((self._cached_pca_projection, arr))
             return True
         except Exception:
