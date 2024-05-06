@@ -8,7 +8,7 @@ data visualizations to help you make these determinations. This section describe
 neural units table.
 
 ### Editing a unit's label
-You may specify a descriptive label for any unit in the units table. To edit the label, simply double-click on the
+You may specify a descriptive label for any unit in the units table. To edit the label, simply **right-click** on the
 corresponding cell under the **Label** column in the table and edit the label string "in place". The label may be up to
 25 characters in length (any leading and trailing whitespace is removed) and cannot contain any commas.
 

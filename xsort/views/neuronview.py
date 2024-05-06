@@ -1,7 +1,7 @@
 from typing import List, Any, Optional
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings
-from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF
+from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF, QContextMenuEvent
 from PySide6.QtWidgets import QTableView, QHeaderView, QHBoxLayout, QSizePolicy, QMenu
 
 from xsort.data.analyzer import Analyzer
@@ -82,9 +82,8 @@ class _NeuronTableModel(QAbstractTableModel):
 
     def setData(self, index, value, role=...):
         r, c = index.row(), index.column()
-        if ((0 <= r < self.rowCount()) and (index.column() == self.LABEL_COL_IDX) and
-                (role == Qt.ItemDataRole.EditRole)):
-            idx = self._sorted_indices[index.row()]
+        if (0 <= r < self.rowCount()) and (c == self.LABEL_COL_IDX) and (role == Qt.ItemDataRole.EditRole):
+            idx = self._sorted_indices[r]
             return self._data_manager.edit_unit_label(idx, str(value))
         else:
             return super().setData(index, value, role)
@@ -205,14 +204,33 @@ class _NeuronTableModel(QAbstractTableModel):
         return out
 
 
+class _MyTableView(QTableView):
+    """
+    This **QTableView** subclass overrides the default behavior for triggering the in-place edit of a neural unit label.
+    Instead, a right-click on any valid cell in the **Label** column of the neural unit table will raise the in-place
+    editor delegate.
+
+    This lets the user edit any unit label without changing the composition of the current display/focus list.
+    """
+    def __init__(self):
+        super().__init__()
+        self.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
+
+    def contextMenuEvent(self, event: QContextMenuEvent):
+        index = self.indexAt(event.pos())
+        if index.column() == _NeuronTableModel.LABEL_COL_IDX:
+            self.setCurrentIndex(index)
+            self.edit(index)
+
+
 class NeuronView(BaseView):
     """
     A tabular view of the list of neurons exposed by the data manager object, :class:`Analyzer`. Each row in the
-    table represents one neural unit, with the unit label and various numerical statistics shown in the columns. The
-    table may be sorted on any column, in ascending or descending order. The visibility of selected columns may be
-    toggled via a context menu raised when the user clicks anywhere on the column header.
+    table represents one neural unit, with the unit UID, optional label and various numerical statistics shown in the
+    columns. The table may be sorted on any column, in ascending or descending order. The visibility of any column
+    except **UID*** may be toggled via a context menu raised when the user clicks anywhere on the column header.
         The user single-selects a neuron for the display focus by clicking on the corresponding row, and adds a neuron
-    to the display list by clicking on its row by holding down any modifier key. Contiguous range selection is not
+    to the display list by clicking on its row while holding down any modifier key. Contiguous range selection is not
     supported. The display focus list may contain up to MAX_NUM_FOCUS_NEURONS (3), and a unique color is assigned to
     each slot in that list. Most other views in XSort display data for neurons in the current display list, using the
     assigned colors.
@@ -222,7 +240,7 @@ class NeuronView(BaseView):
 
     def __init__(self, data_manager: Analyzer) -> None:
         super().__init__('Neurons', None, data_manager)
-        self._table_view = QTableView()
+        self._table_view = _MyTableView()
         """ Table view displaying the neuron table (read-only). """
         self._table_context_menu = QMenu(self._table_view)
         """ Context menu for table to hide/show selected table columns. """
