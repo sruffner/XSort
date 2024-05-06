@@ -15,7 +15,7 @@ Changes** chapter.
 measured.
 4. **#Spikes** -- The total number of spikes in the unit's spike train.
 5. **Rate (Hz)** -- The unit's mean firing rate.
-6. **SNR** -- Highest observed signal-to-noise ratio for the unit across all recorded Omniplex analog data channels.
+6. **SNR** -- Highest observed signal-to-noise ratio for the unit across all recorded analog data channels.
 7. **Amp (uV)** -- Peak-to-peak amplitude of the unit's mean spike waveform (template) as measured on the primary
 channel.
 8. **%ISI<1** -- Fraction of interspike intervals (ISI) in this unit's spike train that are less than 1 millisecond. An 

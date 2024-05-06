@@ -9,7 +9,7 @@ neural units table.
 
 ### Editing a unit's label
 You may specify a descriptive label for any unit in the units table. To edit the label, simply double-click on the
-corresponding cell under the "Label" column in the table and edit the label string "in place". The label may be up to
+corresponding cell under the **Label** column in the table and edit the label string "in place". The label may be up to
 25 characters in length (any leading and trailing whitespace is removed) and cannot contain any commas.
 
 ### Delete
@@ -39,8 +39,8 @@ The **Edit | Split** command splits a single neural unit into two derived units 
 original unit's spikes. The command is enabled only under very specific conditions:
 1. A single unit is selected in the neural units table.
 2. The principal component analysis for that unit -- which runs on a background task once the unit is selected -- has
-completed so that the projection of the unit's spikes into PCA "space" is available in the **PCA view**.
-3. A _split region_ has been defined on the PCA view (see the**Views** chapter of this guide).
+completed so that the projection of the unit's spikes into PCA "space" is available in the **PCA** view.
+3. A _split region_ has been defined on the PCA view (see the **Views** chapter of this guide).
 
 The split region is a closed polygonal region that essentially divides the unit's spike train into two disjoint sets --
 all those spikes which project inside the split region, and all those that lie outside. When you select **Edit | Split**,
@@ -77,4 +77,4 @@ and contains the following key-value pairs:
   observed for the unit.
 - 'snr': The signal-to-noise observed on the unit's primary channel (float).
 - 'template': A 1D Numpy array holding the unit's mean spike waveform as recorded on the primary channel. The
-  waveform spans 10-ms and is in microvolts..
+  waveform spans 10-ms and is in microvolts.

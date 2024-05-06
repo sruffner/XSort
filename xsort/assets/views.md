@@ -19,11 +19,11 @@ Whenever the view is updated, the voltage scale (vertical) is automatically adju
 amplitude of the primary unit's largest spike template. You can manually adjust the scale between +/-50 and +/-1000uV 
 using the slider control at the bottom right.
 
-**NOTE**: When there are more than 16 recorded analog channels, XSort only computes and caches each neural unit's 
+**NOTE**: When there are more than 16 recorded analog channels, **XSort** only computes and caches each neural unit's 
 per-channel spike templates on the 16 channels [P-8 .. P+7], where P is the index of the unit's primary channel. If two 
 different units do not have the same primary channel, their templates are not computed on the same set of channels. By 
 design, this view displays all 16 templates for the primary unit, as well any templates for other units in the display
-list that were computed on any channel among the primary unit's 16 template channel indices. This makes sense -- it's 
+list that were computed on a channel among the primary unit's 16 template channel indices. This makes sense -- it's 
 highly unlikely the user will need to compare units with very different template channel sets.
 
 ### Correlograms
@@ -33,7 +33,8 @@ only one unit is selected for display, only its autocorrelogram is shown. If two
 correlograms appear in a 2x2 (or 3x3) array of subplots, with the autocorrelograms on the main diagonal. Note that
 the CCG trace colors are a blend of the colors assigned to the units in the display list (red + blue = magenta, etc).
 
-The correlograms are computed once in a background task but then cached in-memory so they need not be computed again.
+The correlograms are computed once in a background task, then cached in memory until the working directory is changed or
+the application exits.
 
 As with the **Templates** view, you can "zoom" in on the correlograms; use the slider at the bottom of the view to 
 adjust the correlogram span between 20 and 200 milliseconds (+/-10ms to +/-100ms).
@@ -50,7 +51,7 @@ saved at application exit and restored the next time **XSort** launches.
 This view plots, on the same axes, the interspike interval (ISI) histogram for each unit in the display list. The 
 histogram is an array of normalized bin counts for ISIs between 0 and 200 milliseconds, with each bin count divided by 
 the maximum observed bin count. As with the correlograms, the ISI histograms are computed once on a background task, 
-then cached in memory until the working directory is changed or the application exits.
+but then cached in-memory so they need not be computed again.
 
 Use the slider at the bottom of the view to adjust the visible histogram span between 20 and 200 milliseconds.
 
@@ -66,6 +67,9 @@ changed. The subplot title displays the unit UID and the observed range of the i
 Like the ACGs, CCGs, and ISI histograms, the ACG-vs-firing rate histogram is computed once in the background and then
 cached in memory.
 
+Use the slider at the bottom of the view to adjust the visibile histogram span between 20 and 200ms (+/-10ms to 
++/-100ms).
+
 ### Firing Rate
 
 This view displays, for each unit in the current display list, a histogram of firing rate as a function of time over the
@@ -79,8 +83,8 @@ unit's mean firing rate.
 
 As you move the cursor across this view, a white vertical line follows the cursor, and a text label near the top of
 the line displays the elapsed time of the recording at that point in minutes and seconds -- **MM:SS**. A dot marks
-the interaction of that line with the firing rate histogram, and an accompanying label displays the normalized ("1.08")
-or unnormalized ("24.3 Hz") firing rate for the corresponding bin.
+the intersection of that line with the firing rate histogram, and an accompanying label displays the normalized 
+("1.08") or unnormalized ("24.3 Hz") firing rate for the corresponding bin.
 
 A dashed green vertical line indicates the elapsed recording time **T** at which the analog data clips start in the 
 **Channels** view. If you change the start time **T** in the **Channels** view, this green line is updated accordingly. 
@@ -100,7 +104,7 @@ region_ in PCA space (via a sequence of mouse clicks inside the view) when only 
 #### Algorithm
 By design **XSort** only computes mean spike waveforms -- aka _spike templates_ -- on a maximum of 16 channels "near"
 the unit's primary channel; call this the unit's _**template channel set**_. If N<=16 analog channels were recorded,
-then all units will have the same templates channel set. **PCA is restricted to a unit's template channel set to keep
+then all units will have the same template channel sets. **PCA is restricted to a unit's template channel set to keep
 the computation time and memory usage reasonable.** This is very important for recording sessions with hundreds of
 analog channels.
 
@@ -171,7 +175,7 @@ superimposes -- on the trace for that unit's _primary channel_ -- 10-millisecond
 spikes from that unit. In keeping with the other views, these spike clips are rendered in the highlight color (blue, 
 red or yellow) assigned to that unit.
 
-A slider at the bottom of the view lets the user choose any 1-second segment over the entire Omniplex recording. The
+A slider at the bottom of the view lets the user choose any 1-second segment over the entire analog data recording. The
 companion readouts reflect the elapsed recording time -- in the format **MM:SS.mmm** (minutes, seconds, milliseconds) --
 at the start and end of the currently visible portion of the traces. 
 
@@ -182,6 +186,6 @@ segment, and on any 2 adjacent channel traces. To reset the view, click the smal
 corner of the view.
 
 Each time the channel traces are updated, **XSort** adjusts the vertical scale in accordance with the worst-case 
-peak-to-peak voltage excursion observed across all the traces.You can manually adjust the scale between +/-50 and 
+peak-to-peak voltage excursion observed across all the traces. You can manually adjust the scale between +/-50 and 
 +/-1000uV using the slider control at the bottom right.
 

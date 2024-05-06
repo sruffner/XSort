@@ -41,18 +41,18 @@ data files.
 
 Future versions of **XSort** may support additional source file formats.
 
-If there are multiple analog source files or multiple unit source files, or if the analog source is a flat binary file,
-then **XSort** will ask you to select which files to use. In the case of a flat binary analog source, you must also 
-specify the number of channels recorded, the sampling rate in Hz, the scale factor converting raw 16-bit samples to 
-microvolts, whether the data is prefiltered, and whether the individual analog channel streams are interleaved in the 
-file. **XSort** saves the directory configuration information to a file (`.xs.directory.txt`) within the directory 
-itself -- so you'll need to provide it the first time you "open" a working directory.
+If there are multiple analog source files or multiple unit source files, then **XSort** will ask you to select which 
+files to use. If the analog source is a flat binary file, you must also specify the number of channels recorded, the 
+sampling rate in Hz, the scale factor converting raw 16-bit samples to microvolts, whether the data is prefiltered, and 
+whether the individual analog channel streams are interleaved in the file. **XSort** saves the directory configuration 
+information to a file (`.xs.directory.txt`) within the directory itself -- so you'll need to provide it the first time 
+you "open" a working directory.
 
 If the working directory is invalid or if it cannot read the analog or unit data source file, **XSort** will ask you to
 select another directory. Note that, when you launch **XSort** for the first time, you must specify a valid working 
-directory. To switch to a different directory, use the **File | Open** menu command. **XSort** stores the working 
-directory's path in your preference file on exit, so the next time you run the application it will open that directory 
-initially.
+directory. To switch to a different directory, use the **File | Open** menu command. **XSort** stores the current 
+working directory's path in your preferences file on exit, so the next time you run the application it will open that 
+directory initially.
 
 ### Internal cache files
 **XSort** must process possibly hundreds of neural units recorded across hundreds of analog channels at sampling rates 

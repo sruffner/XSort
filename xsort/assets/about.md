@@ -5,12 +5,11 @@ data in the Stephen G. Lisberger lab at Duke University.
 
 
 ## License
-`XSort` was created by [Scott Ruffner](mailto:sruffner@srscicomp.com). It is
-licensed under the terms of the MIT license.
+**XSort** was created by [Scott Ruffner](mailto:sruffner@srscicomp.com). It is licensed under the terms of the MIT license.
 
 ## Credits
-Based on a program developed by David J Herzfeld, who provided critical guidance and feedback during the
-development of `XSort`. Developed with funding provided by the Stephen G. Lisberger laboratory in the Department of
+Based on a program developed by David J. Herzfeld, who provided critical guidance and feedback during the
+development of **XSort**. Developed with funding provided by the Stephen G. Lisberger laboratory in the Department of
 Neuroscience at Duke University.
 
 In addition to the Python standard library, the `XSort` user interface is built upon the Qt for Python framework, 
