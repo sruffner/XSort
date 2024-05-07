@@ -686,10 +686,12 @@ class Neuron:
                 assert isinstance(params[1], str) and isinstance(params[2], np.ndarray)
                 self._cached_ccgs[params[1]] = np.copy(params[2])
             else:  # PCA
+                # IMPORTANT: For PCA, some spikes at beginning or end of recording may be omitted -- so we need to
+                # be careful with the asserts here!
                 assert isinstance(params[1], int) and isinstance(params[2], np.ndarray)
                 arr: np.ndarray = np.copy(params[2])
                 if self._cached_pca_projection is None:
-                    assert params[1] == 0 and len(arr) < self.num_spikes
+                    assert len(arr) <= self.num_spikes
                     self._cached_pca_projection = np.copy(arr)
                 else:
                     assert params[1] == len(self._cached_pca_projection) and (params[1] + len(arr) <= self.num_spikes)

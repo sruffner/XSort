@@ -255,6 +255,8 @@ class _NeuronTableView(QTableView):
         self.setSortingEnabled(True)
         self._model.sort(0)  # to ensure table view is initially sorted by column 0 in ascending order
 
+        self._model.layoutChanged.connect(self._on_table_layout_change)
+
         self.setSelectionMode(QTableView.SelectionMode.NoSelection)
         self.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
 
@@ -353,6 +355,17 @@ class _NeuronTableView(QTableView):
                 self.scrollTo(self._model.createIndex(row, 0))
         else:
             super().keyReleaseEvent(event)
+
+    @Slot()
+    def _on_table_layout_change(self) -> None:
+        """
+        Whenever the layout of the underlying table changes, scroll if necessary to ensure the row corresponding to
+        the current primary unit (if any) is visible.
+        """
+        if self._data_manager.primary_neuron is not None:
+            row = self._model.unit_to_row(self._data_manager.primary_neuron.uid)
+            if row is not None:
+                self.scrollTo(self._model.createIndex(row, 0))
 
     @Slot(QModelIndex)
     def _on_row_clicked(self, index: QModelIndex) -> None:
