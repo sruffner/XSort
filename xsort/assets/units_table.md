@@ -9,23 +9,23 @@ Each row in the table corresponds to one neural unit, and the columns display nu
 1. **UID** - The unit ID, typically an integer **N**. For a Purkinje cell spike train extracted from the original spike 
 sorter file, two units are created -- '**Nc**' (complex spikes) and '**Ns**' (simple spikes). Any unit derived from a
 merge or split operation has the UID '**Nx**', where the 'x' suffix indicates it is a derived unit.
-2. **Label** - An optional, short label (typically used to specify the unit's putative neuron type). See **Making
-Changes** chapter.
-3. **Channel** -- The unit's _primary channel_, ie, the analog channel on which the best signal-to-noise ratio was 
+2. **Channel** -- The unit's _primary channel_, ie, the analog channel on which the best signal-to-noise ratio was 
 measured.
-4. **#Spikes** -- The total number of spikes in the unit's spike train.
-5. **Rate (Hz)** -- The unit's mean firing rate.
-6. **SNR** -- Highest observed signal-to-noise ratio for the unit across all recorded analog data channels.
-7. **Amp (uV)** -- Peak-to-peak amplitude of the unit's mean spike waveform (template) as measured on the primary
+3. **#Spikes** -- The total number of spikes in the unit's spike train.
+4. **Rate (Hz)** -- The unit's mean firing rate.
+5. **SNR** -- Highest observed signal-to-noise ratio for the unit across all recorded analog data channels.
+6. **Amp (uV)** -- Peak-to-peak amplitude of the unit's mean spike waveform (template) as measured on the primary
 channel.
-8. **%ISI<1** -- Fraction of interspike intervals (ISI) in this unit's spike train that are less than 1 millisecond. An 
+7. **%ISI<1** -- Fraction of interspike intervals (ISI) in this unit's spike train that are less than 1 millisecond. An 
 ISI less than the typical refractory period is an indication that some of the spike timestamps attributed to the unit 
 are simply noise or should be assigned to another unit.
-9. **Similarity** -- The degree of similarity of this unit to the first selected unit in the table -- the _primary 
+8. **Similarity** -- The degree of similarity of this unit to the first selected unit in the table -- the _primary 
 unit_. For each unit in the table, a 1D sequence is formed by concatenating the unit's per-channel spike templates.
 The similarity metric for unit **A** is the cross-correlation cofficient of unit **A's** sequence with the analogous 
 sequence for the primary unit. A value of 1 indicates perfect correlation; units may be negatively correlated. Of
 course, the similarity metric is unknown if no unit is currently selected in the table.
+9. **Label** - An optional, short label (typically used to specify the unit's putative neuron type). See **Making
+Changes** chapter.
 
 NOTE: Per-channel spike templates are only computed on the 16 channels "near" a unit's primary channel (**XSort** does 
 not yet support probe geometry information, so "near" means channels [P-8 .. P+7], where P is the primary channel

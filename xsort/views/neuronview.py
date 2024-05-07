@@ -22,14 +22,14 @@ class _NeuronTableModel(QAbstractTableModel):
     within that focus list.
     """
 
-    _header_labels: List[str] = ['UID', 'Label', 'Channel', '#Spikes', 'Rate (Hz)',
-                                 'SNR', 'Amp(\u00b5V)', '%ISI<1', 'Similarity']
+    _header_labels: List[str] = ['UID', 'Channel', '#Spikes', 'Rate (Hz)',
+                                 'SNR', 'Amp(\u00b5V)', '%ISI<1', 'Similarity', 'Label']
     """ Column header labels. """
 
-    _col_values_for_sizing: List[str] = ['000', 'Purkinje', '000', '000000', '0000.00', '00.00', '00.0', '0.00', '0.00']
+    _col_values_for_sizing: List[str] = ['000', '000', '000000', '0000.00', '00.00', '00.0', '0.00', '0.00', 'Purkinje']
     """ Typical cell value for each column -- to calculate fixed column sizes. """
 
-    LABEL_COL_IDX = 1
+    LABEL_COL_IDX = 8
     """ Index of the 'Label' column -- unit labels may be edited. """
 
     def __init__(self, data_manager: Analyzer):
@@ -111,14 +111,14 @@ class _NeuronTableModel(QAbstractTableModel):
         primary = self._data_manager.primary_neuron
         switcher = {
             0: u.uid,
-            1: u.label,
-            2: '' if u.primary_channel is None else str(u.primary_channel),
-            3: str(u.num_spikes),
-            4: f"{u.mean_firing_rate_hz:.2f}",
-            5: f"{u.snr:.2f}" if isinstance(u.snr, float) else "",
-            6: f"{u.amplitude:.1f}" if isinstance(u.amplitude, float) else "",
-            7: f"{(100.0 * u.fraction_of_isi_violations):.2f}",
-            8: "" if (primary is None) else ("---" if (primary.uid == u.uid) else f"{u.similarity_to(primary):.2f}")
+            1: '' if u.primary_channel is None else str(u.primary_channel),
+            2: str(u.num_spikes),
+            3: f"{u.mean_firing_rate_hz:.2f}",
+            4: f"{u.snr:.2f}" if isinstance(u.snr, float) else "",
+            5: f"{u.amplitude:.1f}" if isinstance(u.amplitude, float) else "",
+            6: f"{(100.0 * u.fraction_of_isi_violations):.2f}",
+            7: "" if (primary is None) else ("---" if (primary.uid == u.uid) else f"{u.similarity_to(primary):.2f}"),
+            8: u.label
         }
         return switcher.get(col, '')
 
@@ -138,17 +138,17 @@ class _NeuronTableModel(QAbstractTableModel):
         if num > 1:
             switcher = {
                 0: sorted(range(num), key=lambda k: Neuron.dissect_uid(u[k].uid), reverse=self._reversed),
-                1: sorted(range(num), key=lambda k: u[k].label, reverse=self._reversed),
-                2: sorted(range(num), key=lambda k: -1 if (u[k].primary_channel is None) else u[k].primary_channel,
+                1: sorted(range(num), key=lambda k: -1 if (u[k].primary_channel is None) else u[k].primary_channel,
                           reverse=self._reversed),
-                3: sorted(range(num), key=lambda k: u[k].num_spikes, reverse=self._reversed),
-                4: sorted(range(num), key=lambda k: u[k].mean_firing_rate_hz, reverse=self._reversed),
-                5: sorted(range(num), key=lambda k: 0 if (u[k].snr is None) else u[k].snr, reverse=self._reversed),
-                6: sorted(range(num), key=lambda k: 0 if (u[k].amplitude is None) else u[k].amplitude,
+                2: sorted(range(num), key=lambda k: u[k].num_spikes, reverse=self._reversed),
+                3: sorted(range(num), key=lambda k: u[k].mean_firing_rate_hz, reverse=self._reversed),
+                4: sorted(range(num), key=lambda k: 0 if (u[k].snr is None) else u[k].snr, reverse=self._reversed),
+                5: sorted(range(num), key=lambda k: 0 if (u[k].amplitude is None) else u[k].amplitude,
                           reverse=self._reversed),
-                7: sorted(range(num), key=lambda k: u[k].fraction_of_isi_violations, reverse=self._reversed),
-                8: sorted(range(num), key=lambda k: k if (primary is None) else u[k].similarity_to(primary),
-                          reverse=self._reversed)
+                6: sorted(range(num), key=lambda k: u[k].fraction_of_isi_violations, reverse=self._reversed),
+                7: sorted(range(num), key=lambda k: k if (primary is None) else u[k].similarity_to(primary),
+                          reverse=self._reversed),
+                8: sorted(range(num), key=lambda k: u[k].label, reverse=self._reversed)
             }
             self._sorted_indices = switcher.get(self._sort_col)
         else:
