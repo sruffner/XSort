@@ -54,8 +54,9 @@ correlograms, and other statistics for each unit across the various views.
 
 When **XSort** initially loads the content of the current working directory, no units are selected, so most of the views
 contain nothing of interest. To select a unit, simply click anywhere on the corresponding row in the table; the previous
-selection, if any, is cleared (single-selection behavior). To select multiple units (up to 3) for display, hold the 
-`Control` key (the `Command` key in MacOS) down while clicking on the relevant rows.
+selection, if any, is cleared. To select multiple units (up to 3) for display, hold down the `Control` key (the 
+`Command` key in MacOS) down while clicking on the relevant rows. You can also use the `Up/Down` arrow keys to change
+the identity of the primary unit without using the mouse.
 
 You will notice that the views are updated -- sometimes after a noticeable delay -- to display the relevant metrics or 
 statistics for the selected unit(s). Some statistics, once computed, are cached in memory and render quickly -- such as 
