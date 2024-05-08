@@ -1,7 +1,7 @@
 from typing import List, Any, Optional
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings, Slot
-from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF, QContextMenuEvent, QKeyEvent
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings, Slot, QObject, QEvent
+from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF, QContextMenuEvent, QKeyEvent, QHelpEvent
 from PySide6.QtWidgets import QTableView, QHeaderView, QHBoxLayout, QSizePolicy, QMenu
 
 from xsort.data.analyzer import Analyzer
@@ -105,6 +105,11 @@ class _NeuronTableModel(QAbstractTableModel):
                     return None if color_str is None else QColor(Qt.black if bkg_color.lightness() < 140 else Qt.white)
             elif role == Qt.ItemDataRole.TextAlignmentRole:
                 return Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
+            elif (role == Qt.ItemDataRole.ToolTipRole) and (c == self.LABEL_COL_IDX):
+                # TODO: Tooltip is simply the unit label -- but to avoid showing tip when label fits in cell, we have
+                #   to mess with the view's machinery...
+                idx = self._sorted_indices[r]
+                return self._to_string(self._data_manager.neurons[idx], c)
         return None
 
     def _to_string(self, u: Neuron, col: int):
@@ -233,9 +238,11 @@ class _NeuronTableView(QTableView):
        user to be able to change any unit's label without "selecting" the corresponding row, which changes the current
        display list, triggers background tasks to calculate statistics, etc. Instead, a right-click on a table cell
        containing a unit label raises the in-place edit.
-     - Customized handling of the Up and Down arrow keys so that user can change the unit selected as the primary
+     - Customized handling of the `Up` and `Down` arrow keys so that user can change the unit selected as the primary
        neuron. In this case, if the display list contained a second or third unit, those are removed -- the arrow keys
        are intended to change the primary unit without having to always use the mouse.
+     - The **Label** column may not be wide enough to show a longer unit label (up to 25 chars), so the label is shown
+       in a tooltip IF the label does not fit within its table cell.
     """
     def __init__(self, data_manager: Analyzer):
         """
@@ -288,6 +295,9 @@ class _NeuronTableView(QTableView):
             self._table_context_menu.addAction(action)
         self.horizontalHeader().setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.horizontalHeader().customContextMenuRequested.connect(self._on_header_right_click)
+
+        # show tooltip only for a unit label when the label text does not fit within the table cell
+        self.viewport().installEventFilter(self)
 
     @property
     def hidden_columns(self) -> str:
@@ -403,6 +413,23 @@ class _NeuronTableView(QTableView):
                 self.showColumn(col)
             else:
                 self.hideColumn(col)
+
+    def eventFilter(self, obj: QObject, event: QEvent) -> bool:
+        """
+        Filters out any tooltip events on the table EXCEPT those on a table cell containing a unit label that
+        does not fit within the cell.
+        """
+        if (event.type() == QEvent.Type.ToolTip) and isinstance(event, QHelpEvent):
+            help_event: QHelpEvent = event
+            index = self.indexAt(help_event.pos())
+            if index.isValid() and (index.column() == _NeuronTableModel.LABEL_COL_IDX):
+                label = self._model.data(index)
+                label_w = self.fontMetrics().tightBoundingRect(label).width()
+                cell_w = self.visualRect(index).width()
+                return label_w < cell_w   # eat the event if label fits
+            return True  # or if cell does not contain a unit label
+
+        return super(_NeuronTableView, self).eventFilter(obj, event)
 
 
 class NeuronView(BaseView):
