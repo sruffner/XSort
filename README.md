@@ -13,7 +13,7 @@ The various spike-sorter algorithms employed in the lab often produce spurious r
 system noise, two spike trains that have a very similar spike waveform and really "belong" to the same neural unit,
 and so on. With **XSort** you can visually assess and edit the original spike-sorter output.
 
-To use the application, select a _working directory containing the analog data recording (an Omniplex`.pl2` file, or a
+To use the application, select a _working directory_ containing the analog data recording (an Omniplex`.pl2` file, or a
 supported flat binary file format) and the original spike sorter results (a Python pickle file, `.pkl`). After analying 
 the files and building an internal cache of channel data streams and unit metrics (in individual files stored in the 
 working directory), **XSort** offers a number of different data visualizations.

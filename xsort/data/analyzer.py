@@ -291,15 +291,16 @@ class Analyzer(QObject):
          - If the specified unit is invalid and the clear flag is set, the display list is cleared.
          - If the specified unit is valid and the clear flag is set, the display list is updated to contain only that
            unit. Thus, setting the clear flag enforces "single selection" behavior on the list.
-         - If the specified unit is valid and the clear flag is unset, the unit is appended to the display list unless
-           it is already there or the display list is full.
+         - If the specified unit is valid and the clear flag is unset, the unit is removed from the display list if it
+           is already there, else it is appended to the display list unless the display list is full ("toggle selection"
+           behavior).
 
         **A signal is emitted whenever the neuron display list changes.**
 
         :param uid: The UID of the neural unit to be added to the selection list.
         :param clear_previous: If True, the current display list is cleared and only the specified unit is selected. If
             False, the specified unit is added to the current display list if it is not already there and fewer than
-            _MAX_NUM_FOCUS_NEURONS are already selected. Default is True.
+            _MAX_NUM_FOCUS_NEURONS are already selected. If it is already present, it is removed. Default is True.
         """
         uid_exists = (uid in [n.uid for n in self._neurons])
         if not uid_exists:
@@ -310,9 +311,12 @@ class Analyzer(QObject):
             else:
                 self._focus_neurons.clear()
         elif not clear_previous:
-            if (len(self._focus_neurons) == self.MAX_NUM_FOCUS_NEURONS) or (uid in self._focus_neurons):
+            if uid in self._focus_neurons:
+                self._focus_neurons.remove(uid)
+            elif len(self._focus_neurons) < self.MAX_NUM_FOCUS_NEURONS:
+                self._focus_neurons.append(uid)
+            else:
                 return
-            self._focus_neurons.append(uid)
         elif (len(self._focus_neurons) == 1) and (self._focus_neurons[0] == uid):
             return
         else:

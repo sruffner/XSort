@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.1.7 (TBD)
+- Modified selection behavior in the neural units table. If a modifier key (`Ctrl/Command` or `Shift`) is held down 
+when a table row is selected, the corresponding unit is now **removed** from the _display/focus list_ if it was already 
+a member of that list. Otherwise, as before, it is added to the focus list if there is room (maximum of 3 units can 
+have the display focus at any one time).
+
 ## v0.1.6 (05/13/2024)
 - Updated **About** dialog to include version number and release date.
 - Updated many of the in-app user guide markdowns to reflect recent changes.
