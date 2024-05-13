@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.1.6 (05/13/2024)
+- Updated **About** dialog to include version number and release date.
+- Updated many of the in-app user guide markdowns to reflect recent changes.
+- _Bug fix_: Upon showing the PCA view, the PCA would be recomputed from scratch even though the PCA projections were 
+already cached.
+- Changed how the in-place control is raised to edit a unit label in the neural unit table: a right-click on the 
+relevant table cell instead of a left double-click. That way, the user can edit any unit's label without altering the 
+current display/focus list.
+- Now raises a modal error message dialog to report a failed merge or split operation or a failed background task.
+- The **Up** and **Down** arrow keys can now be used to move the primary unit focus up and down the unit table, 
+providing a way to change the focus without having to use the mouse.
+- The neural unit table now displays a tool tip for a unit label if that label does not fit inside the corresponding 
+table cell.
+- _Bug fix_: When loading a previously edited working directory, **XSort** failed to apply previous **Split** operations 
+from the directory's edit history.
+
 ## v0.1.5 (04/29/2024)
 - Extend support to non-Omniplex recordings in which the analog source is a flat binary file. The file may be
 interleaved (or not), and prefiltered (or not). Splitting analog channel streams into separate internal cache

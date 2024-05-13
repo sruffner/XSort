@@ -26,7 +26,8 @@ class _NeuronTableModel(QAbstractTableModel):
                                  'SNR', 'Amp(\u00b5V)', '%ISI<1', 'Similarity', 'Label']
     """ Column header labels. """
 
-    _col_values_for_sizing: List[str] = ['000', '000', '000000', '0000.00', '00.00', '00.0', '0.00', '0.00', 'Purkinje']
+    _col_values_for_sizing: List[str] = ['000x', '000', '000000', '0000.00',
+                                         '00.00', '00.0', '0.00', '0.00', 'Purkinje']
     """ Typical cell value for each column -- to calculate fixed column sizes. """
 
     LABEL_COL_IDX = 8
@@ -92,11 +93,11 @@ class _NeuronTableModel(QAbstractTableModel):
         r = index.row()
         c = index.column()
         if (0 <= r < self.rowCount()) and (0 <= c <= self.columnCount()):
+            idx = self._sorted_indices[r]
             if role in [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole]:
-                idx = self._sorted_indices[r]
                 return self._to_string(self._data_manager.neurons[idx], c)
             elif (role == Qt.ItemDataRole.BackgroundRole) or (role == Qt.ItemDataRole.ForegroundRole):
-                u = self._data_manager.neurons[self._sorted_indices[r]].uid
+                u = self._data_manager.neurons[idx].uid
                 color_str = self._data_manager.display_color_for_neuron(u)
                 bkg_color = None if color_str is None else QColor.fromString(color_str)
                 if role == Qt.BackgroundRole:
@@ -106,9 +107,6 @@ class _NeuronTableModel(QAbstractTableModel):
             elif role == Qt.ItemDataRole.TextAlignmentRole:
                 return Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
             elif (role == Qt.ItemDataRole.ToolTipRole) and (c == self.LABEL_COL_IDX):
-                # TODO: Tooltip is simply the unit label -- but to avoid showing tip when label fits in cell, we have
-                #   to mess with the view's machinery...
-                idx = self._sorted_indices[r]
                 return self._to_string(self._data_manager.neurons[idx], c)
         return None
 

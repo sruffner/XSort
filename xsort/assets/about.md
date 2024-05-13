@@ -1,4 +1,4 @@
-# XSort 0.1.5 (29 Apr 2024)
+# XSort 0.1.6 (13 May 2024)
 
 A Python/Qt application that visualizes and edits the results from spike sorting of neuronal activity recorded with 
 extracellular multi-electrode probes during experiments conducted in the Stephen G. Lisberger lab at Duke University.

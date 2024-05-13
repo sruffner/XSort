@@ -13,7 +13,6 @@ from typing import List, Optional, Dict, Tuple, Any, Set
 from PySide6.QtCore import QObject, Signal, QRunnable, Slot, QThreadPool
 from PySide6.QtWidgets import QProgressDialog
 
-from xsort.data.edits import UserEdit
 from xsort.data.files import WorkingDirectory
 from xsort.data.neuron import DataType, ChannelTraceSegment
 import xsort.data.taskfunc as tfunc
@@ -343,17 +342,10 @@ class TaskManager(QObject):
                 self.cache_channel_noise_levels()
 
             if not self.cancelled:
-                # load originally defined units, then modify list IAW edit history
-                emsg, neurons = self.work_dir.load_neural_units()
+                # load the current list of neural units (takes into account any edit history)
+                emsg, neurons = self.work_dir.load_current_neural_units()
                 if len(emsg) > 0:
                     raise Exception(emsg)
-                if self.cancelled:
-                    return
-                emsg, edit_history = UserEdit.load_edit_history(self.work_dir.path)
-                if len(emsg) > 0:
-                    raise Exception(f"Error reading edit history: {emsg}")
-                for edit_rec in edit_history:
-                    edit_rec.apply_to(neurons)
                 if self.cancelled:
                     return
 

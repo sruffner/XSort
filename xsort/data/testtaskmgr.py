@@ -200,7 +200,7 @@ class MainWindow(QMainWindow):
             else:
                 # success
                 self.work_dir = work_dir
-                _, self.units = self.work_dir.load_neural_units()
+                _, self.units = self.work_dir.load_original_neural_units()
                 self.acg_cache.clear()
                 self.isi_cache.clear()
                 self.acgrate_cache.clear()

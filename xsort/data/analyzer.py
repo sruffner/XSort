@@ -9,10 +9,9 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QPolygonF
 from PySide6.QtWidgets import QMainWindow, QProgressDialog, QFileDialog, QMessageBox
 
-from xsort.data.edits import UserEdit
 from xsort.data.neuron import Neuron, ChannelTraceSegment, DataType, MAX_CHANNEL_TRACES
 from xsort.data.taskmanager import TaskManager
-from xsort.data.files import WorkingDirectory
+from xsort.data.files import WorkingDirectory, UserEdit
 
 
 class Analyzer(QObject):
@@ -100,8 +99,6 @@ class Analyzer(QObject):
         The lasso region in PCA space used to split the current primary focus neuron into two separate units: one unit
         includes all spikes inside the region, while the other includes all the remaining spikes. None if undefined.
         """
-        self._edit_history: List[UserEdit] = list()
-        """ The edit history, a record of all user-initiated changes to the list of neural units, in chrono order. """
         self._displayed_stats: Set[DataType] = \
             {DataType.ISI, DataType.ACG, DataType.ACG_VS_RATE, DataType.CCG, DataType.PCA}
         """ 
@@ -396,15 +393,8 @@ class Analyzer(QObject):
         to respond to the cancel request.
         """
         self._task_manager.cancel_all_tasks(self._progress_dlg)
-        self.save_edit_history()
-
-    def save_edit_history(self):
-        """
-        Save the edit history for the current XSort working directory. Be sure to call this method prior to
-        application shutdown.
-        """
         if isinstance(self._working_directory, WorkingDirectory):
-            UserEdit.save_edit_history(self._working_directory.path, self._edit_history)
+            self._working_directory.save_edit_history()
 
     def change_working_directory(self, p: Union[str, Path]) -> Optional[str]:
         """
@@ -417,7 +407,8 @@ class Analyzer(QObject):
         :return: An error description if the cancdidate directory does not exist or does not contain the expected data
             files, or if an error occurred while building internal cache files. Returns None if successful.
         """
-        self.save_edit_history()
+        if isinstance(self._working_directory, WorkingDirectory):
+            self._working_directory.save_edit_history()
 
         self._task_manager.cancel_all_tasks(self._progress_dlg)
 
@@ -433,17 +424,10 @@ class Analyzer(QObject):
         if work_dir is None:
             return emsg if len(emsg) > 0 else "User cancelled"
 
-        # load edit history file (if present)
-        emsg, edit_history = UserEdit.load_edit_history(_p)
-        if len(emsg) > 0:
-            return f"Error reading edit history: {emsg}"
-
-        # load original units and then apply history to get the current list of units
-        emsg, neurons = work_dir.load_neural_units()
+        # load the current list of neural units (takes into account any edit history)
+        emsg, neurons = work_dir.load_current_neural_units()
         if len(emsg) > 0:
             return emsg
-        for edit_rec in edit_history:
-            edit_rec.apply_to(neurons)
 
         # building the internal cache can take a long time - especially when the directory has not been cached before -
         # block user input with our modal progress dialog. For this particular task, progress messages are displayed in
@@ -502,7 +486,6 @@ class Analyzer(QObject):
         self._channel_seg_start = 0
         self._neurons.clear()
         self._neurons = neurons
-        self._edit_history = edit_history
         self._focus_neurons.clear()
 
         # signal views
@@ -524,8 +507,7 @@ class Analyzer(QObject):
             if u.label != label:
                 prev_label = u.label
                 u.label = label
-                edit_rec = UserEdit(op=UserEdit.LABEL, params=[u.uid, prev_label, label])
-                self._edit_history.append(edit_rec)
+                self._working_directory.on_unit_relabeled(u.uid, prev_label, u.label)
                 self.neuron_label_updated.emit(u.uid)
             return True
         except Exception:
@@ -569,8 +551,7 @@ class Analyzer(QObject):
             self._focus_neurons[0] = uid
         else:
             self._focus_neurons.clear()
-        edit_rec = UserEdit(op=UserEdit.DELETE, params=[u.uid])
-        self._edit_history.append(edit_rec)
+        self._working_directory.on_unit_deleted(u.uid)
         self._on_focus_list_changed()
 
     def can_merge_focus_neurons(self) -> bool:
@@ -601,7 +582,7 @@ class Analyzer(QObject):
         if not self.can_merge_focus_neurons():
             return
         units = self.neurons_with_display_focus
-        merged_unit = Neuron.merge(units[0], units[1], self._find_next_assignable_unit_index())
+        merged_unit = Neuron.merge(units[0], units[1], self._working_directory.find_next_assignable_unit_index())
         if not self._working_directory.save_neural_unit_to_cache(merged_unit):
             QMessageBox.warning(self._main_window, "Merge failed", "Unable to save merged unit to internal cache file!")
             return
@@ -609,13 +590,12 @@ class Analyzer(QObject):
         # cancel all background tasks before altering the neural unit list
         self._task_manager.cancel_all_tasks(self._progress_dlg)
 
-        edit_rec = UserEdit(op=UserEdit.MERGE, params=[units[0].uid, units[1].uid, merged_unit.uid])
         self._focus_neurons.clear()
         for u in units:
             self._neurons.remove(u)  # works bc neurons_with_display_focus contains units from this list
         self._neurons.append(merged_unit)
         self._focus_neurons.append(merged_unit.uid)
-        self._edit_history.append(edit_rec)
+        self._working_directory.on_units_merged(units[0].uid, units[1].uid, merged_unit.uid)
         self._on_focus_list_changed()
 
     def set_lasso_region_for_split(self, lasso_region: Optional[QPolygonF]) -> None:
@@ -702,7 +682,7 @@ class Analyzer(QObject):
             if len(inside_indices) == 0 or len(outside_indices) == 0:
                 return
 
-            idx = self._find_next_assignable_unit_index()
+            idx = self._working_directory.find_next_assignable_unit_index()
             inside_spikes = np.take(unit.spike_times, inside_indices)
             inside_spikes.sort()
             split_units.append(Neuron(idx, inside_spikes, suffix='x'))
@@ -726,45 +706,21 @@ class Analyzer(QObject):
             self._progress_dlg.close()
 
         # success! Update edit history and neuron list and put focus on the two new units
-        edit_rec = UserEdit(op=UserEdit.SPLIT, params=[unit.uid, split_units[0].uid, split_units[1].uid])
         self._focus_neurons.clear()
         self._neurons.remove(unit)
         self._neurons.extend(split_units)
         self._focus_neurons.extend([u.uid for u in split_units])
-        self._edit_history.append(edit_rec)
+        self._working_directory.on_unit_split(unit.uid, split_units[0].uid, split_units[1].uid)
         self._on_focus_list_changed()
-
-    def _find_next_assignable_unit_index(self) -> int:
-        """
-        Find the next available integer that can be assigned to a new unit created by a merge or split operation. This
-        method checks the edit history for the "derived" unit with the largest index N and returns N+1. If the edit
-        history is empty, then it finds the largest index N among the units in the current unit list.
-        :return: The next available integer index.
-        """
-        max_idx: int = 0
-        if len(self._neurons) > 0:
-            max_idx = max([u.index for u in self._neurons])
-        edit_indices: List[int] = list()
-        for edit_rec in self._edit_history:
-            if edit_rec.operation == UserEdit.DELETE:
-                edit_indices.append(Neuron.dissect_uid(edit_rec.affected_uids)[0])
-            elif edit_rec.operation == UserEdit.MERGE:
-                edit_indices.append(Neuron.dissect_uid(edit_rec.result_uids)[0])
-            elif edit_rec.operation == UserEdit.SPLIT:
-                edit_indices.append(Neuron.dissect_uid(edit_rec.result_uids[0])[0])
-        if len(edit_indices) > 0:
-            max_idx = max(max_idx, max([i for i in edit_indices]))
-
-        return max_idx + 1
 
     def undo_last_edit(self) -> bool:
         """
         Undo the most recent user-initiated edit to the current neural unit list.
         :return: True if undo succeeds, False otherwise.
         """
-        if len(self._edit_history) == 0:
+        edit_rec = self._working_directory.remove_most_recent_edit() if self.is_valid_working_directory else None
+        if edit_rec is None:
             return False
-        edit_rec = self._edit_history.pop()
 
         # cancel all background tasks before altering the neural unit list (changing the label of a unit is ok)
         if edit_rec.operation != UserEdit.LABEL:
@@ -828,33 +784,33 @@ class Analyzer(QObject):
     def can_undo_all_edits(self) -> bool:
         """
         Can the edit history be wiped out for the current XSort working directory? This operation is always
-        possible, unless the edit history is empty.
+        possible, unless working directory is invalid or has an empty edit history.
         :return True if current edit history is not empty.
         """
-        return len(self._edit_history) > 0
+        return self.is_valid_working_directory and self._working_directory.is_edited
 
     def undo_all_edits(self) -> None:
         """
         Undo all changes made to the contents of the current XSort woring directory, restoring it to its original
         state. No action is taken if the edit history is empty.
         """
-        if len(self._edit_history) == 0:
+        if not self.can_undo_all_edits():
             return
 
         # cancel all background tasks before altering the neural unit list
         self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         # special case: only unit labels have been changed
-        if all([rec.operation == UserEdit.LABEL for rec in self._edit_history]):
+        if self._working_directory.edit_history_has_only_unit_label_changes:
             for u in self._neurons:
                 u.label = ''
-            self._edit_history.clear()
+            self._working_directory.clear_edit_history()
             self._focus_neurons.clear()
             self._on_focus_list_changed()
             return
 
         # reload all "original" neural units from the spike sorter results file (PKL)
-        emsg, neurons = self._working_directory.load_neural_units()
+        emsg, neurons = self._working_directory.load_original_neural_units()
         if len(emsg) > 0:
             return
 
@@ -881,9 +837,8 @@ class Analyzer(QObject):
         self._focus_neurons.clear()
 
         # clear edit history and remove any derived unit cache files
-        self._edit_history.clear()
-        self.save_edit_history()
-        self._working_directory.delete_all_derived_unit_cache_files()
+        self._working_directory.clear_edit_history()
+        self._working_directory.save_edit_history()
 
         # signal views
         self._on_focus_list_changed()
@@ -988,11 +943,11 @@ class Analyzer(QObject):
         the edit that will be "undone" if :method:`undo_last_edit()` is invoked.
         :return: A 2-tuple (S, L) containing the short and longer descriptions, or None if the edit history is empty.
         """
-        try:
-            edit_rec = self._edit_history[-1]
-            return edit_rec.short_description, edit_rec.longer_description
-        except IndexError:
+        edit_rec = self._working_directory.most_recent_edit if self.is_valid_working_directory else None
+        if edit_rec is None:
             return None
+        else:
+            return edit_rec.short_description, edit_rec.longer_description
 
     @Slot(str, int)
     def on_task_progress(self, desc: str, pct: int) -> None:

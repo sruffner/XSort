@@ -2,7 +2,7 @@ import csv
 import pickle
 import struct
 from pathlib import Path
-from typing import Tuple, Optional, List, Dict, Any
+from typing import Tuple, Optional, List, Dict, Any, Union
 
 import numpy as np
 from PySide6.QtGui import QIntValidator, QDoubleValidator, QFont
@@ -27,6 +27,184 @@ channel. Stored as a list of N single-precision floating-point values, where N i
 """
 UNIT_CACHE_FILE_PREFIX: str = '.xs.unit.'
 """ Prefix for a neural unit cache file -- followed by the unit's UID. """
+EDIT_HISTORY_FILE: str = '.xs.edits.txt'
+""" Internal cache file holds the edit history for the working directory's neural unit list. """
+
+
+class UserEdit:
+    """
+    A simple container encapsulating an individual user-initiated change to the list of neural units defined in the
+    original spike sorter results file in the XSort working directory. The following edit operations are supported:
+     - Label a neural unit (typically to specify the putative neuron type).
+     - Delete a neural unit. Often an "uncurated" spike sorter results file contains many "garbage" units, and the
+       user's first task in XSort is to simply delete all such units.
+     - Create a new unit by merging two selected units.
+     - Split an existing unit. This is done by specifying a subset of the existing unit's spikes to assign to one unit,
+       while the remaining are assigned to another. In practice, this is done on the XSort UI by "lassoing" a population
+       of spikes in the principal component analysis (PCA) view.
+
+    The edit history for an XSort working directory is simply a list of :class:`UserEdit` objects, in the order in
+    which the edits were applied.
+    """
+    LABEL: str = 'LABEL'
+    """ Edit a unit label: 'LABEL,unit_uid,old_label,new_label'."""
+    DELETE: str = 'DELETE'
+    """ Delete a unit: 'DELETE,unit_uid'. """
+    MERGE: str = 'MERGE'
+    """ Merge two selected units into one: 'MERGE,uid1,uid2,uid_merged'. """
+    SPLIT: str = 'SPLIT'
+    """ Split a unit into two units: 'SPLIT,uid_before,uid_split1,uid_split2'. """
+    _EDIT_OPS = {LABEL: 'Change unit label', DELETE: 'Delete unit', MERGE: 'Merge units', SPLIT: 'Split unit'}
+    """ All recognized edit operations. """
+
+    def __init__(self, op: str, params: List[str]):
+        """
+        Construct an edit record. The parameter list depend on the edit operation, as follows:
+         - op = 'LABEL': params=[<UID of affected neural unit>, <previous label>, <new label>].
+         - op = 'DELETE': params=[<UID of deleted neural unit>].
+         - op = 'MERGE': params=[uid1, uid2, uid_merged].
+         - op = 'SPLIT': params=[uid_split, uid1, uid2].
+
+        :param op: The edit operation.
+        :param params: The operation parameter list, as described above. All parameter values are strings.
+        :raises IndexError: If the parameter list is not long enough (extra parameter values are ignored).
+        :raises TypeError: If any parameter value is not a string.
+        :raises ValueError: If any parameter value contains a comma. Edit operations are stored in the edit history
+            file as a comma-separated list of strings.
+        """
+        if not (op in UserEdit._EDIT_OPS):
+            raise ValueError(f"Unrecognized edit op: {op}")
+        self._op = op
+        """ The edit operation type. """
+        self._params: List[str] = list()
+        """ 
+        The operation parameters.
+        """
+        n_params = 1 if (op == UserEdit.DELETE) else 3
+        for i in range(n_params):
+            if not isinstance(params[i], str):
+                raise TypeError('Expected string-valued parameter')
+            elif params[i].find(',') > -1:
+                raise ValueError('Parameter values may not contain a comma')
+            self._params.append(params[i])
+
+    def __str__(self):
+        return ','.join((self._op, *self._params))
+
+    def __eq__(self, other: 'UserEdit'):
+        return isinstance(other, UserEdit) and (self._op == other._op) and (len(self._params) == len(other._params)) \
+            and all([self._params[i] == other._params[i] for i in range(len(self._params))])
+
+    @property
+    def operation(self) -> str:
+        """ The edit operation type: LABEL, DELETE, MERGE or SPLIT. """
+        return self._op
+
+    @property
+    def short_description(self) -> str:
+        """ A short generic description of the edit operation type. """
+        return self._EDIT_OPS[self._op]
+
+    @property
+    def longer_description(self) -> str:
+        """ A longer description of the edit record that includes the UIDs of the affected/created units. """
+        if self._op == UserEdit.LABEL:
+            desc = f"Changed unit {self.affected_uids} label: '{self.previous_unit_label}' --> '{self.unit_label}'"
+        elif self._op == UserEdit.DELETE:
+            desc = f"Deleted unit '{self.affected_uids}'"
+        elif self._op == UserEdit.MERGE:
+            desc = f"Merged units {self.affected_uids} into unit '{self.result_uids}'"
+        else:   # SPLIT
+            desc = f"Split unit '{self.affected_uids}' into units {self.result_uids}"
+        return desc
+
+    @property
+    def affected_uids(self) -> Union[str, Tuple[str, str]]:
+        """
+        The UID of the unit that is re-labeled, deleted, or split. For a "merge", a 2-tuple containing the UIDs of
+        the two merged units.
+        """
+        return (self._params[0], self._params[1]) if self._op == UserEdit.MERGE else self._params[0]
+
+    @property
+    def result_uids(self) -> Union[None, str, Tuple[str, str]]:
+        """ The UID of the new merged unit, or the UIDs of the two units resulting from a split. Else None. """
+        if self._op == UserEdit.MERGE:
+            return self._params[2]
+        elif self._op == UserEdit.SPLIT:
+            return self._params[1], self._params[2]
+        else:
+            return None
+
+    @property
+    def previous_unit_label(self) -> Optional[str]:
+        """ For the "label" op only, the old label assigned to the unit; else None. """
+        return self._params[1] if self._op == UserEdit.LABEL else None
+
+    @property
+    def unit_label(self) -> Optional[str]:
+        """ For the "label" op only, the new label assigned to the unit; else None. """
+        return self._params[2] if self._op == UserEdit.LABEL else None
+
+    @staticmethod
+    def save_edit_history(working_dir: Path, history: List['UserEdit']) -> Tuple[bool, str]:
+        """
+        Save the list of user edits to the edit history file within the specifed XSort working directory.
+
+        :param working_dir: The XSort working directory.
+        :param history: The edit history to be saved. **If this list is empty, the edit history file (if it exists)
+            will be removed from the working directory.**
+        :return: A 2-tuple: (True, '') if successful, else (False, <error description>).
+        """
+        if not working_dir.is_dir():
+            return False, "Invalid working directory"
+
+        # if the edit history is empty, obliterate the edit history file
+        p = Path(working_dir, EDIT_HISTORY_FILE)
+        if len(history) == 0:
+            p.unlink(missing_ok=True)
+            return True, ""
+
+        try:
+            with open(p, 'w', newline='') as f:
+                writer = csv.writer(f)
+                for ue in history:
+                    writer.writerow((ue._op, *ue._params))
+        except Exception as e:
+            msg = f"Failed to save edit history: {str(e)}"
+            return False, msg
+
+        return True, ""
+
+    @staticmethod
+    def load_edit_history(working_dir: Path) -> Tuple[str, List['UserEdit']]:
+        """
+        Load the contents of the edit history file from the specified XSort working directory.
+
+        :param working_dir: The XSort working directory.
+        :return: A 2-typle: ('', H) on success or (<error description>, []) on failure, where H is the edit history
+            read from the file. If the file is missing from the working directory, it is assumed the edit history is
+            empty.
+        """
+        if not working_dir.is_dir():
+            return "Invalid working directory", []
+
+        # if edit history file does not exist, the edit history is empty
+        p = Path(working_dir, EDIT_HISTORY_FILE)
+        if not p.is_file():
+            return "", []
+
+        try:
+            history: List[UserEdit] = list()
+            with open(p, 'r', newline='') as f:
+                reader = csv.reader(f)
+                for line in reader:
+                    ue = UserEdit(line[0], [line[i] for i in range(1, len(line))])
+                    history.append(ue)
+            return "", history
+        except Exception as e:
+            msg = f"Failed to load edit history: {str(e)}"
+            return msg, []
 
 
 class _QueryDialog(QDialog):
@@ -234,7 +412,7 @@ class WorkingDirectory:
     """
     Encapsulation of an XSort "working directory", which includes the original source files containing recorded analog
     data channel streams and spike-sorted neural units, as well as internal configuration and cache files generated by
-    XSort itself.
+    XSort itself, including an edit history file.
     """
     def __init__(self, folder: Path, analog_src: str, unit_src: str, rate: int = 0, num_channels: int = 0,
                  scale: float = 1.52588e-7, interleaved: bool = False, prefiltered: bool = False):
@@ -287,6 +465,12 @@ class WorkingDirectory:
         """ List of UIDs identifying the units extracted from the original unit data source file. """
         self._neurons: List[Neuron] = list()
         """ List of neural units extracted from the unit data source file. Cached temporarily at construction time. """
+        self._edit_history: List[UserEdit] = list()
+        """ 
+        The edit history for this working directory, a record of all user-initiated changes to the list of neural units,
+        in chronological order.
+        """
+
         self._error: Optional[str] = self._validate()
         """ None if directory content is valid; else a brief description of first error encountered. """
 
@@ -298,6 +482,8 @@ class WorkingDirectory:
            of analog channels and the sampling rate specified by user (all samples assumed to be int16).
          - The spike-sorted neural units source file must exist. The list of neural units is loaded from the file to
            verify its correctness.
+         - Load edit history file if present. Directory is considered invalid if edit history is present but cannot be
+           read.
 
         This method is called at construction time and computes or retrieves several parameters including analog
         sampling rate, analog recording duration, and number of analog channels.
@@ -345,7 +531,12 @@ class WorkingDirectory:
             self._recording_dur_seconds = num_scans / float(self._sampling_rate)
             self._analog_channel_indices = [k for k in range(self._num_channels)]
 
-        emsg, units = self.load_neural_units()
+        emsg, history = UserEdit.load_edit_history(self._folder)
+        if len(emsg) > 0:
+            return emsg
+        self._edit_history = history
+
+        emsg, units = self.load_original_neural_units()
         if len(emsg) > 0:
             return emsg
         self._original_units = [u.uid for u in units]
@@ -619,16 +810,11 @@ class WorkingDirectory:
         """ File system path for the original spike-sorted neural unit data source file in working directory. """
         return Path(self._folder, self._unit_src)
 
-    def load_neural_units(self) -> Tuple[str, Optional[List[Neuron]]]:
+    def load_original_neural_units(self) -> Tuple[str, Optional[List[Neuron]]]:
         """
         Load all neural units stored in the unit data source file in this working directory. This Python pickle file
         contains the results of spike sorting as a list of Python dictionaries, where each dictionary represents one
-        neural unit.
-
-        **NOTE**: Immediately after the working directory is loaded, this method is guaranteed to succeed because the
-        neural units are loaded from the pickle file to verify the directory contains the required files. The units are
-        cached until the first time this method is invoked after the :class:`WorkingDirectory` object is loaded, then
-        cleared. Further invocatios of the method could fail.
+        neural unit. **This is the original list of defined units prior to the user making any edits in XSort.**
 
         :return: On success, a tuple ("", L), where L is a list of :class:`Neuron` objects encapsulating the neural
             units found in the file. Certain derived unit metrics -- mean spike waveforms, SNR, primary analog channel
@@ -675,6 +861,71 @@ class WorkingDirectory:
 
         return "", neurons
 
+    def load_current_neural_units(self) -> Tuple[str, Optional[List[Neuron]]]:
+        """
+        Load the current list of neural units defined in this working directory. This method first loads the original
+        list of units, then updates that list IAW the current edit history. **This method is intended only for loading
+        the initial state of the unit list when a working directory is loaded, prior to building/loading internal
+        cache files.**
+
+        :return: On success, a tuple ("", L), where L is a list of :class:`Neuron` objects encapsulating the working
+            directory's current list of neural units. Since the units are loaded from the original unit data source
+            file, then updated IAW the edit history, the unit objects will lack cached unit metrics like spike
+            templates, SNR, and primary analog channel designation. On failure, returns ('error description', None).
+        """
+        emsg, neurons = self.load_original_neural_units()
+        if len(emsg) > 0:
+            return emsg, neurons
+        self._apply_edit_history_to(neurons)
+        return "", neurons
+
+    def _apply_edit_history_to(self, units: List[Neuron]) -> None:
+        for edit_rec in self._edit_history:
+            if edit_rec.operation == UserEdit.LABEL:
+                for u in units:
+                    if (u.uid == edit_rec.affected_uids) and (u.label == edit_rec.previous_unit_label):
+                        try:
+                            u.label = edit_rec.unit_label
+                        except ValueError:
+                            pass
+                        break
+            elif edit_rec.operation == UserEdit.DELETE:
+                found_idx = -1
+                for i in range(len(units)):
+                    if units[i].uid == edit_rec.affected_uids:
+                        found_idx = i
+                        break
+                if found_idx > -1:
+                    units.pop(found_idx)
+            elif edit_rec.operation == UserEdit.MERGE:
+                components: List[Neuron] = list()
+                for u in units:
+                    if u.uid in edit_rec.affected_uids:
+                        components.append(u)
+                if len(components) == 2:
+                    for u in components:
+                        units.remove(u)
+                    new_uid = edit_rec.result_uids
+                    new_idx = int(new_uid[0:-1])  # remove the 'x' suffix to get the unit index
+                    merged_unit = Neuron.merge(components[0], components[1], idx=new_idx)
+                    units.append(merged_unit)
+            else:  # SPLIT: remove unit was split and append the two unit resulting from that split.
+                found_idx = -1
+                for i in range(len(units)):
+                    if units[i].uid == edit_rec.affected_uids:
+                        found_idx = i
+                        break
+                if found_idx > -1:
+                    units.pop(found_idx)
+                    # the units resulting from the split must have corresponding cache files in the working directory
+                    result_units: List[Neuron] = list()
+                    for uid in edit_rec.result_uids:
+                        u = self.load_neural_unit_from_cache(uid)
+                        if isinstance(u, Neuron):
+                            result_units.append(u)
+                    if len(result_units) == 2:
+                        units.extend(result_units)
+
     def load_select_neural_units(self, uids: List[str]) -> Tuple[str, Optional[List[Neuron]]]:
         """
         Load the specified neural units defined in this working directory. All original units are loaded from the
@@ -705,7 +956,7 @@ class WorkingDirectory:
             return "", neurons
 
         # load all units defined in the original unit data source
-        emsg, original_units = self.load_neural_units()
+        emsg, original_units = self.load_original_neural_units()
         if len(emsg) > 0:
             return emsg, None
 
@@ -959,7 +1210,7 @@ class WorkingDirectory:
             p = Path(self._folder, f"{UNIT_CACHE_FILE_PREFIX}{uid}")
             p.unlink(missing_ok=True)
 
-    def delete_all_derived_unit_cache_files(self) -> None:
+    def _delete_all_derived_unit_cache_files(self) -> None:
         """
         Remove all internal cache files for "derived units" (created via merge or split operations) from this XSort
         working directory. Unit cache files end with the unit UID, and the UID of every derived unit ends with the
@@ -1016,7 +1267,7 @@ class WorkingDirectory:
     def delete_internal_cache_files(self, analog: bool = True, noise: bool = True, units: bool = True) -> None:
         """
         Remove all or some of the dedicated internal cache files in this XSort working directory.
-y.
+
         :param analog: If True, analog data channel cache files are removed. Default = True.
         :param noise: If True, the analog channel noise cache file is removed. Default = True.
         :param units: If True, neural unit metrics cache files are removed. Default = True.
@@ -1029,3 +1280,98 @@ y.
             if ((analog and p.name.startswith(CHANNEL_CACHE_FILE_PREFIX)) or
                     (units and p.name.startswith(UNIT_CACHE_FILE_PREFIX))):
                 p.unlink(missing_ok=True)
+
+    def save_edit_history(self) -> None:
+        """ Save this working directory's current edit history to a dedicated cache file within the directory. """
+        UserEdit.save_edit_history(self._folder, self._edit_history)
+
+    def clear_edit_history(self) -> None:
+        """ Clear the edit history for this working directory and remove internal cache files for any derived unit. """
+        self._edit_history.clear()
+        self._delete_all_derived_unit_cache_files()
+
+    @property
+    def is_edited(self) -> bool:
+        """ Has the user edited the original neural unit list for this working directory in any way? """
+        return len(self._edit_history) > 0
+
+    def remove_most_recent_edit(self) -> Optional[UserEdit]:
+        """
+        Remove most recent user edit from the working directory's current edit history.
+        :return: The edit record, or None if the edit history is empty.
+        """
+        return self._edit_history.pop() if len(self._edit_history) > 0 else None
+
+    @property
+    def most_recent_edit(self) -> Optional[UserEdit]:
+        """
+        Edit record for the most recent user edit in the working directory's current edit history.
+        :return: The edit record, or None if the edit history is empty.
+        """
+        return self._edit_history[-1] if len(self._edit_history) > 0 else None
+
+    @property
+    def edit_history_has_only_unit_label_changes(self) -> bool:
+        """ True if edit history only consists of changes in unit labels. """
+        return all([rec.operation == UserEdit.LABEL for rec in self._edit_history])
+
+    def on_unit_relabeled(self, uid: str, prev_label: str, curr_label: str) -> None:
+        """
+        Update the working directory's edit history when a neural unit is re-labeled.
+        :param uid: UID of affected unit
+        :param prev_label: The old label.
+        :param curr_label: The new label.
+        """
+        edit_rec = UserEdit(op=UserEdit.LABEL, params=[uid, prev_label, curr_label])
+        self._edit_history.append(edit_rec)
+
+    def on_unit_deleted(self, uid: str) -> None:
+        """
+        Update the working directory's edit history when a neural unit is deleted.
+        :param uid: UID of deleted unit
+        """
+        edit_rec = UserEdit(op=UserEdit.DELETE, params=[uid])
+        self._edit_history.append(edit_rec)
+
+    def on_units_merged(self, uid1: str, uid2: str, merged_uid: str) -> None:
+        """
+        Update the working directory's edit history when two neural units are merged into one.
+        :param uid1: UID of one of the units merged
+        :param uid2: UID of the other unit merged.
+        :param merged_uid: UID assigned to the unit resulting from the merge.
+        """
+        edit_rec = UserEdit(op=UserEdit.MERGE, params=[uid1, uid2, merged_uid])
+        self._edit_history.append(edit_rec)
+
+    def on_unit_split(self, split_uid: str, uid1: str, uid2: str) -> None:
+        """
+        Update the working directory's edit history when a neural unit is split into two distinct units.
+        :param split_uid: UID of the unit that was split.
+        :param uid1: UID of one unit derived from the split.
+        :param uid2: UID of the other unit derived from the split.
+        """
+        edit_rec = UserEdit(op=UserEdit.SPLIT, params=[split_uid, uid1, uid2])
+        self._edit_history.append(edit_rec)
+
+    def find_next_assignable_unit_index(self) -> int:
+        """
+        Find the next available integer that can be assigned to a new unit created by a merge or split operation. This
+        method checks the working directory's edit history for the "derived" unit with the largest index N and returns
+        N+1. If the edit history is empty, then it finds the largest index N among the units in the original unit list.
+        :return: The next available integer index.
+        """
+        max_idx: int = 0
+        if len(self._original_units) > 0:
+            max_idx = max([Neuron.dissect_uid(uid)[0] for uid in self._original_units])
+        edit_indices: List[int] = list()
+        for edit_rec in self._edit_history:
+            if edit_rec.operation == UserEdit.DELETE:
+                edit_indices.append(Neuron.dissect_uid(edit_rec.affected_uids)[0])
+            elif edit_rec.operation == UserEdit.MERGE:
+                edit_indices.append(Neuron.dissect_uid(edit_rec.result_uids)[0])
+            elif edit_rec.operation == UserEdit.SPLIT:
+                edit_indices.append(Neuron.dissect_uid(edit_rec.result_uids[0])[0])
+        if len(edit_indices) > 0:
+            max_idx = max(max_idx, max([i for i in edit_indices]))
+
+        return max_idx + 1
