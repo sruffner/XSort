@@ -1,3 +1,11 @@
+"""
+app.py - The main entry point for XSort.
+
+The full XSort GUI application is launched without any arguments: 'python -m xsort.app'.
+
+If any command-line arguments are supplied, then a console-only utility is invoked that will build XSort's internal
+cache for a specified working directory. For details see :class:`CacheBuilder`.
+"""
 import sys
 from pathlib import Path
 
@@ -6,6 +14,7 @@ from PySide6.QtGui import QCloseEvent, QShowEvent
 from PySide6.QtWidgets import QApplication, QMainWindow
 import pyqtgraph as pg
 
+from xsort.cache_builder import CacheBuilder
 from xsort.views.manager import ViewManager
 
 # TODO: Python path hack. I cannot figure out how to organize program structure so I can run app.py from PyCharm IDE
@@ -46,10 +55,18 @@ class XSortMainWindow(QMainWindow):
 
 
 if __name__ == "__main__":
-    pg.setConfigOptions(antialias=True)   # useOpenGL=True caused XSort to freeze on MacOS Ventura
     main_app = QApplication(sys.argv)
-    main_window = XSortMainWindow()
-    main_window.show()
+    if len(sys.argv) < 2:
+        # normal launch of the full XSort application
+        pg.setConfigOptions(antialias=True)  # useOpenGL=True caused XSort to freeze on MacOS Ventura
+        main_window = XSortMainWindow()
+        main_window.show()
+    else:
+        # launch command-line utility that builds the XSort internal cache for a specified working directory
+        cache_builder = CacheBuilder(main_app.arguments())
+        cache_builder.finished.connect(lambda: QApplication.instance().quit())
+        cache_builder.start()
+
     exit_code = main_app.exec()
     # Any after-exit tasks can go here (should not take too long!)
     sys.exit(exit_code)

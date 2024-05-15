@@ -91,15 +91,28 @@ class TaskManager(QObject):
 
         self._task_finished.connect(self._on_task_finished)
 
-    def shutdown(self, progress_dlg: QProgressDialog) -> None:
+    def shutdown(self, progress_dlg: Optional[QProgressDialog] = None) -> None:
         """
         Cancel any background tasks currently running, then shutdown and release all resources that were used to
         run tasks. This method will block until all tasks have stopped. Upon return, this :class:`TaskManager` is no
         longer usable.
 
-        :param progress_dlg: A modal progress dialog to raise while waiting on cancelled background tasks to finish.
+        :param progress_dlg: An optional modal progress dialog to raise while waiting on cancelled background tasks to
+            finish. Be sure to supply this to block user interactions with the XSort GUI and provide visual feedback
+            during shutdown. If not specified, the method cancels any running tasks, BLOCKS until all have finished or
+            5 seconds have elapsed, then releases all task resources.
         """
-        self.cancel_all_tasks(progress_dlg)
+        if progress_dlg is not None:
+            self.cancel_all_tasks(progress_dlg)
+        elif self.busy:
+            for task in self._running_tasks:
+                task.cancel()
+            t_elapsed = 0
+            while (t_elapsed < 5) and not all([t.done for t in self._running_tasks]):
+                time.sleep(0.2)
+                t_elapsed += 0.2
+            self._running_tasks.clear()
+
         self._qthread_pool.clear()
         self._mt_pool_exec.shutdown(wait=True, cancel_futures=True)
         self._process_pool.close()
@@ -111,6 +124,14 @@ class TaskManager(QObject):
         """ True if any tasks are currently running in the background. """
         return len(self._running_tasks) > 0
 
+    def remove_done_tasks(self) -> bool:
+        """
+        Remove any completed background tasks from the task manager.
+        :return: True if any tasks are still running after removing completed tasks.
+        """
+        self._on_task_finished()
+        return self.busy
+
     @property
     def num_cpus(self) -> int:
         """ Number of available CPUs in system according to os.cpu_count(). If that fails, 1 CPU is assumed. """
@@ -118,7 +139,7 @@ class TaskManager(QObject):
 
     def cancel_all_tasks(self, progress_dlg: QProgressDialog) -> None:
         """
-        Cancel all background tasks and BLOCKS waiting for the tasks to finish.
+        Cancel all background tasks and BLOCK waiting for the tasks to finish.
 
         Since the task manager lives on the main UI thread but receives signals emitted from background tasks, the main
         UI thread must get CPU time in order to process those signals -- in particular the signal indicating that the

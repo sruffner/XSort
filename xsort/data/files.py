@@ -341,7 +341,8 @@ class _QueryDialog(QDialog):
             n_channels = int(self._nchannels_edit.text())
             rate = int(self._rate_edit.text())
             scale = float(self._scale_edit.text())
-            if not ((1 <= n_channels < 999) and (0.1 <= scale <= 99) and (1000 <= rate <= 99999)):
+            if not ((MIN_CHANNELS <= n_channels <= MAX_CHANNELS) and (MIN_VSCALE <= scale <= MAX_VSCALE) and
+                    (MIN_SAMPLING_RATE <= rate <= MAX_SAMPLING_RATE)):
                 raise Exception()
         except Exception:
             msg = "!!! Incomplete or invalid binary file configuration"
@@ -408,6 +409,20 @@ class _QueryDialog(QDialog):
         return self._prefiltered_cb.isChecked()
 
 
+MIN_SAMPLING_RATE: int = 1000
+""" Minimum supported analog channel sampling rate in Hz for a flat binary analog source. """
+MAX_SAMPLING_RATE: int = 99999
+""" Maximum supported analog channel sampling rate in Hz for a flat binary analog source. """
+MIN_CHANNELS: int = 1
+""" Minimum number of supported analog channel streams in a flat binary analog source. """
+MAX_CHANNELS: int = 999
+""" Maximum number of supported analog channel streams in a flat binary analog source. """
+MIN_VSCALE: float = 0.1
+""" Minimum scale factor V such that S*V*1e-7 converts raw 16-bit sample S to uV for a flat binary analog source. """
+MAX_VSCALE: float = 99
+""" Maximum scale factor V such that S*V*1e-7 converts raw 16-bit sample S to uV for a flat binary analog source. """
+
+
 class WorkingDirectory:
     """
     Encapsulation of an XSort "working directory", which includes the original source files containing recorded analog
@@ -416,6 +431,20 @@ class WorkingDirectory:
     """
     def __init__(self, folder: Path, analog_src: str, unit_src: str, rate: int = 0, num_channels: int = 0,
                  scale: float = 1.52588e-7, interleaved: bool = False, prefiltered: bool = False):
+        """
+        Construct an XSort working directory and validate its contents.
+
+        :param folder: Directory path
+        :param analog_src: Name of the file within directory that serves as the analog data source. Must be an Omniplex
+            PL2 file or a flat binary file (.bin or .dat).
+        :param unit_src: Name of Python pickle file (.pkl or .pickle) that is the unit data source.
+        :param rate: The analog channel sampling rate in Hz. Ignored unless analog source is a flat binary file.
+        :param num_channels: # Analog channels recorded. Ignored unless analog source is a flat binary file.
+        :param scale: Scale factor V such that raw sample S * V = sample voltage **in microvolts**. Ignored unless
+            analog source is a flat binary file.
+        :param interleaved: True if analog channel streams are interleaved in flat binary source file.
+        :param prefiltered: True if analog data is already bandpass-filtered in flat binary source file.
+        """
         self._folder = folder
         """ The working directory file system path. """
         self._analog_src = analog_src
@@ -603,6 +632,86 @@ class WorkingDirectory:
                 return work_dir.error_description, None
         else:
             return "", None   # user cancelled
+
+    @staticmethod
+    def load_working_directory_headless(
+            folder: Path, file1: Optional[str] = None, file2: Optional[str] = None, rate: Optional[int] = None,
+            n_ch: Optional[int] = None, v_scale: Optional[float] = None, interleaved: Optional[bool] = None,
+            prefiltered: Optional[bool] = None) -> Tuple[str, Optional['WorkingDirectory']]:
+        """
+        Load an XSort working directory without user interaction.
+
+        If only the directory is specified, it must contain a single Omniplex PL2 file as the analog source and a single
+        Python pickle file as the unit data source. If the directory contains more than one possible analog source, then
+        **file1** or **file2** must specify the name of the file to use. Similarly if the directory contains more than
+        one pickle file as the unit data source. Finally, the remaining parameters are required when the analog data
+        source is a flat binary file.
+
+        :param folder: File system path for a putative XSort working directory.
+        :param file1: Name of analog or unit data source file in directory.
+        :param file2: Name of analog or unit data source file in directory. If file1 identifies the analog source file,
+            then this identifies the unit source, and vice versa.
+        :param rate: Analog channel sampling rate in Hz (required when analog source is flat binary file). Must lie in
+            [MIN_SAMPLING_RATE .. MAX_SAMPLING_RATE].
+        :param n_ch: Number of analog channels recorded (required when analog source is flat binary file). Must lie in
+            [MIN_CHANNELS, MAX_CHANNELS].
+        :param v_scale: Scale factor V such that raw sample * V * 1e-7 = sample in microvolts (flat binary file only).
+            Must lie in [MIN_VSCALE, MAX_VSCALE].
+        :param interleaved: True if analog channel streams are interleaved in flat binary source file.
+        :param prefiltered: True if analog data is already bandpass-filtered in flat binary source file.
+        :return: A 2-tuple **(emsg, W)**, where **W** is a :class:`WorkingDirectory` object encapsulating the working
+            directory content. On failure, **W** is None and **emsg** is a brief description of the error encountered.
+        """
+        if not (isinstance(folder, Path) and folder.is_dir()):
+            return "Invalid or non-existent working directory", None
+        _, analog_sources, unit_sources = WorkingDirectory._list_working_directory_files(folder)
+        if len(analog_sources) == 0:
+            return "No analog data source files (.pl2, .bin, .dat) found", None
+        if len(unit_sources) == 0:
+            return "No neural unit data source files (.pkl, .pickle) found", None
+
+        # if there are multiple analog and/or unit data sources -- need to figure out which to use
+        a_src: Optional[str] = analog_sources[0].name if len(analog_sources) == 1 else None
+        u_src: Optional[str] = unit_sources[0].name if len(unit_sources) == 1 else None
+        if a_src is None:
+            for f in [file1, file2]:
+                if isinstance(f, str) and f.lower() in ['.pl2', '.bin', '.dat']:
+                    a_src = f
+                    break
+            if a_src is None:
+                return "Ambiguous - multiple analog data source files found in working directory", None
+        if u_src is None:
+            for f in [file1, file2]:
+                if isinstance(f, str) and f.lower() in ['.pkl', '.pickle']:
+                    u_src = f
+                    break
+            if u_src is None:
+                return "Ambiguous - multiple unit data source files found in working directory", None
+
+        # if the analog source is an Omniplex PL2 file, we don't need the params specific to a flat binary file
+        if a_src.lower().endswith('.pl2'):
+            work_dir = WorkingDirectory(folder, a_src, u_src)
+            if work_dir.is_valid:
+                work_dir._to_cfg_file()
+                return "", work_dir
+            else:
+                return work_dir.error_description, None
+
+        # otherwise, we're dealing with a flat binary file as the analog source
+        if (rate is None) or not (MIN_SAMPLING_RATE <= rate <= MAX_SAMPLING_RATE):
+            return "Invalid or unspecified sampling rate for a flat binary analog data file", None
+        if (n_ch is None) or not (MIN_CHANNELS <= n_ch <= MAX_CHANNELS):
+            return "Invalid or unspecified number of channels for a flat binary analog data file", None
+        if (v_scale is None) or not (MIN_VSCALE <= v_scale <= MAX_VSCALE):
+            return "Invalid or unspecified voltage scale factor for a flat binary analog data file", None
+        if (interleaved is None) or (prefiltered is None):
+            return "Must specify whether or not flat binary analog data file is interleaved/prefiltered", None
+        work_dir = WorkingDirectory(folder, a_src, u_src, rate, n_ch, v_scale*1e-7, interleaved, prefiltered)
+        if work_dir.is_valid:
+            work_dir._to_cfg_file()
+            return "", work_dir
+        else:
+            return work_dir.error_description, None
 
     @staticmethod
     def _list_working_directory_files(folder: Path) -> Tuple[Optional[Path], List[Path], List[Path]]:
