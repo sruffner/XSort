@@ -74,6 +74,11 @@ class CacheBuilder(QThread):
             sys.stdout.write(f'!!! ERROR: {emsg}\n')
             return
 
+        if ((len(work_dir.channels_not_cached()) == 0) and (len(work_dir.unit_metrics_not_cached()) == 0) and
+                work_dir.channel_noise_cache_file_exists()):
+            sys.stdout.write(f'OK: XSort internal cache already exists for {str(work_dir.path.absolute())}')
+            return
+
         sys.stdout.write('Initializing cache build task resources...\n')
         sys.stdout.flush()
         task_manager = TaskManager()

@@ -479,8 +479,7 @@ class Neuron:
     def get_template_for_channel(self, idx: int) -> Optional[np.ndarray]:
         """
         Get this unit's mean spike waveform, or 'template', as computed from the data stream on the specified Omniplex
-        analog data channel. **For consistency when comparing spike templates across channels or across units, the
-        template is "re-centered" by subtracting the median value.**
+        analog data channel.
 
         :param idx: Index of an Omniplex analog channel.
         :return: None if the channel index is invalid or was not found in the Omniplex recording file, or if the mean
@@ -490,8 +489,6 @@ class Neuron:
             of samples in the array will depend on the analog channel sampling rate: R = len(template)/0.01s.
         """
         out = self._templates.get(idx)
-        if not (out is None):
-            out = out - np.median(out)
         return out
 
     def update_metrics(self, primary_ch: int, snr: float, templates: Dict[int, np.ndarray]) -> None:

@@ -380,7 +380,7 @@ def _compute_unit_templates_on_channel(
             template: np.ndarray = unit_templates[i]
             if num_clips > 0:
                 template /= num_clips
-            template_dict[units[i].uid] = template
+            template_dict[units[i].uid] = template - np.median(template)   # remove DC offset
 
         return ch_idx, template_dict
 
@@ -710,6 +710,7 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
             noise = noise_levels[i]
             template = template_dict[i]
             template = template / len(clip_starts)
+            template = template - np.median(template)  # remove DC offset
             snr = 0 if noise <= 0 else (np.max(template) - np.min(template)) / (1.96 * noise)
             if snr > best_snr:
                 best_snr = snr
