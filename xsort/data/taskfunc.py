@@ -242,7 +242,7 @@ def _compute_unit_templates_on_channel(
         # we either read directly from the original, prefiltered flat binary source or an internal cache file for the
         # analog channel index specified.
         if work_dir.need_analog_cache:
-            ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
+            ch_file = Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
             if not ch_file.is_file():
                 raise Exception(f"Missing internal cache file for recorded data on analog channel {str(ch_idx)}.")
         else:
@@ -545,7 +545,7 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
         num_samples_recorded = 0
         if work_dir.need_analog_cache:
             for i in ch_indices:
-                ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i)}")
+                ch_file = Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i)}")
                 if not ch_file.is_file():
                     raise Exception(f"Missing internal analog cache file {ch_file.name}")
                 elif ch_file.stat().st_size % n_bytes_per_sample != 0:
@@ -600,7 +600,7 @@ def _compute_templates_and_cache_metrics_for_unit(work_dir: WorkingDirectory, un
         if work_dir.need_analog_cache:
             # CASE 1: individual binary cache file for each analog channel stream
             for ch_idx in ch_indices:
-                ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
+                ch_file = Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
                 per_ch_template = template_dict[ch_idx]
                 with open(ch_file, 'rb') as src:
                     clip_idx = 0
@@ -794,7 +794,7 @@ def identify_unit_primary_channels(dir_path: str, task_id: int, ch_indices: List
         num_samples_recorded = 0
         if work_dir.need_analog_cache:
             for ch_idx in ch_indices:
-                ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
+                ch_file = Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
                 if not ch_file.is_file():
                     raise Exception(f"Missing internal analog cache file {ch_file.name}")
                 elif ch_file.stat().st_size % n_bytes_per_sample != 0:
@@ -911,7 +911,7 @@ def identify_unit_primary_channels(dir_path: str, task_id: int, ch_indices: List
         if work_dir.need_analog_cache:
             # CASE 1: individual binary cache file for each analog channel stream
             for ch_idx in ch_indices:
-                ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
+                ch_file = Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
                 with open(ch_file, 'rb') as src:
                     clip_idx = 0
                     while clip_idx < len(clip_starts):
@@ -1119,7 +1119,8 @@ def cache_analog_channels(dir_path: str, task_id: int, ch_indices: List[int], pr
 
         # the channel cache files to be written
         cache_file_dict: Dict[int, Path] = \
-            {ch_idx: Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}") for ch_idx in ch_indices}
+            {ch_idx: Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch_idx)}")
+             for ch_idx in ch_indices}
 
         # prepare bandpass filter in case analog signal is wide-band. The filter delays are initialized with zero-vector
         # initial condition and the delays are updated as each block is filtered. SO MAINTAIN A SEPARATE FILTER DELAY
@@ -1184,7 +1185,7 @@ def _cache_pl2_analog_channel(work_dir: WorkingDirectory, idx: int, upd_q: Queue
     :param cancel: A thread-safe event object which is set to request premature cancellation of this task function. On
         cancellation, the internal cache file is removed.
     """
-    cache_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
+    cache_file = Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
     if cache_file.is_file():
         cache_file.unlink(missing_ok=True)
 
@@ -1245,7 +1246,7 @@ def _cache_noninterleaved_analog_channel(work_dir: WorkingDirectory, idx: int, u
         an error description if the task has failed (otherwise an empty string).
     :param cancel: A thread-safe event object which is set to request premature cancellation of this task function.
     """
-    cache_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
+    cache_file = Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
     if cache_file.is_file():
         cache_file.unlink(missing_ok=True)
 
@@ -1342,7 +1343,7 @@ def estimate_noise_on_channels_in_range(
         n_samples = 0
         if work_dir.need_analog_cache:
             for i in range(count):
-                ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i+start)}")
+                ch_file = Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i+start)}")
                 if not ch_file.is_file():
                     raise Exception(f"Missing internal analog cache file {ch_file.name}")
                 elif ch_file.stat().st_size % n_bytes_per_sample != 0:
@@ -1390,7 +1391,7 @@ def estimate_noise_on_channels_in_range(
         if work_dir.need_analog_cache:
             # CASE 1: Analog data streams cached in individual files
             for i in range(count):
-                ch_file = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i+start)}")
+                ch_file = Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i+start)}")
                 with open(ch_file, 'rb') as src:
                     clip_idx = 0
                     while clip_idx < n_clips:
@@ -1909,7 +1910,7 @@ def _extract_channel_clips(work_dir: WorkingDirectory, ch: int, clip_starts: Lis
 
     try:
         if work_dir.need_analog_cache:
-            src_path = Path(work_dir.path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch)}")
+            src_path = Path(work_dir.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(ch)}")
             if not src_path.is_file():
                 raise Exception(f"Channel cache file missing for analog channel {str(ch)}")
         else:

@@ -18,6 +18,10 @@ Internal directory configuration file persists the filenames of the original ana
 as well as required parameters if analog data is stored in a flat binary file (.bin or .dat) rather than an Omnniplex
 PL2 file. 
 """
+EDIT_HISTORY_FILE: str = '.xs.edits.txt'
+""" Internal cache file holds the edit history for the working directory's neural unit list. """
+INTERNAL_CACHE_DIR: str = '.xs-cache'
+""" All internal cache files are placed inside this folder within the working directory. """
 CHANNEL_CACHE_FILE_PREFIX: str = '.xs.ch.'
 """ Prefix for analog channel data stream cache file -- followed by the channel index. """
 NOISE_CACHE_FILE: str = '.xs.noise'
@@ -27,8 +31,6 @@ channel. Stored as a list of N single-precision floating-point values, where N i
 """
 UNIT_CACHE_FILE_PREFIX: str = '.xs.unit.'
 """ Prefix for a neural unit cache file -- followed by the unit's UID. """
-EDIT_HISTORY_FILE: str = '.xs.edits.txt'
-""" Internal cache file holds the edit history for the working directory's neural unit list. """
 
 
 class UserEdit:
@@ -499,6 +501,8 @@ class WorkingDirectory:
         The edit history for this working directory, a record of all user-initiated changes to the list of neural units,
         in chronological order.
         """
+        self._cache_dir: Path = Path(folder, INTERNAL_CACHE_DIR)
+        """ Subdirectory within the XSort working directory that contains all generated internal cache files. """
 
         self._error: Optional[str] = self._validate()
         """ None if directory content is valid; else a brief description of first error encountered. """
@@ -509,10 +513,11 @@ class WorkingDirectory:
          - The analog data source file must exist. If it is an Omniplex PL2 file, metadata is read from the file as a
            check that the file is valid. If it is a flat binary file, the file size must be consistent with the number
            of analog channels and the sampling rate specified by user (all samples assumed to be int16).
-         - The spike-sorted neural units source file must exist. The list of neural units is loaded from the file to
-           verify its correctness.
          - Load edit history file if present. Directory is considered invalid if edit history is present but cannot be
            read.
+         - The spike-sorted neural units source file must exist. The list of neural units is loaded from the file to
+           verify its correctness.
+         - Create the internal cache directory if it does not yet exist.
 
         This method is called at construction time and computes or retrieves several parameters including analog
         sampling rate, analog recording duration, and number of analog channels.
@@ -570,6 +575,11 @@ class WorkingDirectory:
             return emsg
         self._original_units = [u.uid for u in units]
         self._neurons = units
+
+        if self._cache_dir.is_file():
+            return "Reserved name for XSort internal cache directory already exists as a regular file!"
+        elif not self._cache_dir.is_dir():
+            self._cache_dir.mkdir()
 
         return None
 
@@ -814,6 +824,11 @@ class WorkingDirectory:
     def path(self) -> Path:
         """ File system path for the working directory. """
         return self._folder
+
+    @property
+    def cache_path(self) -> Path:
+        """ File system path for the subdirectory within working directory that contains all internal cache files. """
+        return self._cache_dir
 
     @property
     def uses_omniplex_as_analog_source(self) -> bool:
@@ -1092,7 +1107,7 @@ class WorkingDirectory:
         out: List[str] = list()
         if self.is_valid:
             out.extend(self._original_units)
-            for child in self._folder.iterdir():
+            for child in self.cache_path.iterdir():
                 if child.is_file() and child.name.startswith(UNIT_CACHE_FILE_PREFIX):
                     uid = child.name[len(UNIT_CACHE_FILE_PREFIX):]
                     try:
@@ -1127,7 +1142,7 @@ class WorkingDirectory:
         """
         if self.is_valid and self.need_analog_cache:
             for i in self._analog_channel_indices:
-                if not Path(self._folder, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i)}").is_file():
+                if not Path(self.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i)}").is_file():
                     return True
         return False
 
@@ -1143,7 +1158,7 @@ class WorkingDirectory:
         if not (self.is_valid and self.need_analog_cache):
             return out
         for i in self._analog_channel_indices:
-            if not Path(self._folder, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i)}").is_file():
+            if not Path(self.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(i)}").is_file():
                 out.append(i)
         out.sort()
         return out
@@ -1190,7 +1205,7 @@ class WorkingDirectory:
                         samples = samples[idx::n_ch].copy()
                     return ChannelTraceSegment(idx, start, samples_per_sec, to_microvolts, samples)
 
-            cache_file = Path(self._folder, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
+            cache_file = Path(self.cache_path, f"{CHANNEL_CACHE_FILE_PREFIX}{str(idx)}")
             if not cache_file.is_file():
                 raise Exception(f"Channel cache file missing for analog channel {str(idx)}")
 
@@ -1236,7 +1251,7 @@ class WorkingDirectory:
         """
         if not self.is_valid:
             return False
-        unit_cache_file = Path(self._folder, f"{UNIT_CACHE_FILE_PREFIX}{unit.uid}")
+        unit_cache_file = Path(self.cache_path, f"{UNIT_CACHE_FILE_PREFIX}{unit.uid}")
         try:
             # TODO: If unit cache file exists, really should write to temp file first...
             with open(unit_cache_file, 'wb') as dst:
@@ -1274,7 +1289,7 @@ class WorkingDirectory:
         unit_idx, unit_suffix = Neuron.dissect_uid(uid)
 
         try:
-            unit_cache_file = Path(self._folder, f"{UNIT_CACHE_FILE_PREFIX}{uid}")
+            unit_cache_file = Path(self.cache_path, f"{UNIT_CACHE_FILE_PREFIX}{uid}")
             if not unit_cache_file.is_file():
                 raise Exception(f"Unit metrics cache file missing for neural unit {uid}")
 
@@ -1308,7 +1323,7 @@ class WorkingDirectory:
         :param uid: A label uniquely identifying the unit.
         :return: True if the internal cache file for the specified neural unit is found; else False.
         """
-        return self.is_valid and Path(self._folder, f"{UNIT_CACHE_FILE_PREFIX}{uid}").is_file()
+        return self.is_valid and Path(self.cache_path, f"{UNIT_CACHE_FILE_PREFIX}{uid}").is_file()
 
     def delete_unit_cache_file(self, uid: str) -> None:
         """
@@ -1316,7 +1331,7 @@ class WorkingDirectory:
         :param uid: The neural unit's unique identifier.
         """
         if self.is_valid:
-            p = Path(self._folder, f"{UNIT_CACHE_FILE_PREFIX}{uid}")
+            p = Path(self.cache_path, f"{UNIT_CACHE_FILE_PREFIX}{uid}")
             p.unlink(missing_ok=True)
 
     def _delete_all_derived_unit_cache_files(self) -> None:
@@ -1327,7 +1342,7 @@ class WorkingDirectory:
         """
         if not self.is_valid:
             return
-        for child in self._folder.iterdir():
+        for child in self.cache_path.iterdir():
             if child.is_file() and child.name.startswith(UNIT_CACHE_FILE_PREFIX) and child.name.endswith('x'):
                 child.unlink(missing_ok=True)
 
@@ -1336,7 +1351,7 @@ class WorkingDirectory:
         Does this working directory contain the internal cache file '.xs.noise' holding the estimated noise level on
         each recorded analog channel?
         """
-        return self.is_valid and Path(self._folder, NOISE_CACHE_FILE).is_file()
+        return self.is_valid and Path(self.cache_path, NOISE_CACHE_FILE).is_file()
 
     def load_channel_noise_from_cache(self) -> Optional[np.ndarray]:
         """
@@ -1349,7 +1364,7 @@ class WorkingDirectory:
             could not be read.
         """
         try:
-            with open(Path(self.path, NOISE_CACHE_FILE), 'rb') as src:
+            with open(Path(self.cache_path, NOISE_CACHE_FILE), 'rb') as src:
                 out = np.frombuffer(src.read(), dtype='<f')
             return out
         except Exception:
@@ -1367,7 +1382,7 @@ class WorkingDirectory:
             return False
         try:
             noise_array = np.array(noise_levels, dtype='<f')
-            with open(Path(self.path, NOISE_CACHE_FILE), 'wb') as src:
+            with open(Path(self.cache_path, NOISE_CACHE_FILE), 'wb') as src:
                 src.write(noise_array.tobytes())
             return True
         except Exception:
@@ -1375,20 +1390,22 @@ class WorkingDirectory:
 
     def delete_internal_cache_files(self, analog: bool = True, noise: bool = True, units: bool = True) -> None:
         """
-        Remove all or some of the dedicated internal cache files in this XSort working directory.
+        Remove all or some of the files in this XSort working directory's internal cache folder.
 
         :param analog: If True, analog data channel cache files are removed. Default = True.
         :param noise: If True, the analog channel noise cache file is removed. Default = True.
         :param units: If True, neural unit metrics cache files are removed. Default = True.
         """
-        if (not self.is_valid) or not (analog or noise or units):
+        if (not self.is_valid) or (not self.cache_path.is_dir()) or not (analog or noise or units):
             return
         if noise:
-            Path(self._folder, NOISE_CACHE_FILE).unlink(missing_ok=True)
-        for p in self._folder.iterdir():
+            Path(self.cache_path, NOISE_CACHE_FILE).unlink(missing_ok=True)
+        for p in self.cache_path.iterdir():
             if ((analog and p.name.startswith(CHANNEL_CACHE_FILE_PREFIX)) or
                     (units and p.name.startswith(UNIT_CACHE_FILE_PREFIX))):
                 p.unlink(missing_ok=True)
+        if analog and noise and units:
+            self.cache_path.rmdir()
 
     def save_edit_history(self) -> None:
         """ Save this working directory's current edit history to a dedicated cache file within the directory. """
