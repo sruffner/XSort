@@ -219,6 +219,8 @@ class _NeuronTableModel(QAbstractTableModel):
         return out
 
 
+# TODO: REVISE THIS AND _NeuronTableView to get suggested unit labels from the ViewManager, which keeps them in
+#   a QSettings object.
 class _AutoCompleterDelegate(QStyledItemDelegate):
     """ A table view delegate to handle in-place editing of a neural unit label, with auto-completion support. """
     def __init__(self, parent: Optional[QObject]) -> None:
@@ -566,16 +568,9 @@ class NeuronView(BaseView):
         self._table_view.on_unit_label_changed(uid)
 
     def save_settings(self, settings: QSettings) -> None:
-        """
-        Overridden to preserve which columns in the neural units table have been hidden by the user, and the set of
-        labels the user has previously applied to neural units.
-        """
+        """ Overridden to preserve which columns in the neural units table have been hidden by the user. """
         settings.setValue('neuronview_hidden_cols', self._table_view.hidden_columns)
-        settings.setValue('neuronview_prev_labels', self._table_view.previous_unit_labels)
 
     def restore_settings(self, settings: QSettings) -> None:
-        """ Overridden to hide select columns in the neural units table and to initialize the set of unit labels the
-        user has previously applied to neural units -- IAW user settings.
-        """
+        """ Overridden to hide select columns in the neural units table IAW user settings. """
         self._table_view.hidden_columns = settings.value('neuronview_hidden_cols', '')
-        self._table_view.previous_unit_labels = settings.value('neuronview_prev_labels', '')

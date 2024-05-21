@@ -317,9 +317,13 @@ class Neuron:
         if not isinstance(s, str):
             raise ValueError('Unit label must be a string')
         s = s.strip()
-        if (len(s) > Neuron.MAX_LABEL_LEN) or (s.find(',') > -1):
+        if not Neuron.is_valid_label(s):
             raise ValueError('Unit label too long or contains a comma')
         self._label = s
+
+    @staticmethod
+    def is_valid_label(s: str) -> bool:
+        return isinstance(s, str) and (0 <= len(s) <= Neuron.MAX_LABEL_LEN) and (s.find(',') < 0)
 
     @property
     def is_purkinje(self) -> bool:

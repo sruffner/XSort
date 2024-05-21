@@ -18,6 +18,7 @@ from xsort.views.isiview import ISIView
 from xsort.views.neuronview import NeuronView
 from xsort.views.pcaview import PCAView
 from xsort.views.correlogramview import CorrelogramView
+from xsort.views.preferences import PreferencesDlg
 from xsort.views.templateview import TemplateView
 
 
@@ -102,6 +103,9 @@ class ViewManager(QObject):
         The master data model. It encapsulates the notion of XSort's current working directory, mediates access to 
         data stored in the various files within that directory, performs analyses triggered by view actions, and so on.
         """
+        self._settings: Optional[QSettings] = None
+        """ User-specific application settings."""
+
         self._working_dir_path_at_startup: Optional[str] = None
         """ 
         File system path of the XSort working directory as obtained from user settings during startup. Once the
@@ -111,6 +115,8 @@ class ViewManager(QObject):
         """ List of most recently visited working directories, most recent first. """
         self._about_dlg = self._create_about_dialog()
         """ The application's 'About' dialog. """
+        self._prefs_dlg: Optional[PreferencesDlg] = None
+        """ The application's 'Preferences' dialog, created on first use. """
 
         self._neuron_view = NeuronView(self.data_analyzer)
         """ 
@@ -194,6 +200,8 @@ class ViewManager(QObject):
                                     triggered=self.select_working_directory)
         self._save_action = QAction('&Save as...', self._main_window, shortcut="Ctrl+S", statusTip="Save neural units",
                                     triggered=self._save)
+        self._prefs_action = QAction('&Preferences...', self._main_window, statusTip="Update user preferences",
+                                     triggered=self._edit_preferences)
         self._quit_action = QAction("&Quit", self._main_window, shortcut="Ctrl+Q", statusTip=f"Quit {APP_NAME}",
                                     triggered=self.quit)
 
@@ -219,7 +227,9 @@ class ViewManager(QObject):
         self._file_menu.addSeparator()
         self._file_menu.addAction(self._save_action)
         self._file_menu.addSeparator()
+        self._file_menu.addAction(self._prefs_action)   # should be moved to Application menu under Mac OS
         self._file_menu.addAction(self._quit_action)
+
         self._edit_menu = self._main_window.menuBar().addMenu("&Edit")
         self._edit_menu.addAction(self._undo_action)
         self._edit_menu.addAction(self._undo_all_action)
@@ -537,6 +547,11 @@ class ViewManager(QObject):
         """
         self._about_dlg.exec()
 
+    def _edit_preferences(self) -> None:
+        if self._prefs_dlg is None:
+            self._prefs_dlg = PreferencesDlg(self._settings, self._main_window)
+        self._prefs_dlg.exec()
+
     def _undo(self) -> None:
         """ Handler for the 'Edit|Undo' menu command. It undos the last change to the current neural unit list. """
         self.data_analyzer.undo_last_edit()
@@ -608,24 +623,22 @@ class ViewManager(QObject):
 
     def _save_settings_and_exit(self) -> None:
         """ Save all user settings and exit the application without user prompt. """
-        settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
-                             f".{APP_NAME}.ini")
-        settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
+        assert isinstance(self._settings, QSettings)
 
         # basic layout
-        settings.setValue('geometry', self._main_window.saveGeometry())
-        settings.setValue('window_state', self._main_window.saveState(version=0))  # increment version as needed
+        self._settings.setValue('geometry', self._main_window.saveGeometry())
+        self._settings.setValue('window_state', self._main_window.saveState(version=0))  # increment version as needed
 
         # any view-specific settings
         for v in self._all_views:
-            v.save_settings(settings)
+            v.save_settings(self._settings)
 
         # current working directory
-        settings.setValue('working_dir', str(self.data_analyzer.working_directory))
+        self._settings.setValue('working_dir', str(self.data_analyzer.working_directory))
 
         # remember MRU directories
         for k, dir_path in enumerate(self._mru_dirs):
-            settings.setValue(f"mru_dir_{k}", str(dir_path))
+            self._settings.setValue(f"mru_dir_{k}", str(dir_path))
 
         QCoreApplication.instance().exit(0)
 
@@ -638,34 +651,34 @@ class ViewManager(QObject):
         layout and any view-specific settings. If the working directory persisted in user preferences storage no longer
         exists, the application will immediately ask the user to specify one.
         """
-        settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation),
-                             f".{APP_NAME}.ini")
-        settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
+        if self._settings is None:
+            settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation), f".{APP_NAME}.ini")
+            self._settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
 
         # basic layout
-        geometry = settings.value("geometry", QByteArray())
+        geometry = self._settings.value("geometry", QByteArray())
         if geometry and isinstance(geometry, QByteArray) and not geometry.isEmpty():
             self._main_window.restoreGeometry(geometry)
         else:
             self._main_window.setGeometry(200, 200, 800, 600)
 
-        window_state = settings.value("window_state", QByteArray())
+        window_state = self._settings.value("window_state", QByteArray())
         if window_state and isinstance(window_state, QByteArray) and not window_state.isEmpty():
             self._main_window.restoreState(window_state)
 
         # any view-specific settings
         for v in self._all_views:
-            v.restore_settings(settings)
+            v.restore_settings(self._settings)
 
         # remember the working directory path if available. Once the application window is shown, we make this the
         # current working directory -- see select_working_directory()
-        str_path: Optional[str] = settings.value("working_dir")
+        str_path: Optional[str] = self._settings.value("working_dir")
         if isinstance(str_path, str):
             self._working_dir_path_at_startup = str_path
 
         # load most recent directories visited, but remove any that no longer exist
         for k in range(self._MRU_DIR_MAX_SIZE):
-            path_str = settings.value(f"mru_dir_{k}", "")
+            path_str = self._settings.value(f"mru_dir_{k}", "")
             p = Path(path_str)
             if (len(path_str) > 0) and p.is_dir():
                 self._mru_dirs.append(p)
