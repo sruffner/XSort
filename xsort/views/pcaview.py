@@ -1,6 +1,6 @@
 from typing import List, Optional
 
-from PySide6.QtCore import Qt, Slot, QTimer, QObject, QEvent, QPointF
+from PySide6.QtCore import Qt, Slot, QTimer, QObject, QEvent, QPointF, QSettings
 from PySide6.QtGui import QColor, QPolygonF, QPainterPath
 from PySide6.QtWidgets import QVBoxLayout, QComboBox, QLabel, QHBoxLayout, QPushButton, QGraphicsPathItem
 import pyqtgraph as pg
@@ -58,8 +58,8 @@ class PCAView(BaseView):
     _DEF_DOWNSAMPLE: int = 50
     """ Default downsampling factor. """
 
-    def __init__(self, data_manager: Analyzer) -> None:
-        super().__init__('PCA', None, data_manager)
+    def __init__(self, data_manager: Analyzer, settings: QSettings) -> None:
+        super().__init__('PCA', None, data_manager, settings)
         self._plot_widget = pg.PlotWidget()
         """ PCA projections for all neurons in the current display list are rendered in this widget. """
         self._plot_item: pg.PlotItem = self._plot_widget.getPlotItem()

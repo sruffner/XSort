@@ -36,8 +36,8 @@ class _UserGuideView(BaseView):
     DEF_SECTION: str = 'Overview'
     """ At startup this section of the user guide is displayed. """
 
-    def __init__(self, data_manager: Analyzer) -> None:
-        super().__init__('Help', None, data_manager)
+    def __init__(self, data_manager: Analyzer, settings: QSettings) -> None:
+        super().__init__('Help', None, data_manager, settings)
         self._help_browser = QTextBrowser()
         """ The user guide content is displayed entirelyl in this widget. """
         self._section_combo = QComboBox()
@@ -103,7 +103,8 @@ class ViewManager(QObject):
         The master data model. It encapsulates the notion of XSort's current working directory, mediates access to 
         data stored in the various files within that directory, performs analyses triggered by view actions, and so on.
         """
-        self._settings: Optional[QSettings] = None
+        settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation), f".{APP_NAME}.ini")
+        self._settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
         """ User-specific application settings."""
 
         self._working_dir_path_at_startup: Optional[str] = None
@@ -118,26 +119,26 @@ class ViewManager(QObject):
         self._prefs_dlg: Optional[PreferencesDlg] = None
         """ The application's 'Preferences' dialog, created on first use. """
 
-        self._neuron_view = NeuronView(self.data_analyzer)
+        self._neuron_view = NeuronView(self.data_analyzer, self._settings)
         """ 
         View displaying tabular list of all defined neural units. User selects units comprising the display focus
         list via this view.
         """
-        self._templates_view = TemplateView(self.data_analyzer)
+        self._templates_view = TemplateView(self.data_analyzer, self._settings)
         """ View displaying computed spike templates for units in the current display focus list. """
-        self._correlogram_view = CorrelogramView(self.data_analyzer)
+        self._correlogram_view = CorrelogramView(self.data_analyzer, self._settings)
         """ View displaying ACG/CCG for units in the current display focus list. """
-        self._isi_view = ISIView(self.data_analyzer)
+        self._isi_view = ISIView(self.data_analyzer, self._settings)
         """ View displaying interspike interval histograms for units in the current focus list. """
-        self._acg_vs_rate_view = ACGRateView(self.data_analyzer)
+        self._acg_vs_rate_view = ACGRateView(self.data_analyzer, self._settings)
         """ View displaying 3D ACG as a function of firing rate for units in the current focus list. """
-        self._firingrate_view = FiringRateView(self.data_analyzer)
+        self._firingrate_view = FiringRateView(self.data_analyzer, self._settings)
         """ View displaying firing rate histograms for units in the current focus list. """
-        self._pca_view = PCAView(self.data_analyzer)
+        self._pca_view = PCAView(self.data_analyzer, self._settings)
         """ View displaying results of principal component analysis on units in the current focus list. """
-        self._channels_view = ChannelView(self.data_analyzer)
+        self._channels_view = ChannelView(self.data_analyzer, self._settings)
         """ View displaying channel trace segments for a selected set of recorded analog channels. """
-        self._user_guide_view = _UserGuideView(self.data_analyzer)
+        self._user_guide_view = _UserGuideView(self.data_analyzer, self._settings)
         """ View displaying a small help guide for XSort. """
 
         self._all_views = [self._neuron_view, self._templates_view, self._correlogram_view, self._isi_view,
@@ -623,15 +624,13 @@ class ViewManager(QObject):
 
     def _save_settings_and_exit(self) -> None:
         """ Save all user settings and exit the application without user prompt. """
-        assert isinstance(self._settings, QSettings)
-
         # basic layout
         self._settings.setValue('geometry', self._main_window.saveGeometry())
         self._settings.setValue('window_state', self._main_window.saveState(version=0))  # increment version as needed
 
         # any view-specific settings
         for v in self._all_views:
-            v.save_settings(self._settings)
+            v.save_settings()
 
         # current working directory
         self._settings.setValue('working_dir', str(self.data_analyzer.working_directory))
@@ -651,10 +650,6 @@ class ViewManager(QObject):
         layout and any view-specific settings. If the working directory persisted in user preferences storage no longer
         exists, the application will immediately ask the user to specify one.
         """
-        if self._settings is None:
-            settings_path = Path(QStandardPaths.writableLocation(QStandardPaths.HomeLocation), f".{APP_NAME}.ini")
-            self._settings = QSettings(str(settings_path.absolute()), QSettings.IniFormat)
-
         # basic layout
         geometry = self._settings.value("geometry", QByteArray())
         if geometry and isinstance(geometry, QByteArray) and not geometry.isEmpty():
@@ -668,7 +663,7 @@ class ViewManager(QObject):
 
         # any view-specific settings
         for v in self._all_views:
-            v.restore_settings(self._settings)
+            v.restore_settings()
 
         # remember the working directory path if available. Once the application window is shown, we make this the
         # current working directory -- see select_working_directory()

@@ -35,8 +35,8 @@ class ISIView(BaseView):
     _PEN_WIDTH: int = 3
     """ Width of pen used to draw ISI histograms. """
 
-    def __init__(self, data_manager: Analyzer) -> None:
-        super().__init__('Interspike Interval Histograms', None, data_manager)
+    def __init__(self, data_manager: Analyzer, settings: QSettings) -> None:
+        super().__init__('Interspike Interval Histograms', None, data_manager, settings)
         self._isi_plot_widget = pg.PlotWidget()
         """ Interspike interval histograms for all neurons in the current display list are rendered in this widget. """
         self._isi_plot_item: pg.PlotItem = self._isi_plot_widget.getPlotItem()
@@ -124,14 +124,14 @@ class ISIView(BaseView):
         span = self._hist_span_slider.sliderPosition()
         self._isi_plot_item.getViewBox().setXRange(min=0, max=span)
 
-    def save_settings(self, settings: QSettings) -> None:
+    def save_settings(self) -> None:
         """ Overridden to preserve the current ISI histogram span, which is user selectable between 20-200ms. """
-        settings.setValue('isi_view_span', self._hist_span_slider.sliderPosition())
+        self.settings.setValue('isi_view_span', self._hist_span_slider.sliderPosition())
 
-    def restore_settings(self, settings: QSettings) -> None:
+    def restore_settings(self) -> None:
         """ Overridden to restore the current histogram span from user settings. """
         try:
-            span = int(settings.value('isi_view_span'))
+            span = int(self.settings.value('isi_view_span'))
             self._hist_span_slider.setSliderPosition(span)
             self._on_hist_span_changed()
         except Exception:

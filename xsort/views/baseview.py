@@ -14,13 +14,14 @@ class BaseView(QObject):
     used for inter-view communications
     """
 
-    def __init__(self, title: str, background: Optional[QColor], data_manager: Analyzer):
+    def __init__(self, title: str, background: Optional[QColor], data_manager: Analyzer, settings: QSettings):
         """
         Create an empty view with the specified title.
 
         :param title: The view's title.
         :param background: An alternative background color (intended for debug use when testing view layout).
         :param data_manager: The source for all raw recorded data and analysis results presented in any XSort view.
+        :param settings: The user's XSort application settings.
         """
         super().__init__(parent=None)
         self.view_container = QWidget()
@@ -29,6 +30,11 @@ class BaseView(QObject):
         """ The view's title. """
         self.data_manager = data_manager
         """ Each view will query this object for raw recorded data and analyis results. """
+        self.settings = settings
+        """ 
+        View-specific and application-wide user preferences. Each view is responsible for maintaining its own
+        settings.
+        """
 
         if isinstance(background, QColor):
             self.view_container.setAutoFillBackground(True)
@@ -120,19 +126,21 @@ class BaseView(QObject):
         """
         pass
 
-    def save_settings(self, settings: QSettings) -> None:
+    def save_settings(self) -> None:
         """
-        Save any view-specific user preferences that should be restored the next time XSort is launched. This method
-        is called just prior to application exit, but before the GUI is destroye. Default implementation does nothing.
-        :param settings: The application settings object.
+        Save any view-specific user preferences that should be restored the next time XSort is launched. The application
+        settings object is an instance member of the view (a reference shared by all views).
+
+        This method is called just prior to application exit, but before the GUI is destroyed. Default implementation
+        does nothing.
         """
         pass
 
-    def restore_settings(self, settings: QSettings) -> None:
+    def restore_settings(self) -> None:
         """
-        Load any view-specific user preferences and refresh the view state accordingly. This method is called during
-        application startup, after the main window and all views have been realized but not shown. Default
-        implementation does nothing.
-        :param settings: The application settings object.
+        Load any view-specific user preferences and refresh the view state accordingly. The application settings object
+        is an instance member of the view (a reference shared by all views).
+        This method is called during application startup, after the main window and all views have been realized but not
+        shown. Default implementation does nothing.
         """
         pass

@@ -49,8 +49,8 @@ class TemplateView(BaseView):
     _DEF_VSPAN_UV: int = 75
     """ Default +/- voltage range for templates, in microvolts. """
 
-    def __init__(self, data_manager: Analyzer) -> None:
-        super().__init__('Templates', None, data_manager)
+    def __init__(self, data_manager: Analyzer, settings: QSettings) -> None:
+        super().__init__('Templates', None, data_manager, settings)
 
         self._plot_widget = pg.PlotWidget(background=self.bkg_color)
         """ This plot widget fills the entire view (minus border) and contains all plotted spike templates. """
@@ -326,16 +326,16 @@ class TemplateView(BaseView):
 
         self._message_label.setText("" if len(displayed_units) > 0 else "No units selected for display")
 
-    def save_settings(self, settings: QSettings) -> None:
+    def save_settings(self) -> None:
         """ Overridden to preserve the current template time and voltage spans, which are user selectable. """
-        settings.setValue('template_view_span', self._tspan_slider.sliderPosition())
-        settings.setValue('template_view_voltage_span', self._vspan_slider.sliderPosition())
+        self.settings.setValue('template_view_span', self._tspan_slider.sliderPosition())
+        self.settings.setValue('template_view_voltage_span', self._vspan_slider.sliderPosition())
 
-    def restore_settings(self, settings: QSettings) -> None:
+    def restore_settings(self) -> None:
         """ Overridden to restore the template time and voltage spans from user settings. """
         try:
-            t_span_ms = int(settings.value('template_view_span', self._MAX_TSPAN_MS))
-            v_span_uv = int(settings.value('template_view_voltage_span', self._DEF_VSPAN_UV))
+            t_span_ms = int(self.settings.value('template_view_span', self._MAX_TSPAN_MS))
+            v_span_uv = int(self.settings.value('template_view_voltage_span', self._DEF_VSPAN_UV))
             t_span_ms = max(self._MIN_TSPAN_MS, min(t_span_ms, self._MAX_TSPAN_MS))
             v_span_uv = max(self._MIN_VSPAN_UV, min(v_span_uv, self._MAX_VSPAN_UV))
 

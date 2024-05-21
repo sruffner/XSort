@@ -96,7 +96,7 @@ class PreferencesDlg(QDialog):
     def _load_current_settings(self) -> None:
         """ Load dialog widgets IAW the user's current preferences. """
         self._suggested_unit_labels.clear()
-        labels = self._settings.value('suggested_unit_labels', '').split(',')
+        labels = self._settings.value('suggested_unit_labels', '', type=str).split(',')
         self._suggested_unit_labels.clear()
         self._suggested_unit_labels.update(labels)
         self._labels_list.clear()
@@ -164,9 +164,9 @@ class PreferencesDlg(QDialog):
         elif self._del_cache_always.isChecked():
             policy = "Always"
 
-        # TODO: Uncomment once things are figured out
-        # self._settings.setValue('neuronview_prev_labels', ','.join(sorted(unit_labels)))
-        # if policy is not None:
-        #     self._settings.setValue('del_cache_policy', policy)
+        # TODO: Testing
+        self._settings.setValue('suggested_unit_labels', ','.join(sorted(unit_labels)))
+        if policy is not None:
+            self._settings.setValue('del_cache_policy', policy)
 
         self.accept()

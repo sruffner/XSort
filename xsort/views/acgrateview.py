@@ -39,8 +39,8 @@ class ACGRateView(BaseView):
     _TITLE_FONT_SZ: str = '14pt'
     """ Sets font size of plot title which displays range of firing rates for the ACG-vs-FR histogram in that plot. """
 
-    def __init__(self, data_manager: Analyzer) -> None:
-        super().__init__('ACG-vs-Firing Rate', None, data_manager)
+    def __init__(self, data_manager: Analyzer, settings: QSettings) -> None:
+        super().__init__('ACG-vs-Firing Rate', None, data_manager, settings)
         self._layout_widget = pg.GraphicsLayoutWidget()
         """ Layout widget in which the ACG-vs-rate histogram for all unit in the current display list are arranged. """
         self._hist_span_slider = QSlider(orientation=Qt.Orientation.Horizontal)
@@ -167,14 +167,14 @@ class ACGRateView(BaseView):
             if isinstance(plot_item, pg.PlotItem):
                 plot_item.getViewBox().setXRange(min=-span, max=span, padding=0.05)
 
-    def save_settings(self, settings: QSettings) -> None:
+    def save_settings(self) -> None:
         """ Overridden to preserve the current histogram span, which is user selectable between 20-100ms. """
-        settings.setValue('acg_vs_rate_view_span', self._hist_span_slider.sliderPosition())
+        self.settings.setValue('acg_vs_rate_view_span', self._hist_span_slider.sliderPosition())
 
-    def restore_settings(self, settings: QSettings) -> None:
+    def restore_settings(self) -> None:
         """ Overridden to restore the current histogram span from user settings. """
         try:
-            span = int(settings.value('acg_vs_rate_view_span'))
+            span = int(self.settings.value('acg_vs_rate_view_span'))
             self._hist_span_slider.setSliderPosition(span)
             self._on_hist_span_changed()
         except Exception:

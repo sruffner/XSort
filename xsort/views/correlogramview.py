@@ -41,8 +41,8 @@ class CorrelogramView(BaseView):
     _PEN_WIDTH: int = 3
     """ Width of pen used to draw histograms. """
 
-    def __init__(self, data_manager: Analyzer) -> None:
-        super().__init__('Correlograms', None, data_manager)
+    def __init__(self, data_manager: Analyzer, settings: QSettings) -> None:
+        super().__init__('Correlograms', None, data_manager, settings)
         self._layout_widget = pg.GraphicsLayoutWidget()
         """ Layout widget in which the ACGs and CCGs for all neurons in the current display list are arranged. """
         self._hist_span_slider = QSlider(orientation=Qt.Orientation.Horizontal)
@@ -183,22 +183,22 @@ class CorrelogramView(BaseView):
                 if isinstance(plot_item, pg.PlotItem):
                     plot_item.getViewBox().setXRange(min=-span, max=span, padding=0.05)
 
-    def save_settings(self, settings: QSettings) -> None:
+    def save_settings(self) -> None:
         """
         Overridden to preserve view-specific settings: (1) the current histogram span, which is user selectable between
         20-200ms; and (2) whether or not the zero-correlation line is shown.
         """
-        settings.setValue('correlogram_view_span', self._hist_span_slider.sliderPosition())
-        settings.setValue('correlogram_view_show_zero', self._show_zero_cb.isChecked())
+        self.settings.setValue('correlogram_view_span', self._hist_span_slider.sliderPosition())
+        self.settings.setValue('correlogram_view_show_zero', self._show_zero_cb.isChecked())
 
-    def restore_settings(self, settings: QSettings) -> None:
+    def restore_settings(self) -> None:
         """
         Overridden to restore the current histogram span and "show zero correlation line" flag from user settings.
         """
         try:
-            shown: bool = (settings.value('correlogram_view_show_zero', defaultValue="true") == "true")
+            shown: bool = (self.settings.value('correlogram_view_show_zero', defaultValue="true") == "true")
             self._show_zero_cb.setChecked(shown)
-            span = int(settings.value('correlogram_view_span'))
+            span = int(self.settings.value('correlogram_view_span'))
             self._hist_span_slider.setSliderPosition(span)
             self._on_hist_span_changed()
         except Exception:

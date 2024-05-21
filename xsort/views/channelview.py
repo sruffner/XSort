@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple
 
 import numpy as np
-from PySide6.QtCore import Qt, Slot
+from PySide6.QtCore import Qt, Slot, QSettings
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import QSlider, QVBoxLayout, QLabel, QHBoxLayout, QFrame
 import pyqtgraph as pg
@@ -44,8 +44,8 @@ class ChannelView(BaseView):
     _MAX_TRACE_OFFSET: int = 2000
     """ Minimum vertical separation between channel trace segments, in microvolts. """
 
-    def __init__(self, data_manager: Analyzer) -> None:
-        super().__init__('Channels', None, data_manager)
+    def __init__(self, data_manager: Analyzer, settings: QSettings) -> None:
+        super().__init__('Channels', None, data_manager, settings)
 
         self._plot_widget = pg.PlotWidget()
         """ This plot widget fills the entire view (minus border) and contains all plotted channel traces. """

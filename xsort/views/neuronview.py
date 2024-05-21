@@ -1,4 +1,4 @@
-from typing import List, Any, Optional, Set
+from typing import List, Any, Optional
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings, Slot, QObject, QEvent
 from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF, QContextMenuEvent, QKeyEvent, QHelpEvent
@@ -219,34 +219,12 @@ class _NeuronTableModel(QAbstractTableModel):
         return out
 
 
-# TODO: REVISE THIS AND _NeuronTableView to get suggested unit labels from the ViewManager, which keeps them in
-#   a QSettings object.
-class _AutoCompleterDelegate(QStyledItemDelegate):
+class _UnitLabelColumnDelegate(QStyledItemDelegate):
     """ A table view delegate to handle in-place editing of a neural unit label, with auto-completion support. """
-    def __init__(self, parent: Optional[QObject]) -> None:
-        super(_AutoCompleterDelegate, self).__init__(parent)
-        self._suggestions: Set[str] = set()
-        """ The set of suggestions passed to the completer. """
-
-    @property
-    def suggestions(self) -> List[str]:
-        """ The list of auto-completion suggestions known to this delegate, in ascending order. """
-        return sorted(self._suggestions)
-
-    def add_suggestions(self, suggest: str) -> None:
-        """
-        Augment this delegate's known set of auto-completion suggestions.
-        :param suggest: A comma-separated list of suggestions (the comma is not an allowed character within a
-            valid suggestion). Leading and trailing whitespace are trimmed from each individual suggestion, and empty
-            or repeat suggestion strings are ignored.
-        """
-        if suggest.find(',') < 0:
-            self._suggestions.add(suggest)
-        else:
-            for s in suggest.split(','):
-                trimmed = s.strip()
-                if len(trimmed) > 0:
-                    self._suggestions.add(trimmed)
+    def __init__(self, table: '_NeuronTableView') -> None:
+        super(_UnitLabelColumnDelegate, self).__init__(table)
+        self.table: _NeuronTableView = table
+        """ The neuron table. Need this to access the list of suggested unit labels for autocompletion support. """
 
     def createEditor(self, parent, option, index) -> QWidget:
         """
@@ -254,7 +232,7 @@ class _AutoCompleterDelegate(QStyledItemDelegate):
         delegate's set of suggestions.
         """
         editor = QLineEdit(parent)
-        qc = QCompleter(self.suggestions, editor)
+        qc = QCompleter(self.table.suggested_unit_labels, editor)
         qc.setCompletionMode(QCompleter.CompletionMode.InlineCompletion)
         qc.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         editor.setCompleter(qc)
@@ -285,20 +263,24 @@ class _NeuronTableView(QTableView):
      - The **Label** column may not be wide enough to show a longer unit label (up to 25 chars), so the label is shown
        in a tooltip IF the label does not fit within its table cell.
     """
-    def __init__(self, data_manager: Analyzer):
+    def __init__(self, data_manager: Analyzer, settings: QSettings):
         """
         Construct and configure the neural unit table view.
         :param data_manager: The data model manager object representing the current state/contents of the current XSort
             working directory.
+        :param settings: The application settings object. Stores list of suggested unit labels, among other app-wide
+            and view-specific user preferences.
         """
         super().__init__()
         self._data_manager = data_manager
         """ A reference to the data model manager. """
+        self._settings = settings
+        """ A reference to the application settings object. """
         self._model = _NeuronTableModel(data_manager)
         """ Neuron table model (essentially wraps a table model around the data manager's neuron list). """
         self._table_context_menu = QMenu(self)
         """ Context menu for table header to hide/show selected table columns. """
-        self._label_col_delegate = _AutoCompleterDelegate(parent=self)
+        self._label_col_delegate = _UnitLabelColumnDelegate(self)
 
         self.setModel(self._model)
         self.setSortingEnabled(True)
@@ -375,22 +357,25 @@ class _NeuronTableView(QTableView):
                     a.setChecked(True)
 
     @property
-    def previous_unit_labels(self) -> str:
+    def suggested_unit_labels(self) -> List[str]:
         """
-        Comma-separated list of previously used neural unit labels, to facilitate auto-completion when a user is editing
-        a unit label in the table view. Empty string if there are no previous labels. Intended for saving any previously
-        used labels to the user's settings file.
+        A list of suggested labels for any neural unit, to facilitate auto-completion when a user is editing a unit
+        label in the table view. Empty list if there are no suggestions.
         """
-        return ','.join(self._label_col_delegate.suggestions)
+        labels = self._settings.value('suggested_unit_labels', '').split(',')
+        return sorted(labels)
 
-    @previous_unit_labels.setter
-    def previous_unit_labels(self, labels: str) -> None:
+    def add_suggested_unit_label(self, s: str) -> None:
         """
-        Set/initialize list of previously used unit labels, to facilitate auto-completion when a user is editing a unit
-        label int he table view.
-        :param labels: A comma-separated list of previously used neural unit labels.
+        Add specified string as a suggested label for a neural unit, for auto-completion while editing any unit label.
+        A valid unit label must be a non-empty string with <=25 characters, no leading or trailing whitespace, and
+        cannot contain a comma.
+        :param s: The suggested label. Ignored if invalid or duplicates a previously suggested label.
         """
-        self._label_col_delegate.add_suggestions(labels)
+        label_set = set(self.suggested_unit_labels)
+        if (len(s) > 0) and (len(s) == len(s.strip())) and Neuron.is_valid_label(s) and not (s in label_set):
+            label_set.add(s)
+            self._settings.setValue('suggested_unit_labels', ','.join(sorted(label_set)))
 
     def closeEditor(self, editor: QWidget, hint: Optional[QStyledItemDelegate.EndEditHint]) -> None:
         """
@@ -516,7 +501,7 @@ class _NeuronTableView(QTableView):
         """
         for u in self._data_manager.neurons:
             if u.uid == uid:
-                self._label_col_delegate.add_suggestions(u.label)
+                self.add_suggested_unit_label(u.label)
                 break
         self._model.on_unit_label_changed(uid)
 
@@ -536,9 +521,9 @@ class NeuronView(BaseView):
     change. Performance was dramatically improved by fixing the row height and the column widths.
     """
 
-    def __init__(self, data_manager: Analyzer) -> None:
-        super().__init__('Neurons', None, data_manager)
-        self._table_view = _NeuronTableView(data_manager)
+    def __init__(self, data_manager: Analyzer, settings: QSettings) -> None:
+        super().__init__('Neurons', None, data_manager, settings)
+        self._table_view = _NeuronTableView(data_manager, settings)
         """ Table view displaying the neuron table. """
 
         main_layout = QHBoxLayout()
@@ -567,10 +552,10 @@ class NeuronView(BaseView):
     def on_neuron_label_updated(self, uid: str) -> None:
         self._table_view.on_unit_label_changed(uid)
 
-    def save_settings(self, settings: QSettings) -> None:
-        """ Overridden to preserve which columns in the neural units table have been hidden by the user. """
-        settings.setValue('neuronview_hidden_cols', self._table_view.hidden_columns)
+    def save_settings(self) -> None:
+        """ Preserves which columns in the neural units table have been hidden by the user. """
+        self.settings.setValue('neuronview_hidden_cols', self._table_view.hidden_columns)
 
-    def restore_settings(self, settings: QSettings) -> None:
-        """ Overridden to hide select columns in the neural units table IAW user settings. """
-        self._table_view.hidden_columns = settings.value('neuronview_hidden_cols', '')
+    def restore_settings(self) -> None:
+        """ Hides select columns in the neural units table IAW user settings. """
+        self._table_view.hidden_columns = self.settings.value('neuronview_hidden_cols', '')

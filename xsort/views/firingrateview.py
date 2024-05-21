@@ -35,8 +35,8 @@ class FiringRateView(BaseView):
     _T0_MARKER_COLOR: str = '#00C000'
     """ Color of the vertical line and label marking the current channel trace segment start time. """
 
-    def __init__(self, data_manager: Analyzer) -> None:
-        super().__init__('Firing Rate', None, data_manager)
+    def __init__(self, data_manager: Analyzer, settings: QSettings) -> None:
+        super().__init__('Firing Rate', None, data_manager, settings)
 
         self._plot_widget = pg.PlotWidget()
         """ The firing rate histograms for all neurons in the current display list are rendered in this widget. """
@@ -235,18 +235,18 @@ class FiringRateView(BaseView):
                 y = y_data[idx]
         return y
 
-    def save_settings(self, settings: QSettings) -> None:
+    def save_settings(self) -> None:
         """ Overridden to preserve the firing rate histogram bin size and normalization flag. """
-        settings.setValue('firing_rate_view_bin_size', self._bin_size_combo.currentText())
-        settings.setValue('firing_rate_view_norm', self._normalized_cb.isChecked())
+        self.settings.setValue('firing_rate_view_bin_size', self._bin_size_combo.currentText())
+        self.settings.setValue('firing_rate_view_norm', self._normalized_cb.isChecked())
 
-    def restore_settings(self, settings: QSettings) -> None:
+    def restore_settings(self) -> None:
         """ Overridden to restore the histogram bin size and normalization flag from user settings. """
         try:
-            bin_size_str = settings.value('firing_rate_view_bin_size')
+            bin_size_str = self.settings.value('firing_rate_view_bin_size')
             if int(bin_size_str) in self._BIN_SIZE_CHOICES:
                 self._bin_size_combo.setCurrentText(bin_size_str)
-            normalized: bool = (settings.value('firing_rate_view_norm', defaultValue="false") == "true")
+            normalized: bool = (self.settings.value('firing_rate_view_norm', defaultValue="false") == "true")
             self._normalized_cb.setChecked(normalized)
             self._refresh()
         except Exception:
