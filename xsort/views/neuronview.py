@@ -414,7 +414,32 @@ class _NeuronTableView(QTableView):
             base class implementation.
         """
         inc = 1 if event.key() == Qt.Key.Key_Down else (-1 if event.key() == Qt.Key.Key_Up else 0)
-        if inc != 0:
+        is_ctrl = (event.modifiers() & Qt.KeyboardModifier.ControlModifier) == Qt.KeyboardModifier.ControlModifier
+        if inc != 0 and len(self._data_manager.neurons) > 0:
+            # if Ctrl key depressed, shift secondary unit up/down, leaving primary unit unchanged. If a tertiary unit
+            # was selected, it is deselected. If focus list empty, select units in first two rows.
+            if is_ctrl:
+                curr_focus = self._data_manager.neurons_with_display_focus
+                if len(curr_focus) == 0:
+                    primary_uid = self._model.row_to_unit(0)
+                    secondary_uid = self._model.row_to_unit(1)
+                elif len(curr_focus) == 1:
+                    primary_uid = curr_focus[0].uid
+                    secondary_uid = self._model.row_to_unit(self._model.unit_to_row(primary_uid) + inc)
+                else:
+                    primary_uid = curr_focus[0].uid
+                    row_1 = self._model.unit_to_row(primary_uid)
+                    row_2 = self._model.unit_to_row(curr_focus[1].uid) + inc
+                    if row_2 == row_1:
+                        row_2 = row_2 + inc
+                    secondary_uid = self._model.row_to_unit(row_2)
+                if isinstance(primary_uid, str):
+                    self._data_manager.update_neurons_with_display_focus([primary_uid, secondary_uid])
+                    row = self._model.unit_to_row(secondary_uid if isinstance(secondary_uid, str) else primary_uid)
+                    self.scrollTo(self._model.createIndex(row, 0))
+                return
+
+            # if Ctrl key not depressed, shift primary unit up/down and remove any other units from focus list.
             if self._data_manager.primary_neuron is None:
                 row = 0 if (len(self._data_manager.neurons) > 0) else -1
             else:

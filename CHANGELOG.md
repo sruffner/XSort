@@ -13,6 +13,16 @@ current working directory. This allows the user to manually delete the internal 
 - Added inline auto-completion of a neural unit label in `NeuronView`. The set of "suggestions" for auto-completion are
 all labels previously applied to a unit by the user. The set of previous labels is maintained in the user's settings
 file.
+- Implemented an internal cache removal policy: **Never** (cache removal disabled, the default); **Always** (every 
+working directory visited is marked for cache removal); or **LRU** (a working directory is marked for cache removal when
+it is evicted from the user's most recentlly visited list, and unmarked if it is put back on that list). Note that the
+working directory's edit history must be removed when the internal cache is destroyed, since derived units are only
+defined in the internal cache). Cache removal does not happen until application shutdown.
+- Added a **Preferences** dialog that exposes two user settings: the internal cache removal policy, and a set of 
+suggested unit labels.
+- The **Ctrl(Command)-Up** and **Ctrl(Command)-Down** keyboard shortcut moves the secondary focus unit (highlighted in 
+red) up and down in the unit table without changing the primary focus unit (blue highlight). The tertiary focus unit 
+(yellow highlight), if any, is removed from the focus list.
 
 ## v0.1.6 (05/13/2024)
 - Updated **About** dialog to include version number and release date.
