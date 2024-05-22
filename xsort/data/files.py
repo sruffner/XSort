@@ -1,5 +1,6 @@
 import csv
 import pickle
+import shutil
 import struct
 from pathlib import Path
 from typing import Tuple, Optional, List, Dict, Any, Union
@@ -1388,24 +1389,18 @@ class WorkingDirectory:
         except Exception:
             return False
 
-    def delete_internal_cache_files(self, analog: bool = True, noise: bool = True, units: bool = True) -> None:
+    @staticmethod
+    def delete_internal_cache(p: Path) -> None:
         """
-        Remove all or some of the files in this XSort working directory's internal cache folder.
-
-        :param analog: If True, analog data channel cache files are removed. Default = True.
-        :param noise: If True, the analog channel noise cache file is removed. Default = True.
-        :param units: If True, neural unit metrics cache files are removed. Default = True.
+        Delete the internal cache files and edit history for a specified working directory. Silent on failure.
+        :param p: File system path of working directory.
         """
-        if (not self.is_valid) or (not self.cache_path.is_dir()) or not (analog or noise or units):
+        if not p.is_dir():
             return
-        if noise:
-            Path(self.cache_path, NOISE_CACHE_FILE).unlink(missing_ok=True)
-        for p in self.cache_path.iterdir():
-            if ((analog and p.name.startswith(CHANNEL_CACHE_FILE_PREFIX)) or
-                    (units and p.name.startswith(UNIT_CACHE_FILE_PREFIX))):
-                p.unlink(missing_ok=True)
-        if analog and noise and units:
-            self.cache_path.rmdir()
+        cache_dir = Path(p, INTERNAL_CACHE_DIR)
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            Path(p, EDIT_HISTORY_FILE).unlink(missing_ok=True)
 
     def save_edit_history(self) -> None:
         """ Save this working directory's current edit history to a dedicated cache file within the directory. """

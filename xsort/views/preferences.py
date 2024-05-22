@@ -24,15 +24,12 @@ class PreferencesDlg(QDialog):
         self.setWindowTitle('XSort Settings')
 
         self._del_cache_never = QRadioButton("Never")
-        self._del_cache_never.setToolTip("Never delete any internal cache files")
         self._del_cache_lru = QRadioButton("LRU")
-        self._del_cache_lru.setToolTip("Delete a working directory's internal cache when it is removed from the most "
-                                       "recently used list")
+        self._del_cache_lru.setToolTip("Delete a working directory's internal cache and edit history when it is "
+                                       "removed from the most recently used list")
         self._del_cache_always = QRadioButton("Always")
-        self._del_cache_always.setToolTip("Always delete a working directory's internal cache at application exit or "
-                                          "after switching to a different directory")
 
-        del_cache_grp = QGroupBox("Internal cache removal policy (choose one)")
+        del_cache_grp = QGroupBox("Internal cache and edit history removal policy")
         grp_layout = QGridLayout()
         grp_layout.addWidget(self._del_cache_never, 0, 0)
         grp_layout.addWidget(self._del_cache_lru, 1, 0)
@@ -103,14 +100,13 @@ class PreferencesDlg(QDialog):
         self._labels_list.addItems(labels)
         self._label_edit.clear()
 
-        policy = self._settings.value('del_cache_policy', None)
-        if isinstance(policy, str):
-            if policy == "Always":
-                self._del_cache_always.setChecked(True)
-            elif policy == "LRU":
-                self._del_cache_lru.setChecked(True)
-            else:
-                self._del_cache_never.setChecked(True)
+        policy = self._settings.value('del_cache_policy', 'Never')
+        if policy == "Always":
+            self._del_cache_always.setChecked(True)
+        elif policy == "LRU":
+            self._del_cache_lru.setChecked(True)
+        else:  # the default is "Never"
+            self._del_cache_never.setChecked(True)
 
     @Slot()
     def _on_label_item_selected(self) -> None:
@@ -156,15 +152,15 @@ class PreferencesDlg(QDialog):
         for row in range(self._labels_list.count()):
             unit_labels.add(self._labels_list.item(row).text())
 
-        policy = None
         if self._del_cache_never.isChecked():
             policy = "Never"
         elif self._del_cache_lru.isChecked():
             policy = "LRU"
         elif self._del_cache_always.isChecked():
             policy = "Always"
+        else:  # should never happen, as "Never" is checked by default if policy has not been set.
+            policy = "Never"
 
-        # TODO: Testing
         self._settings.setValue('suggested_unit_labels', ','.join(sorted(unit_labels)))
         if policy is not None:
             self._settings.setValue('del_cache_policy', policy)

@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QMainWindow, QMessageBox, QFileDialog, QMenu, QDoc
 import xsort.assets as xsort_assets
 from xsort.data.analyzer import Analyzer, DataType
 from xsort.constants import APP_NAME
+from xsort.data.files import WorkingDirectory
 from xsort.views.acgrateview import ACGRateView
 from xsort.views.baseview import BaseView
 from xsort.views.channelview import ChannelView
@@ -114,6 +115,11 @@ class ViewManager(QObject):
         """
         self._mru_dirs: List[Path] = list()
         """ List of most recently visited working directories, most recent first. """
+        self._discard_cache_set: Set[Path] = set()
+        """ 
+        Set of previously visited working directories for which the internal cache should be removed upon application
+        exit. If the internal cache removal policy is 'Never', this set is empty. 
+        """
         self._about_dlg = self._create_about_dialog()
         """ The application's 'About' dialog. """
         self._prefs_dlg: Optional[PreferencesDlg] = None
@@ -497,14 +503,14 @@ class ViewManager(QObject):
             self.select_working_directory(starting_up=False, open_recent=idx)
 
     def _add_to_most_recently_visited(self, p: Path) -> None:
-        if p.is_dir():
-            if p in self._mru_dirs:
-                self._mru_dirs.remove(p)
-            elif len(self._mru_dirs) == self._MRU_DIR_MAX_SIZE:
-                self._mru_dirs.pop()
-            self._mru_dirs.insert(0, p)
-
-        # clear out entry from the MRU list that no longer exists
+        """
+        Add specified working directory path to the most recently visited list, evicting the oldest entry if the MRU
+        list is full. The internal cache removal policy is also implemented here: If the policy is "Always", the
+        specified path is marked for cache removal. If it is "LRU", the specified path is unmarked for removal (it is
+        now the most recently used!), and an evicted LRU working directory is marked for removal.
+        :param p: Working directory path to be pushed on top of the most recently visited list.
+        """
+        # first, clear out any entry from the MRU list that no longer exists
         i = 0
         while i < len(self._mru_dirs):
             if not self._mru_dirs[i].is_dir():
@@ -512,6 +518,18 @@ class ViewManager(QObject):
             else:
                 i = i + 1
 
+        if p.is_dir():
+            if p in self._mru_dirs:
+                self._mru_dirs.remove(p)
+            elif len(self._mru_dirs) == self._MRU_DIR_MAX_SIZE:
+                lru_work_dir = self._mru_dirs.pop()
+                if self._cache_removal_policy == 'LRU':
+                    self._update_discard_cache_set(lru_work_dir, None)
+            self._mru_dirs.insert(0, p)
+            if self._cache_removal_policy == 'Always':
+                self._update_discard_cache_set(p, None)
+            elif self._cache_removal_policy == 'LRU':
+                self._update_discard_cache_set(None, p)
         self._refresh_open_recent_menu()
 
     def _refresh_open_recent_menu(self) -> None:
@@ -526,12 +544,14 @@ class ViewManager(QObject):
 
     def quit(self) -> None:
         """
-        Handler for the Exit/Quit menu command. Unless user vetoes the operation, the current GUI layout and all other
-        application settings are saved to the user preferences and exit() is called on the main application object.
+        Handler for the Exit/Quit menu command. Unless user vetoes the operation, performs some cleanup/shutdown work,
+        saves the current GUI layout and all other application settings to the user's preferences filee, and calls
+        exit() on the main application object.
         """
         res = QMessageBox.question(self._main_window, "Exit", "Are you sure you want to quit?")
         if res == QMessageBox.StandardButton.Yes:
             self.data_analyzer.prepare_for_shutdown()
+            self._delete_internal_caches_if_necessary()
             self._save_settings_and_exit()
 
     def _save(self) -> None:
@@ -549,9 +569,20 @@ class ViewManager(QObject):
         self._about_dlg.exec()
 
     def _edit_preferences(self) -> None:
+        """
+        Handler for the 'Preferences...' menu command. It raises the modal Preferences dialog.
+        :return:
+        """
         if self._prefs_dlg is None:
             self._prefs_dlg = PreferencesDlg(self._settings, self._main_window)
         self._prefs_dlg.exec()
+
+        # user can change the cache removal policy here. Update discard cache set accordingly.
+        if self._cache_removal_policy == 'Never':
+            self._discard_cache_set.clear()
+        elif self._cache_removal_policy == 'Always':
+            for p in self._mru_dirs:
+                self._discard_cache_set.add(p)
 
     def _undo(self) -> None:
         """ Handler for the 'Edit|Undo' menu command. It undos the last change to the current neural unit list. """
@@ -678,3 +709,34 @@ class ViewManager(QObject):
             if (len(path_str) > 0) and p.is_dir():
                 self._mru_dirs.append(p)
         self._refresh_open_recent_menu()
+
+    @property
+    def _cache_removal_policy(self) -> str:
+        """
+        The current internal cache removal policy, a user setting:
+         - "Never": Internal cache files are never deleted (the default).
+         - "Always": Internal caches are deleted at application exit for all working directories visited.
+         - "LRU": Internal caches are deleted at app exit for all working directories booted from the most recently
+           visited list.
+        """
+        return self._settings.value('del_cache_policy', 'Never')
+
+    def _update_discard_cache_set(self, mark_dir: Optional[Path], unmark_dir: Optional[Path]) -> None:
+        """
+        Update the set of working directories marked for cache removal at application exit, IAW the current cache
+        removal policy. If the policy is 'Never', no action is taken.
+        :param mark_dir: The path of a working directory to be marked for cache removal, or None.
+        :param unmark_dir: The path of a working directory to be unmarked for cache removal, or None.
+        """
+        if self._cache_removal_policy != 'Never':
+            if isinstance(mark_dir, Path):
+                self._discard_cache_set.add(mark_dir)
+            if unmark_dir in self._discard_cache_set:
+                self._discard_cache_set.remove(unmark_dir)
+
+    def _delete_internal_caches_if_necessary(self) -> None:
+        """ Delete the internal cache for any working directories IAW the user's current cache removal policy. """
+        if self._cache_removal_policy != 'Never':
+            for dir_path in self._discard_cache_set:
+                WorkingDirectory.delete_internal_cache(dir_path)
+            self._discard_cache_set.clear()

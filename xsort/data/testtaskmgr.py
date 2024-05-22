@@ -222,7 +222,7 @@ class MainWindow(QMainWindow):
     @Slot(bool)
     def _on_clear_cache(self, _: bool) -> None:
         if (not self.task_manager.busy) and isinstance(self.work_dir, WorkingDirectory) and self.work_dir.is_valid:
-            self.work_dir.delete_internal_cache_files()
+            WorkingDirectory.delete_internal_cache(self.work_dir.path)
             self.progress_edit.append("Removed all internal cache files from the current working directory.")
 
     @Slot(bool)
