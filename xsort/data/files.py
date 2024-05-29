@@ -3,7 +3,7 @@ import pickle
 import shutil
 import struct
 from pathlib import Path
-from typing import Tuple, Optional, List, Dict, Any, Union
+from typing import Tuple, Optional, List, Dict, Any, Union, Set
 
 import numpy as np
 from PySide6.QtGui import QIntValidator, QDoubleValidator, QFont
@@ -38,9 +38,9 @@ class UserEdit:
     """
     A simple container encapsulating an individual user-initiated change to the list of neural units defined in the
     original spike sorter results file in the XSort working directory. The following edit operations are supported:
-     - Label a neural unit (typically to specify the putative neuron type).
-     - Delete a neural unit. Often an "uncurated" spike sorter results file contains many "garbage" units, and the
-       user's first task in XSort is to simply delete all such units.
+     - Assign a label to one or more neural units (typically to specify the putative neuron type).
+     - Delete one or more neural units. Often an "uncurated" spike sorter results file contains many "garbage" units,
+       and the user's first task in XSort is to simply delete all such units.
      - Create a new unit by merging two selected units.
      - Split an existing unit. This is done by specifying a subset of the existing unit's spikes to assign to one unit,
        while the remaining are assigned to another. In practice, this is done on the XSort UI by "lassoing" a population
@@ -50,53 +50,148 @@ class UserEdit:
     which the edits were applied.
     """
     LABEL: str = 'LABEL'
-    """ Edit a unit label: 'LABEL,unit_uid,old_label,new_label'."""
+    """ Change the optional label for one or more neural units."""
     DELETE: str = 'DELETE'
-    """ Delete a unit: 'DELETE,unit_uid'. """
+    """ Delete one or more neural units. """
     MERGE: str = 'MERGE'
-    """ Merge two selected units into one: 'MERGE,uid1,uid2,uid_merged'. """
+    """ Merge two neural units into one. """
     SPLIT: str = 'SPLIT'
-    """ Split a unit into two units: 'SPLIT,uid_before,uid_split1,uid_split2'. """
-    _EDIT_OPS = {LABEL: 'Change unit label', DELETE: 'Delete unit', MERGE: 'Merge units', SPLIT: 'Split unit'}
+    """ Split a neural unit into two distinct units. """
+    _EDIT_OPS = {LABEL: 'Re-label unit(s)', DELETE: 'Delete unit(s)', MERGE: 'Merge units', SPLIT: 'Split unit'}
     """ All recognized edit operations. """
 
-    def __init__(self, op: str, params: List[str]):
+    @classmethod
+    def create_unit_relabel(cls, uid_to_old_label: Dict[str, str], label_new: str) -> 'UserEdit':
         """
-        Construct an edit record. The parameter list depend on the edit operation, as follows:
-         - op = 'LABEL': params=[<UID of affected neural unit>, <previous label>, <new label>].
-         - op = 'DELETE': params=[<UID of deleted neural unit>].
-         - op = 'MERGE': params=[uid1, uid2, uid_merged].
-         - op = 'SPLIT': params=[uid_split, uid1, uid2].
+        Create an edit record that represents a re-labeling of one or more neural units.
 
-        :param op: The edit operation.
-        :param params: The operation parameter list, as described above. All parameter values are strings.
-        :raises IndexError: If the parameter list is not long enough (extra parameter values are ignored).
-        :raises TypeError: If any parameter value is not a string.
-        :raises ValueError: If any parameter value contains a comma. Edit operations are stored in the edit history
-            file as a comma-separated list of strings.
+        :param uid_to_old_label: Dictionary maps the UID of each relabelled unit to the label previously assigned to
+            that unit.
+        :param label_new: The new label applied to all specified units.
+        :return: The user edit record.
         """
-        if not (op in UserEdit._EDIT_OPS):
-            raise ValueError(f"Unrecognized edit op: {op}")
-        self._op = op
+        if len(uid_to_old_label) == 0:
+            raise ValueError('Invalid argument')
+        ue = UserEdit()
+        ue._op = UserEdit.LABEL
+        ue._affected_uids = uid_to_old_label.copy()
+        ue._label = label_new
+        return ue
+
+    @classmethod
+    def create_unit_delete(cls, deleted_uids: Union[str, Set[str]]) -> 'UserEdit':
+        """
+        Create an edit record representing the deletion of one or more neural units.
+        :param deleted_uids: UID(s) of the unit(s) deleted.
+        :return: The user edit record.
+        """
+        ue = UserEdit()
+        if isinstance(deleted_uids, str):
+            ue._op = UserEdit.DELETE
+            ue._affected_uids[deleted_uids] = ''
+        elif isinstance(deleted_uids, set) and len(deleted_uids) > 0:
+            ue._op = UserEdit.DELETE
+            for uid in deleted_uids:
+                ue._affected_uids[uid] = ''
+        else:
+            raise ValueError('Invalid argument')
+        return ue
+
+    @classmethod
+    def create_merge(cls, uid1: str, uid2: str, merged_uid: str) -> 'UserEdit':
+        """
+        Create an edit record representing the merger of two distinct neural units.
+        :param uid1: UID of one unit.
+        :param uid2: UID of a second unit.
+        :param merged_uid: UID of the resulting merged unit.
+        :return: The user edit record.
+        """
+        if len({uid1, uid2, merged_uid}) != 3:
+            raise ValueError('Invalid argurment')
+        ue = UserEdit()
+        ue._op = UserEdit.MERGE
+        ue._affected_uids[uid1] = ''
+        ue._affected_uids[uid2] = ''
+        ue._result_uids.add(merged_uid)
+        return ue
+
+    @classmethod
+    def create_split(cls, split_uid: str, uid1: str, uid2: str) -> 'UserEdit':
+        """
+        Create an edit record representing the split of a neural unit into two distinct units.
+        :param split_uid: UID of the unit split.
+        :param uid1: UID of one of the units resulting from the split.
+        :param uid2: UID of the other unit resulting from the split.
+        :return: The user edit record.
+        """
+        if len({split_uid, uid1, uid2}) != 3:
+            raise ValueError('Invalid argurment')
+        ue = UserEdit()
+        ue._op = UserEdit.SPLIT
+        ue._affected_uids[split_uid] = ''
+        ue._result_uids.update({uid1, uid2})
+        return ue
+
+    def __init__(self):
+        """
+        Construct an edit record. For private use only. Use the appropriate class-level factory method instead.
+        """
+        self._op: str = ''
         """ The edit operation type. """
-        self._params: List[str] = list()
+        self._affected_uids: Dict[str, str] = dict()
         """ 
-        The operation parameters.
+        A dictionary in which the keys are the UIDs of the neural units affected by the edit operation. For a re-label 
+        operation, each value is the previous label assigned to the corresponding unit. For any other operation, the 
+        dictionary values are ignored. Will contain a single unit UID for a split operation, 2 for a merge, and 1+ for a
+        delete or re-label operation.
         """
-        n_params = 1 if (op == UserEdit.DELETE) else 3
-        for i in range(n_params):
-            if not isinstance(params[i], str):
-                raise TypeError('Expected string-valued parameter')
-            elif params[i].find(',') > -1:
-                raise ValueError('Parameter values may not contain a comma')
-            self._params.append(params[i])
-
-    def __str__(self):
-        return ','.join((self._op, *self._params))
+        self._result_uids: Set[str] = set()
+        """ 
+        The units created by a merge (1 new unit) or split (2 new units) operation. Will be an empty set for any
+        other edit operation.
+        """
+        self._label: str = ''
+        """ The new label assigned for a re-label operation; else ignored. """
 
     def __eq__(self, other: 'UserEdit'):
-        return isinstance(other, UserEdit) and (self._op == other._op) and (len(self._params) == len(other._params)) \
-            and all([self._params[i] == other._params[i] for i in range(len(self._params))])
+        return (isinstance(other, UserEdit) and (self._op == other._op) and
+                (self._affected_uids == other._affected_uids) and (self._result_uids == other._result_uids) and
+                (self._label == other._label))
+
+    def _to_token_list(self) -> List[str]:
+        """ Prepare the list of string tokens defining this operation when persisted to the edit history text file. """
+        tokens: List[str] = [self._op]
+        if self._op == UserEdit.LABEL:
+            tokens.append(self._label)
+            for k, v in self._affected_uids.items():
+                tokens.extend([k, v])
+        else:
+            tokens.extend([k for k in self._affected_uids.keys()])
+            tokens.extend(list(self._result_uids))
+        return tokens
+
+    @staticmethod
+    def _from_token_list(tokens: List[str]) -> Optional['UserEdit']:
+        """
+        Reconstruct an edit operation from a sequence of string tokens read from the edit history text file.
+        :param tokens: The list of string tokens defining an edit operation
+        :return: The edit record defining the operation, or None if token list is invalid.
+        """
+        ue: Optional[UserEdit] = None
+        op = tokens[0]
+        n_tokens = len(tokens)
+        if (op == UserEdit.LABEL) and (n_tokens >= 4) and (n_tokens % 2 == 0):
+            uid_2_label: Dict[str, str] = dict()
+            for i in range(2, n_tokens, 2):
+                uid_2_label[tokens[i]] = tokens[i+1]
+            ue = UserEdit.create_unit_relabel(uid_2_label, tokens[1])
+        elif (op == UserEdit.DELETE) and (n_tokens > 1):
+            ue = UserEdit.create_unit_delete({token for token in tokens[1:]})
+        elif (op == UserEdit.MERGE) and (n_tokens == 4):
+            ue = UserEdit.create_merge(tokens[1], tokens[2], tokens[3])
+        elif (op == UserEdit.SPLIT) and (n_tokens == 4):
+            ue = UserEdit.create_split(tokens[1], tokens[2], tokens[3])
+        return ue
 
     @property
     def operation(self) -> str:
@@ -112,43 +207,57 @@ class UserEdit:
     def longer_description(self) -> str:
         """ A longer description of the edit record that includes the UIDs of the affected/created units. """
         if self._op == UserEdit.LABEL:
-            desc = f"Changed unit {self.affected_uids} label: '{self.previous_unit_label}' --> '{self.unit_label}'"
+            uids = self.uids_affected
+            if len(uids) == 1:
+                desc = f"Changed unit {uids[0]} label: '{self.old_unit_label(uids[0])}' --> '{self.unit_label}'"
+            else:
+                desc = f"Changed label on {len(uids)} units to '{self.unit_label}"
         elif self._op == UserEdit.DELETE:
-            desc = f"Deleted unit '{self.affected_uids}'"
+            uids = sorted(self.uids_affected)
+            if len(uids) == 1:
+                desc = f"Deleted unit '{uids[0]}'"
+            else:
+                desc = "Deleted units: " + ', '.join(uids[0:3]) + ("..." if len(uids) > 3 else "")
         elif self._op == UserEdit.MERGE:
-            desc = f"Merged units {self.affected_uids} into unit '{self.result_uids}'"
+            desc = f"Merged units {self.uids_affected} into unit '{self.uids_created[0]}'"
         else:   # SPLIT
-            desc = f"Split unit '{self.affected_uids}' into units {self.result_uids}"
+            desc = f"Split unit '{self.uids_affected[0]}' into units {self.uids_created}"
         return desc
 
     @property
-    def affected_uids(self) -> Union[str, Tuple[str, str]]:
+    def uids_affected(self) -> Tuple[str, ...]:
         """
-        The UID of the unit that is re-labeled, deleted, or split. For a "merge", a 2-tuple containing the UIDs of
-        the two merged units.
+        The UID(s) of the unit(s) re-labeled, deleted, or merged, or the UID of the unit that was split.
         """
-        return (self._params[0], self._params[1]) if self._op == UserEdit.MERGE else self._params[0]
+        return tuple(self._affected_uids.keys())
 
     @property
-    def result_uids(self) -> Union[None, str, Tuple[str, str]]:
-        """ The UID of the new merged unit, or the UIDs of the two units resulting from a split. Else None. """
-        if self._op == UserEdit.MERGE:
-            return self._params[2]
-        elif self._op == UserEdit.SPLIT:
-            return self._params[1], self._params[2]
-        else:
-            return None
+    def uids_created(self) -> Tuple[str, ...]:
+        """ 
+        The UID of the unit created from a merge, or the UIDs of the two units created from a split. Else empty.
+        """
+        return tuple(self._result_uids)
 
-    @property
-    def previous_unit_label(self) -> Optional[str]:
-        """ For the "label" op only, the old label assigned to the unit; else None. """
-        return self._params[1] if self._op == UserEdit.LABEL else None
+    def old_unit_label(self, uid: str) -> Optional[str]:
+        """
+        For a re-label operation, get the previous label assigned to the specified unit.
+        :param uid: UID of the re-labeled unit.
+        :return: That unit's previous label. Returns None if this is not a re-label operation or UID is invalid.
+        """
+        old_label: Optional[str] = None
+        try:
+            if self._op == UserEdit.LABEL:
+                old_label = self._affected_uids[uid]
+        except KeyError:
+            pass
+        return old_label
 
     @property
     def unit_label(self) -> Optional[str]:
-        """ For the "label" op only, the new label assigned to the unit; else None. """
-        return self._params[2] if self._op == UserEdit.LABEL else None
+        """ For a re-label operation, the new label assigned to the unit(s); else None. """
+        return self._label if self._op == UserEdit.LABEL else None
 
+    # TODO: CONTINUE REVISIONS HERE...
     @staticmethod
     def save_edit_history(working_dir: Path, history: List['UserEdit']) -> Tuple[bool, str]:
         """
@@ -172,7 +281,7 @@ class UserEdit:
             with open(p, 'w', newline='') as f:
                 writer = csv.writer(f)
                 for ue in history:
-                    writer.writerow((ue._op, *ue._params))
+                    writer.writerow(ue._to_token_list())
         except Exception as e:
             msg = f"Failed to save edit history: {str(e)}"
             return False, msg
@@ -201,9 +310,13 @@ class UserEdit:
             history: List[UserEdit] = list()
             with open(p, 'r', newline='') as f:
                 reader = csv.reader(f)
+                line_no = 0
                 for line in reader:
-                    ue = UserEdit(line[0], [line[i] for i in range(1, len(line))])
+                    ue = UserEdit._from_token_list(line)
+                    if ue is None:
+                        raise Exception(f"Unable to parse edit record tokens on line {line_no + 1}")
                     history.append(ue)
+                    line_no += 1
             return "", history
         except Exception as e:
             msg = f"Failed to load edit history: {str(e)}"
@@ -1007,48 +1120,52 @@ class WorkingDirectory:
     def _apply_edit_history_to(self, units: List[Neuron]) -> None:
         for edit_rec in self._edit_history:
             if edit_rec.operation == UserEdit.LABEL:
+                relabeled_uids = list(edit_rec.uids_affected)
                 for u in units:
-                    if (u.uid == edit_rec.affected_uids) and (u.label == edit_rec.previous_unit_label):
+                    if (u.uid in relabeled_uids) and (u.label == edit_rec.old_unit_label(u.uid)):
                         try:
                             u.label = edit_rec.unit_label
                         except ValueError:
                             pass
-                        break
+                        relabeled_uids.remove(u.uid)
+                        if len(relabeled_uids) == 0:
+                            break
             elif edit_rec.operation == UserEdit.DELETE:
-                found_idx = -1
-                for i in range(len(units)):
-                    if units[i].uid == edit_rec.affected_uids:
-                        found_idx = i
-                        break
-                if found_idx > -1:
-                    units.pop(found_idx)
+                deleted_uids = list(edit_rec.uids_affected)
+                i = 0
+                while (i < len(units)) and (len(deleted_uids) > 0):
+                    if units[i].uid in deleted_uids:
+                        deleted_uids.remove(units[i].uid)
+                        units.pop(i)
+                    else:
+                        i = i + 1
             elif edit_rec.operation == UserEdit.MERGE:
                 components: List[Neuron] = list()
                 for u in units:
-                    if u.uid in edit_rec.affected_uids:
+                    if u.uid in edit_rec.uids_affected:
                         components.append(u)
-                if len(components) == 2:
+                if (len(components) == 2) and (len(edit_rec.uids_created) == 1):
                     for u in components:
                         units.remove(u)
-                    new_uid = edit_rec.result_uids
+                    new_uid = edit_rec.uids_created[0]
                     new_idx = int(new_uid[0:-1])  # remove the 'x' suffix to get the unit index
                     merged_unit = Neuron.merge(components[0], components[1], idx=new_idx)
                     units.append(merged_unit)
-            else:  # SPLIT: remove unit was split and append the two unit resulting from that split.
+            else:  # SPLIT: remove unit that was split and append the two units resulting from that split.
                 found_idx = -1
                 for i in range(len(units)):
-                    if units[i].uid == edit_rec.affected_uids:
+                    if units[i].uid == edit_rec.uids_affected[0]:
                         found_idx = i
                         break
                 if found_idx > -1:
-                    units.pop(found_idx)
                     # the units resulting from the split must have corresponding cache files in the working directory
                     result_units: List[Neuron] = list()
-                    for uid in edit_rec.result_uids:
+                    for uid in edit_rec.uids_created:
                         u = self.load_neural_unit_from_cache(uid)
                         if isinstance(u, Neuron):
                             result_units.append(u)
                     if len(result_units) == 2:
+                        units.pop(found_idx)
                         units.extend(result_units)
 
     def load_select_neural_units(self, uids: List[str]) -> Tuple[str, Optional[List[Neuron]]]:
@@ -1438,20 +1555,20 @@ class WorkingDirectory:
 
     def on_unit_relabeled(self, uid: str, prev_label: str, curr_label: str) -> None:
         """
-        Update the working directory's edit history when a neural unit is re-labeled.
+        Update the working directory's edit history when a single neural unit is re-labeled.
         :param uid: UID of affected unit
         :param prev_label: The old label.
         :param curr_label: The new label.
         """
-        edit_rec = UserEdit(op=UserEdit.LABEL, params=[uid, prev_label, curr_label])
+        edit_rec = UserEdit.create_unit_relabel({uid: prev_label}, curr_label)
         self._edit_history.append(edit_rec)
 
     def on_unit_deleted(self, uid: str) -> None:
         """
-        Update the working directory's edit history when a neural unit is deleted.
+        Update the working directory's edit history when a single neural unit is deleted.
         :param uid: UID of deleted unit
         """
-        edit_rec = UserEdit(op=UserEdit.DELETE, params=[uid])
+        edit_rec = UserEdit.create_unit_delete(uid)
         self._edit_history.append(edit_rec)
 
     def on_units_merged(self, uid1: str, uid2: str, merged_uid: str) -> None:
@@ -1461,7 +1578,7 @@ class WorkingDirectory:
         :param uid2: UID of the other unit merged.
         :param merged_uid: UID assigned to the unit resulting from the merge.
         """
-        edit_rec = UserEdit(op=UserEdit.MERGE, params=[uid1, uid2, merged_uid])
+        edit_rec = UserEdit.create_merge(uid1, uid2, merged_uid)
         self._edit_history.append(edit_rec)
 
     def on_unit_split(self, split_uid: str, uid1: str, uid2: str) -> None:
@@ -1471,7 +1588,7 @@ class WorkingDirectory:
         :param uid1: UID of one unit derived from the split.
         :param uid2: UID of the other unit derived from the split.
         """
-        edit_rec = UserEdit(op=UserEdit.SPLIT, params=[split_uid, uid1, uid2])
+        edit_rec = UserEdit.create_split(split_uid, uid1, uid2)
         self._edit_history.append(edit_rec)
 
     def find_next_assignable_unit_index(self) -> int:
@@ -1487,11 +1604,11 @@ class WorkingDirectory:
         edit_indices: List[int] = list()
         for edit_rec in self._edit_history:
             if edit_rec.operation == UserEdit.DELETE:
-                edit_indices.append(Neuron.dissect_uid(edit_rec.affected_uids)[0])
-            elif edit_rec.operation == UserEdit.MERGE:
-                edit_indices.append(Neuron.dissect_uid(edit_rec.result_uids)[0])
-            elif edit_rec.operation == UserEdit.SPLIT:
-                edit_indices.append(Neuron.dissect_uid(edit_rec.result_uids[0])[0])
+                for uid in edit_rec.uids_affected:
+                    edit_indices.append(Neuron.dissect_uid(uid)[0])
+            elif edit_rec.operation in [UserEdit.MERGE, UserEdit.SPLIT]:
+                for uid in edit_rec.uids_created:
+                    edit_indices.append(Neuron.dissect_uid(uid)[0])
         if len(edit_indices) > 0:
             max_idx = max(max_idx, max([i for i in edit_indices]))
 

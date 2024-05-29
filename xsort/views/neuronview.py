@@ -1,4 +1,4 @@
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Set
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings, Slot, QObject, QEvent
 from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF, QContextMenuEvent, QKeyEvent, QHelpEvent
@@ -45,13 +45,66 @@ class _NeuronTableModel(QAbstractTableModel):
         """ True if rows are sorted in descending order, else ascending order. """
         self._sorted_indices: List[int] = [i for i in range(len(data_manager.neurons))]
         """ Maps table row index to index of corresponding neuron IAW the current sort column and sort order. """
+        self._selected_uids: Set[str] = set()
+        """ 
+        Set of UIDs identifying units selected by user - NOT necessarily part of display/focus list, but to
+        mediate a multi-unit delete or relabel operation. 
+        """
         self.reload_table_data()
 
     def hideable_columns(self) -> List[int]:
         """ The column indices of all columns that can be optionally hidden hidden. """
         return [i for i in range(1, len(self._header_labels))]
 
-    def reload_table_data(self):
+    def toggle_select_row(self, row: int) -> None:
+        """
+        Toggle the current selection state of the specified table row.
+        :param row: The row index.
+        """
+        uid = self.row_to_unit(row)
+        if uid is None:
+            return
+        if uid in self._selected_uids:
+            self._selected_uids.remove(uid)
+        else:
+            self._selected_uids.add(uid)
+        top_left = self.createIndex(row, 0)
+        bot_right = self.createIndex(row, self.LABEL_COL_IDX)
+        self.dataChanged.emit(top_left, bot_right, Qt.ItemDataRole.BackgroundRole)
+
+    def select_contiguous_range(self, end_row: int) -> None:
+        """
+        Select a contiguous range of rows in the table from the current **singly-selected** row to the row specified.
+        If the number of rows currently selected is not exactly one, no action is taken.
+        :param end_row: The row at which to end the continuous-range selection. No action taken if invalid.
+        """
+        end_row_uid = self.row_to_unit(end_row)
+        if (end_row_uid is not None) and (len(self._selected_uids) == 1) and not (end_row_uid in self._selected_uids):
+            start_row = self.unit_to_row(next(iter(self._selected_uids)))
+            inc = 1 if start_row < end_row else -1
+            r = start_row + inc
+            while True:
+                uid = self.row_to_unit(r)
+                if uid is not None:
+                    self._selected_uids.add(uid)
+                if r == end_row:
+                    break
+                r = r + inc
+            top_left = self.createIndex(min(start_row, end_row), 0)
+            bot_right = self.createIndex(max(start_row, end_row), self.LABEL_COL_IDX)
+            self.dataChanged.emit(top_left, bot_right, Qt.ItemDataRole.BackgroundRole)
+
+    def clear_current_selection(self) -> None:
+        """ Clear the set of currently selected table rows, if any. """
+        if len(self._selected_uids) > 0:
+            self._selected_uids.clear()
+            top_left = self.createIndex(0, 0)
+            bot_right = self.createIndex(self.rowCount() - 1, self.columnCount() - 1)
+            self.dataChanged.emit(top_left, bot_right, Qt.ItemDataRole.BackgroundRole)
+
+    def reload_table_data(self, clear_selection: bool = False):
+        if clear_selection:
+            self._selected_uids.clear()
         self._resort()
         self.layoutChanged.emit()
 
@@ -101,6 +154,10 @@ class _NeuronTableModel(QAbstractTableModel):
                 u = self._data_manager.neurons[idx].uid
                 color_str = self._data_manager.display_color_for_neuron(u)
                 bkg_color = None if color_str is None else QColor.fromString(color_str)
+                # when unit is "selected", the background for the UID cell is light gray if the unit is also one of
+                # the focus units. If not, the entire row is light gray
+                if (u in self._selected_uids) and ((bkg_color is None) or (c == 0)):
+                    bkg_color = QColor(Qt.GlobalColor.lightGray)
                 if role == Qt.BackgroundRole:
                     return bkg_color
                 else:
@@ -396,13 +453,29 @@ class _NeuronTableView(QTableView):
     def contextMenuEvent(self, event: QContextMenuEvent):
         """
         Overridden to repurpose the context menu event (right-click) to trigger an in-place edit of the label of any
-        neural unit.
+        neural unit or to toggle the selection state of a unit.
+
+        An in-place label edit is initiated if the right-click is over a table cell containing a unit label. Otherwise,
+        the set of table rows selected is updated as follows:
+         - Ctrl/Command key down: Clear the selection.
+         - Shift key down: If a single row is currently selected, extend the selection to the row under the mouse
+           (contiguous range selection).
+         - No modifier key: Toggle the selection state of the row under the mouse.
+
         :param event: The event object -- used to obtain the index of the table cell under the mouse.
         """
         index = self.indexAt(event.pos())
-        if index.column() == _NeuronTableModel.LABEL_COL_IDX:
+        is_ctrl = (event.modifiers() & Qt.KeyboardModifier.ControlModifier) == Qt.KeyboardModifier.ControlModifier
+        is_shift = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) == Qt.KeyboardModifier.ShiftModifier
+        if (index.column() == _NeuronTableModel.LABEL_COL_IDX) and not (is_ctrl or is_shift):
             self.setCurrentIndex(index)
             self.edit(index)
+        elif is_ctrl:
+            self._model.clear_current_selection()
+        elif is_shift:
+            self._model.select_contiguous_range(index.row())
+        else:
+            self._model.toggle_select_row(index.row())
 
     def keyReleaseEvent(self, event: QKeyEvent):
         """
@@ -530,6 +603,15 @@ class _NeuronTableView(QTableView):
                 break
         self._model.on_unit_label_changed(uid)
 
+    def reload(self, clear_selection: bool = False) -> None:
+        """
+        Reload neural unit table to reflect a change in the current display/focus list, or a wholesale change in
+        content because the working directory has changed.
+        :param clear_selection: If True, clear the current selection state. Default is False. Always set this flag if
+             the working directory has just changed.
+        """
+        self._model.reload_table_data(clear_selection)
+
 
 class NeuronView(BaseView):
     """
@@ -566,13 +648,13 @@ class NeuronView(BaseView):
         return self._table_view.model().find_uid_of_neighboring_unit(uid)
 
     def on_working_directory_changed(self) -> None:
-        self._table_view.model().reload_table_data()
+        self._table_view.reload(clear_selection=True)
 
     def on_neuron_metrics_updated(self, uid: str) -> None:
-        self._table_view.model().reload_table_data()
+        self._table_view.reload()
 
     def on_focus_neurons_changed(self, _: bool) -> None:
-        self._table_view.model().reload_table_data()
+        self._table_view.reload()
 
     def on_neuron_label_updated(self, uid: str) -> None:
         self._table_view.on_unit_label_changed(uid)

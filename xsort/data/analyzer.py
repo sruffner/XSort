@@ -745,28 +745,32 @@ class Analyzer(QObject):
             self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         if edit_rec.operation == UserEdit.LABEL:
-            for u in self._neurons:
-                if u.uid == edit_rec.affected_uids and u.label == edit_rec.unit_label:
-                    u.label = edit_rec.previous_unit_label
-                    self.neuron_label_updated.emit(u.uid)
-                    return True
+            # TODO: Support undoing a multi-unit relabel op...
+            if len(edit_rec.uids_affected) == 1:
+                for u in self._neurons:
+                    if (u.uid in edit_rec.uids_affected) and (u.label == edit_rec.unit_label):
+                        u.label = edit_rec.old_unit_label(u.uid)
+                        self.neuron_label_updated.emit(u.uid)
+                        return True
             return False
         elif edit_rec.operation == UserEdit.DELETE:
-            uid = edit_rec.affected_uids
-            u = self._working_directory.load_neural_unit_from_cache(uid)
-            if isinstance(u, Neuron):
-                # success: make undeleted neuron the one and only neuron in the current display list
-                self._neurons.append(u)
-                self._focus_neurons.clear()
-                self._focus_neurons.append(u.uid)
-                self._on_focus_list_changed()
-                return True
+            # TODO: Support undoing a multi-uint delete op...
+            if len(edit_rec.uids_affected) == 1:
+                uid = edit_rec.uids_affected[0]
+                u = self._working_directory.load_neural_unit_from_cache(uid)
+                if isinstance(u, Neuron):
+                    # success: make undeleted neuron the one and only neuron in the current display list
+                    self._neurons.append(u)
+                    self._focus_neurons.clear()
+                    self._focus_neurons.append(u.uid)
+                    self._on_focus_list_changed()
+                    return True
             return False
         elif edit_rec.operation == UserEdit.MERGE:
-            merged_uid = edit_rec.result_uids
+            merged_uid = edit_rec.uids_created[0]
             merged_idx = next((i for i in range(len(self._neurons)) if self._neurons[i].uid == merged_uid), None)
             restored_units = list()
-            for uid in edit_rec.affected_uids:
+            for uid in edit_rec.uids_affected:
                 restored_units.append(self._working_directory.load_neural_unit_from_cache(uid))
             if isinstance(merged_idx, int) and all([isinstance(u, Neuron) for u in restored_units]):
                 # success: remove the merged unit (including cache file), restore component units, and put them in the
@@ -780,8 +784,8 @@ class Analyzer(QObject):
                 return True
             return False
         else:   # SPLIT
-            split_uids = [uid for uid in edit_rec.result_uids]
-            unsplit_uid = edit_rec.affected_uids
+            split_uids = edit_rec.uids_created
+            unsplit_uid = edit_rec.uids_affected[0]
             restored_unit = self._working_directory.load_neural_unit_from_cache(unsplit_uid)
             split_units: List[Neuron] = list()
             for u in self._neurons:
