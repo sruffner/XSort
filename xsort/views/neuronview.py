@@ -1,4 +1,4 @@
-from typing import List, Any, Optional, Set
+from typing import List, Any, Optional, Set, Tuple
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings, Slot, QObject, QEvent
 from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF, QContextMenuEvent, QKeyEvent, QHelpEvent
@@ -33,6 +33,8 @@ class _NeuronTableModel(QAbstractTableModel):
 
     LABEL_COL_IDX = 8
     """ Index of the 'Label' column -- unit labels may be edited. """
+    SIM_COL_IDX = 7
+    """ Index of the 'Similarity' column -- sorting on this column is not permitted. """
 
     def __init__(self, data_manager: Analyzer):
         """ Construct an initally empty neurons table model. """
@@ -51,6 +53,11 @@ class _NeuronTableModel(QAbstractTableModel):
         mediate a multi-unit delete or relabel operation. 
         """
         self.reload_table_data()
+
+    @property
+    def current_sort_column_and_order(self) -> Tuple[int, Qt.SortOrder]:
+        """ The current sort column and sort order for this model. """
+        return self._sort_col, Qt.SortOrder.DescendingOrder if self._reversed else Qt.SortOrder.AscendingOrder
 
     def hideable_columns(self) -> List[int]:
         """ The column indices of all columns that can be optionally hidden hidden. """
@@ -211,9 +218,10 @@ class _NeuronTableModel(QAbstractTableModel):
         return switcher.get(col, '')
 
     def sort(self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder) -> None:
+        """ Overrridden to implement sorting on any column except the 'Similarity' column. """
         rev = (order == Qt.SortOrder.DescendingOrder)
         col = max(0, min(column, self.columnCount()-1))
-        if (self._sort_col != col) or (self._reversed != rev):
+        if (col != self.SIM_COL_IDX) and ((self._sort_col != col) or (self._reversed != rev)):
             self._sort_col = col
             self._reversed = rev
             self.reload_table_data()
@@ -367,8 +375,13 @@ class _NeuronTableView(QTableView):
         self._label_col_delegate = _UnitLabelColumnDelegate(self)
 
         self.setModel(self._model)
+
+        # allow sorting on any column except Similarity column. Ensure table view is initially sorted by the UID
+        # column (0) in ascending order
         self.setSortingEnabled(True)
         self._model.sort(0)  # to ensure table view is initially sorted by column 0 in ascending order
+        self.horizontalHeader().setSortIndicator(0, Qt.SortOrder.AscendingOrder)
+        self.horizontalHeader().sortIndicatorChanged.connect(self._on_sort_indicator_changed)
 
         self._model.layoutChanged.connect(self._on_table_layout_change)
 
@@ -588,6 +601,17 @@ class _NeuronTableView(QTableView):
         self._table_context_menu.move(pos)
         self._table_context_menu.show()
 
+    @Slot(int, Qt.SortOrder)
+    def _on_sort_indicator_changed(self, col: int, _: Qt.SortOrder):
+        """
+        Overridden to restore sort indicator whenever user attempts to sort on the 'Similarity' column, which
+        is not permitted. **NOTE**: The model ignores any attempt to sort on that column, but that does not prevent
+        the table header from updating the sort indicator -- so we need to fix it here.
+        """
+        if col == _NeuronTableModel.SIM_COL_IDX:
+            col, order = self._model.current_sort_column_and_order
+            self.horizontalHeader().setSortIndicator(col, order)
+
     def _toggle_table_column_visibility(self, col: int) -> None:
         """
         Toggle the visibility of the specified column in the neural units table. No action is taken if the specified
@@ -632,6 +656,7 @@ class _NeuronTableView(QTableView):
                 if n_found == len(uids):
                     break
         self._model.on_unit_labels_changed(uids)
+        self._model.clear_current_selection()   # always clear selection after a (possibly multi-unit) relabel.
 
     def reload(self, clear_selection: bool = False) -> None:
         """
