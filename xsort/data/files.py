@@ -1553,14 +1553,14 @@ class WorkingDirectory:
         """ True if edit history only consists of changes in unit labels. """
         return all([rec.operation == UserEdit.LABEL for rec in self._edit_history])
 
-    def on_unit_relabeled(self, uid: str, prev_label: str, curr_label: str) -> None:
+    def on_units_relabeled(self, uid_to_old_label: Dict[str, str], curr_label: str) -> None:
         """
-        Update the working directory's edit history when a single neural unit is re-labeled.
-        :param uid: UID of affected unit
-        :param prev_label: The old label.
+        Update the working directory's edit history when one or more unit is re-labeled.
+        :param uid_to_old_label: Dictionary mapping UID of each relabeled unit with that unit's previous label. The
+            previous label must be included in order to "undo" the relabeling.
         :param curr_label: The new label.
         """
-        edit_rec = UserEdit.create_unit_relabel({uid: prev_label}, curr_label)
+        edit_rec = UserEdit.create_unit_relabel(uid_to_old_label, curr_label)
         self._edit_history.append(edit_rec)
 
     def on_unit_deleted(self, uid: str) -> None:

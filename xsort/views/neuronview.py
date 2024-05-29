@@ -102,18 +102,38 @@ class _NeuronTableModel(QAbstractTableModel):
             bot_right = self.createIndex(self.rowCount() - 1, self.columnCount() - 1)
             self.dataChanged.emit(top_left, bot_right, Qt.ItemDataRole.BackgroundRole)
 
+    @property
+    def _unit_indices_in_current_selection(self) -> List[int]:
+        out = list()
+        if len(self._selected_uids) > 0:
+            n_found = 0
+            for idx, u in enumerate(self._data_manager.neurons):
+                if u.uid in self._selected_uids:
+                    out.append(idx)
+                    n_found += 1
+                    if n_found == len(self._selected_uids):
+                        break
+        return out
+
     def reload_table_data(self, clear_selection: bool = False):
         if clear_selection:
             self._selected_uids.clear()
         self._resort()
         self.layoutChanged.emit()
 
-    def on_unit_label_changed(self, uid: str) -> None:
+    def on_unit_labels_changed(self, uids: List[str]) -> None:
+        r_min, r_max = len(self._sorted_indices), -1
+        n_found = 0
         for r in range(len(self._sorted_indices)):
-            if self._data_manager.neurons[self._sorted_indices[r]].uid == uid:
-                cell_index = self.createIndex(r, self.LABEL_COL_IDX)
-                self.dataChanged.emit(cell_index, cell_index, [Qt.ItemDataRole.DisplayRole])
-                break
+            if self._data_manager.neurons[self._sorted_indices[r]].uid in uids:
+                r_min, r_max = min(r_min, r), max(r_max, r)
+                n_found += 1
+                if n_found == len(uids):
+                    break
+        if n_found > 0:
+            top_left = self.createIndex(r_min, self.LABEL_COL_IDX)
+            bot_right = self.createIndex(r_max, self.LABEL_COL_IDX)
+            self.dataChanged.emit(top_left, bot_right, [Qt.ItemDataRole.DisplayRole])
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._data_manager.neurons)
@@ -136,10 +156,17 @@ class _NeuronTableModel(QAbstractTableModel):
         return f
 
     def setData(self, index, value, role=...):
+        """
+        Overridden to support in-place editing of a neural unit label. If multiple units are selected, all of them
+        qre updated with the same label.
+        """
         r, c = index.row(), index.column()
         if (0 <= r < self.rowCount()) and (c == self.LABEL_COL_IDX) and (role == Qt.ItemDataRole.EditRole):
             idx = self._sorted_indices[r]
-            return self._data_manager.edit_unit_label(idx, str(value))
+            selected_indices = self._unit_indices_in_current_selection
+            if not (idx in selected_indices):
+                selected_indices.append(idx)
+            return self._data_manager.edit_neuron_labels(selected_indices, str(value))
         else:
             return super().setData(index, value, role)
 
@@ -591,17 +618,20 @@ class _NeuronTableView(QTableView):
 
         return super(_NeuronTableView, self).eventFilter(obj, event)
 
-    def on_unit_label_changed(self, uid: str) -> None:
+    def on_unit_labels_changed(self, uids: List[str]) -> None:
         """
-        Whenever a neuron label is successfully changed, refresh the underlying table model and add the label text to
-        the set of "suggestions" for the auto-completion in-place editor that handles label edits.
-        :param uid: UID of the affected neural unit.
+        Whenever one or more neural units is relabeled, refresh the underlying table model and add any new labels to the
+        set of "suggestions" for the auto-completion in-place editor that handles label edits.
+        :param uids: List of UIDs of the affected neural units.
         """
+        n_found = 0
         for u in self._data_manager.neurons:
-            if u.uid == uid:
+            if u.uid in uids:
                 self.add_suggested_unit_label(u.label)
-                break
-        self._model.on_unit_label_changed(uid)
+                n_found += 1
+                if n_found == len(uids):
+                    break
+        self._model.on_unit_labels_changed(uids)
 
     def reload(self, clear_selection: bool = False) -> None:
         """
@@ -656,8 +686,8 @@ class NeuronView(BaseView):
     def on_focus_neurons_changed(self, _: bool) -> None:
         self._table_view.reload()
 
-    def on_neuron_label_updated(self, uid: str) -> None:
-        self._table_view.on_unit_label_changed(uid)
+    def on_neuron_labels_updated(self, uids: List[str]) -> None:
+        self._table_view.on_unit_labels_changed(uids)
 
     def save_settings(self) -> None:
         """ Preserves which columns in the neural units table have been hidden by the user. """

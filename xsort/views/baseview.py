@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 
 from PySide6.QtCore import QSize, QObject, QSettings
 from PySide6.QtGui import QPalette, QColor
@@ -99,11 +99,11 @@ class BaseView(QObject):
         """
         pass
 
-    def on_neuron_label_updated(self, uid: str) -> None:
+    def on_neuron_labels_updated(self, uids: List[str]) -> None:
         """
-        Refresh view contents after the label of any unit in the neural unit list is updated. Default implementation
+        Refresh view contents after one or more units in the neural unit list is relabeled. Default implementation
         takes no action.
-        :param uid: UID identifying the neural unit that was re-labeled.
+        :param uids: List of UIDs identifying the neural units that were re-labeled.
         """
         pass
 

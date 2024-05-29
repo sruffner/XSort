@@ -180,7 +180,7 @@ class ViewManager(QObject):
         self.data_analyzer.channel_traces_updated.connect(self.on_channel_traces_updated)
         self.data_analyzer.focus_neurons_changed.connect(self.on_focus_neurons_changed)
         self.data_analyzer.channel_seg_start_changed.connect(self.on_channel_seg_start_changed)
-        self.data_analyzer.neuron_label_updated.connect(self.on_neuron_label_updated)
+        self.data_analyzer.neuron_labels_updated.connect(self.on_neuron_labels_updated)
         self.data_analyzer.split_lasso_region_updated.connect(self._refresh_menus)
 
         self._main_window.setMinimumSize(800, 600)
@@ -387,13 +387,13 @@ class ViewManager(QObject):
         self._refresh_menus()
 
     @Slot()
-    def on_neuron_label_updated(self, uid: str) -> None:
+    def on_neuron_labels_updated(self, uids: List[str]) -> None:
         """
-        Handler notifies all views when a neural unit's label has changed.
-        :param uid: The UID identifying the affected neural unit.
+        Handler notifies all views when one or more neural units has been relabeled.
+        :param uids: List of UIDs identifying the affected neural unit(s).
         """
         for v in self._all_views:
-            v.on_neuron_label_updated(uid)
+            v.on_neuron_labels_updated(uids)
         self._refresh_menus()
 
     @Slot()

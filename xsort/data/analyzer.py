@@ -53,8 +53,11 @@ class Analyzer(QObject):
     Signals that the elapsed starting time (relative to that start of the electrophysiological recording) for all
     analog channel trace segments has just changed.
     """
-    neuron_label_updated: Signal = Signal(str)
-    """ Signals that a neural unit's label wwa successfully modified. Arg(str): UID of affected unit. """
+    neuron_labels_updated: Signal = Signal(list)
+    """ 
+    Signals that one or more neural units were successfully relabeld. Arg(list): List of UIDs identifying the 
+    affected units.
+    """
     split_lasso_region_updated: Signal = Signal()
     """ 
     Signals that the lasso region defining a split of the current primary neuron has changed -- so that UI can
@@ -511,26 +514,29 @@ class Analyzer(QObject):
 
         return None
 
-    def edit_unit_label(self, idx: int, label: str) -> bool:
+    def edit_neuron_labels(self, indices: List[int], label: str) -> bool:
         """
-        Edit the label assigned to a neural unit.
-        :param idx: Ordinal position of unit in the neural unit list.
-        :param label: The new label. Any leading or trailing whitespace is removed. No action taken if this matches the
-            current label
-        :return: True if successful; False if specified unit not found or the specified label is invalid.
+        Edit the label assigned to one or more neural units.
+
+        :param indices: Ordinal positions of one or more units in the neural unit list.
+        :param label: The label to be assigned to each of the specified units. Any leading or trailing whitespace is
+            removed.
+        :return: True if successful; False if one or more of the units specified is not found or the label is invalid.
         """
         label = label.strip()
-        try:
+        if not (Neuron.is_valid_label(label) and all([0 <= idx < len(self._neurons) for idx in indices])):
+            return False
+        uid_2_old_label: Dict[str, str] = dict()
+        for idx in indices:
             u = self._neurons[idx]
             if u.label != label:
-                prev_label = u.label
+                old_label = u.label
                 u.label = label
-                self._working_directory.on_unit_relabeled(u.uid, prev_label, u.label)
-                self.neuron_label_updated.emit(u.uid)
-            return True
-        except Exception:
-            pass
-        return False
+                uid_2_old_label[u.uid] = old_label
+        if len(uid_2_old_label) > 0:
+            self._working_directory.on_units_relabeled(uid_2_old_label, label)
+            self.neuron_labels_updated.emit([uid for uid in uid_2_old_label.keys()])
+        return True
 
     def can_delete_primary_neuron(self) -> bool:
         """
@@ -745,14 +751,19 @@ class Analyzer(QObject):
             self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         if edit_rec.operation == UserEdit.LABEL:
-            # TODO: Support undoing a multi-unit relabel op...
-            if len(edit_rec.uids_affected) == 1:
+            try:
+                uids_undone: List[str] = list()
                 for u in self._neurons:
                     if (u.uid in edit_rec.uids_affected) and (u.label == edit_rec.unit_label):
                         u.label = edit_rec.old_unit_label(u.uid)
-                        self.neuron_label_updated.emit(u.uid)
-                        return True
-            return False
+                        uids_undone.append(u.uid)
+                        if len(uids_undone) == len(edit_rec.uids_affected):
+                            break
+                if len(uids_undone) > 0:
+                    self.neuron_labels_updated.emit(uids_undone)
+                return True
+            except Exception:
+                return False
         elif edit_rec.operation == UserEdit.DELETE:
             # TODO: Support undoing a multi-uint delete op...
             if len(edit_rec.uids_affected) == 1:
