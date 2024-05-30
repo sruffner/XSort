@@ -59,9 +59,10 @@ class _NeuronTableModel(QAbstractTableModel):
         """ Maps table row index to index of corresponding neuron IAW the current sort column and sort order. """
         self._selected_uids: Set[str] = set()
         """ 
-        Set of UIDs identifying units selected by user - NOT necessarily part of display/focus list, but to
-        mediate a multi-unit delete or relabel operation. 
+        UIDs of units in the current "edit selection set" -- chosen by the user for a multi-unit delete/relabel op.
         """
+        self._last_selected_row: Optional[int] = None
+        """ Row of unit last added to the edit selection set (to support contiguous range selection). """
         self._highlight_similar: bool = False
         """ 
         If True, when a primary focus unit is defined, the model always lists the 5 most similar units 
@@ -114,40 +115,51 @@ class _NeuronTableModel(QAbstractTableModel):
             return
         if uid in self._selected_uids:
             self._selected_uids.remove(uid)
+            # if the row removed is the last selected, the last selected row is undefined
+            if len(self._selected_uids) == 0 or row == self._last_selected_row:
+                self._last_selected_row = None
         else:
             self._selected_uids.add(uid)
+            self._last_selected_row = row
         top_left = self.createIndex(row, 0)
         bot_right = self.createIndex(row, self.LABEL_COL_IDX)
         self.dataChanged.emit(top_left, bot_right, Qt.ItemDataRole.BackgroundRole)
 
     def select_contiguous_range(self, end_row: int) -> None:
         """
-        Select a contiguous range of rows in the table from the current **singly-selected** row to the row specified.
-        If the number of rows currently selected is not exactly one, no action is taken.
+        Select a contiguous range of rows in the table from the last-selected row to the row specified. If the selection
+        set is currently empty or the last-selected row is unknown, then the unit in the row specified is added to the
+        selection set.
         :param end_row: The row at which to end the continuous-range selection. No action taken if invalid.
         """
         end_row_uid = self.row_to_unit(end_row)
-        if (end_row_uid is not None) and (len(self._selected_uids) == 1) and not (end_row_uid in self._selected_uids):
-            start_row = self.unit_to_row(next(iter(self._selected_uids)))
-            inc = 1 if start_row < end_row else -1
-            r = start_row + inc
-            while True:
-                uid = self.row_to_unit(r)
-                if uid is not None:
-                    self._selected_uids.add(uid)
-                if r == end_row:
-                    break
-                r = r + inc
-            top_left = self.createIndex(min(start_row, end_row), 0)
-            bot_right = self.createIndex(max(start_row, end_row), self.LABEL_COL_IDX)
+        if (end_row_uid is not None) and not (end_row_uid in self._selected_uids):
+            start_row = end_row
+            if (len(self._selected_uids) == 0) or (self._last_selected_row is None):
+                self._selected_uids.add(end_row_uid)
+            else:
+                start_row = self._last_selected_row
+                inc = 1 if start_row < end_row else - 1
+                r = start_row + inc
+                while True:
+                    uid = self.row_to_unit(r)
+                    if uid is not None:
+                        self._selected_uids.add(uid)
+                    if r == end_row:
+                        break
+                    r = r + inc
+            self._last_selected_row = end_row
+            top_left = self.createIndex(min(start_row, end_row), self.UID_COL_IDX)
+            bot_right = self.createIndex(max(start_row, end_row), self.UID_COL_IDX)
             self.dataChanged.emit(top_left, bot_right, Qt.ItemDataRole.BackgroundRole)
 
     def clear_current_selection(self) -> None:
         """ Clear the set of currently selected table rows, if any. """
         if len(self._selected_uids) > 0:
             self._selected_uids.clear()
-            top_left = self.createIndex(0, 0)
-            bot_right = self.createIndex(self.rowCount() - 1, self.columnCount() - 1)
+            self._last_selected_row = 0
+            top_left = self.createIndex(0, self.UID_COL_IDX)
+            bot_right = self.createIndex(self.rowCount() - 1, self.UID_COL_IDX)
             self.dataChanged.emit(top_left, bot_right, Qt.ItemDataRole.BackgroundRole)
 
     @property
@@ -166,6 +178,7 @@ class _NeuronTableModel(QAbstractTableModel):
     def reload_table_data(self, clear_selection: bool = False):
         if clear_selection:
             self._selected_uids.clear()
+            self._last_selected_row = 0
         self._resort()
         self.layoutChanged.emit()
 
