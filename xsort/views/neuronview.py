@@ -1,9 +1,10 @@
 from typing import List, Any, Optional, Set, Tuple
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings, Slot, QObject, QEvent
-from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF, QContextMenuEvent, QKeyEvent, QHelpEvent
-from PySide6.QtWidgets import QTableView, QHeaderView, QHBoxLayout, QSizePolicy, QMenu, QStyledItemDelegate, QWidget, \
-    QLineEdit, QCompleter
+from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF, QContextMenuEvent, QKeyEvent, QHelpEvent, \
+    QColorConstants
+from PySide6.QtWidgets import QTableView, QHeaderView, QSizePolicy, QMenu, QStyledItemDelegate, QWidget, \
+    QLineEdit, QCompleter, QCheckBox, QVBoxLayout
 
 from xsort.data.analyzer import Analyzer
 from xsort.data.neuron import Neuron
@@ -31,10 +32,19 @@ class _NeuronTableModel(QAbstractTableModel):
                                          '00.00', '00.0', '0.00', '0.00', 'Purkinje']
     """ Typical cell value for each column -- to calculate fixed column sizes. """
 
+    UID_COL_IDX = 0
+    """ Index of the 'UID' column -- the first column in the table. """
     LABEL_COL_IDX = 8
     """ Index of the 'Label' column -- unit labels may be edited. """
     SIM_COL_IDX = 7
     """ Index of the 'Similarity' column -- sorting on this column is not permitted. """
+    _SIMILAR_HILITE = QColor.fromString("#80B2D8FF")
+    """ Background cell color highlighting units most similar to the current primary focus unit (if any). """
+    _SELECTED_HILITE = QColor(Qt.GlobalColor.darkBlue)
+    """ 
+    Background cell color (UID column only) highlighting units currently selected for a multi-unit relabel or 
+    delete operation.
+    """
 
     def __init__(self, data_manager: Analyzer):
         """ Construct an initally empty neurons table model. """
@@ -52,7 +62,38 @@ class _NeuronTableModel(QAbstractTableModel):
         Set of UIDs identifying units selected by user - NOT necessarily part of display/focus list, but to
         mediate a multi-unit delete or relabel operation. 
         """
+        self._highlight_similar: bool = False
+        """ 
+        If True, when a primary focus unit is defined, the model always lists the 5 most similar units 
+        immediately after, regardless the sort order; the similar units are also highlighted with a distinctive
+        background color.
+        """
+        self._similar_indices: List[int] = list()
+        """
+        Whenever the primary unit (first neuron in display/focus list) is defined, this contains the indices of the
+        <= 5 most similar units within the neuron list.
+        """
         self.reload_table_data()
+
+    @property
+    def highlight_similar(self) -> bool:
+        """
+        True if model highlights the <=5 neural units most similar to the current primary focus unit. These units
+        are highlighted with a distinctive background color and appear immediately after the primary unit, regardless
+        the sort order.
+        """
+        return self._highlight_similar
+
+    @highlight_similar.setter
+    def highlight_similar(self, ena: bool) -> None:
+        """
+        Enable/disable highlighting of the <= 5 neural units most similar to the current primary focus unit.
+        :param ena: True to enable, False to disable.
+        """
+        if ena != self._highlight_similar:
+            self._highlight_similar = ena
+            if self._data_manager.primary_neuron is not None:
+                self.reload_table_data()
 
     @property
     def current_sort_column_and_order(self) -> Tuple[int, Qt.SortOrder]:
@@ -185,17 +226,25 @@ class _NeuronTableModel(QAbstractTableModel):
             if role in [Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole]:
                 return self._to_string(self._data_manager.neurons[idx], c)
             elif (role == Qt.ItemDataRole.BackgroundRole) or (role == Qt.ItemDataRole.ForegroundRole):
-                u = self._data_manager.neurons[idx].uid
-                color_str = self._data_manager.display_color_for_neuron(u)
-                bkg_color = None if color_str is None else QColor.fromString(color_str)
-                # when unit is "selected", the background for the UID cell is light gray if the unit is also one of
-                # the focus units. If not, the entire row is light gray
-                if (u in self._selected_uids) and ((bkg_color is None) or (c == 0)):
-                    bkg_color = QColor(Qt.GlobalColor.lightGray)
+                # background highlight: dark blue in UID cell if unit is "selected". Else all cells in row have default
+                # background unless the unit is one of the focus units or one of the highlighted similar units.
+                uid = self._data_manager.neurons[idx].uid
+                if (uid in self._selected_uids) and (c == self.UID_COL_IDX):
+                    bkg_color = self._SELECTED_HILITE
+                else:
+                    color_str = self._data_manager.display_color_for_neuron(uid)
+                    bkg_color = None if color_str is None else QColor.fromString(color_str)
+                    if (bkg_color is None) and (idx in self._similar_indices):
+                        bkg_color = self._SIMILAR_HILITE
                 if role == Qt.BackgroundRole:
                     return bkg_color
                 else:
-                    return None if color_str is None else QColor(Qt.black if bkg_color.lightness() < 140 else Qt.white)
+                    if bkg_color is None:
+                        return None
+                    else:
+                        # choose white or black based on estimated luminance threshold
+                        lum = bkg_color.red() * 0.299 + bkg_color.green() * 0.587 + bkg_color.blue() * 0.114
+                        return QColorConstants.Black if lum > 150 else QColorConstants.White
             elif role == Qt.ItemDataRole.TextAlignmentRole:
                 return Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter
             elif (role == Qt.ItemDataRole.ToolTipRole) and (c == self.LABEL_COL_IDX):
@@ -228,6 +277,7 @@ class _NeuronTableModel(QAbstractTableModel):
 
     def _resort(self) -> None:
         self._sorted_indices.clear()
+        self._similar_indices.clear()
         u = self._data_manager.neurons
         primary = self._data_manager.primary_neuron
         num = len(u)
@@ -247,6 +297,19 @@ class _NeuronTableModel(QAbstractTableModel):
                 8: sorted(range(num), key=lambda k: u[k].label, reverse=self._reversed)
             }
             self._sorted_indices = switcher.get(self._sort_col)
+
+            # when primary focus neuron defined, we always list the 5 most similar units immediately after it,
+            # regardless the sort order
+            if self._highlight_similar and (primary is not None):
+                similar = sorted(range(num), key=lambda k: u[k].similarity_to(primary), reverse=True)
+                primary_idx = similar[0]
+                self._similar_indices = similar[1:6]
+                for idx in self._similar_indices:
+                    self._sorted_indices.remove(idx)
+                primary_pos = self._sorted_indices.index(primary_idx)
+                for idx in reversed(self._similar_indices):
+                    self._sorted_indices.insert(primary_pos+1, idx)
+
         else:
             self._sorted_indices.append(0)   # only one unit -- nothing to sort!
 
@@ -368,22 +431,22 @@ class _NeuronTableView(QTableView):
         """ A reference to the data model manager. """
         self._settings = settings
         """ A reference to the application settings object. """
-        self._model = _NeuronTableModel(data_manager)
+        self.model = _NeuronTableModel(data_manager)
         """ Neuron table model (essentially wraps a table model around the data manager's neuron list). """
         self._table_context_menu = QMenu(self)
         """ Context menu for table header to hide/show selected table columns. """
         self._label_col_delegate = _UnitLabelColumnDelegate(self)
 
-        self.setModel(self._model)
+        self.setModel(self.model)
 
         # allow sorting on any column except Similarity column. Ensure table view is initially sorted by the UID
         # column (0) in ascending order
         self.setSortingEnabled(True)
-        self._model.sort(0)  # to ensure table view is initially sorted by column 0 in ascending order
+        self.model.sort(0)  # to ensure table view is initially sorted by column 0 in ascending order
         self.horizontalHeader().setSortIndicator(0, Qt.SortOrder.AscendingOrder)
         self.horizontalHeader().sortIndicatorChanged.connect(self._on_sort_indicator_changed)
 
-        self._model.layoutChanged.connect(self._on_table_layout_change)
+        self.model.layoutChanged.connect(self._on_table_layout_change)
 
         self.setSelectionMode(QTableView.SelectionMode.NoSelection)
         self.setEditTriggers(QTableView.EditTrigger.NoEditTriggers)
@@ -407,11 +470,11 @@ class _NeuronTableView(QTableView):
         size.setHorizontalStretch(1)
         self.setSizePolicy(size)
 
-        self.clicked.connect(self._on_row_clicked)   # to trigger update of current display list
+        self.clicked.connect(self._on_cell_clicked)   # to trigger update of current display list
 
         # set up context menu for toggling the visibility of selected columns in the table.
-        for col in self._model.hideable_columns():
-            action = QAction(self._model.headerData(col, Qt.Horizontal), parent=self._table_context_menu,
+        for col in self.model.hideable_columns():
+            action = QAction(self.model.headerData(col, Qt.Horizontal), parent=self._table_context_menu,
                              checkable=True, checked=True,
                              triggered=lambda checked, x=col: self._toggle_table_column_visibility(x))
             self._table_context_menu.addAction(action)
@@ -427,7 +490,7 @@ class _NeuronTableView(QTableView):
         Comma-separated list of column indices of any hidden columns in the neuron table view. Empty string if all
         columns are currently visible. Intended for saving column-hide state to user settings.
         """
-        return ','.join([str(i) for i in self._model.hideable_columns() if self.isColumnHidden(i)])
+        return ','.join([str(i) for i in self.model.hideable_columns() if self.isColumnHidden(i)])
 
     @hidden_columns.setter
     def hidden_columns(self, hidden: str) -> None:
@@ -442,9 +505,9 @@ class _NeuronTableView(QTableView):
                 col = int(col_str)
             except ValueError:
                 continue
-            if col in self._model.hideable_columns():
+            if col in self.model.hideable_columns():
                 self.hideColumn(col)
-                hidden_column_labels.append(self._model.headerData(col, Qt.Horizontal))
+                hidden_column_labels.append(self.model.headerData(col, Qt.Horizontal))
         # make sure corresponding menu items in the table header context menu are updated accordingly
         if len(hidden_column_labels) > 0:
             for a in self._table_context_menu.actions():
@@ -483,87 +546,69 @@ class _NeuronTableView(QTableView):
             super().closeEditor(editor, QStyledItemDelegate.EndEditHint.SubmitModelCache)
             incr = 1 if hint == QStyledItemDelegate.EndEditHint.EditNextItem else -1
             index = self.currentIndex()
-            next_idx = self._model.createIndex(index.row() + incr, index.column())
+            next_idx = self.model.createIndex(index.row() + incr, index.column())
             if next_idx.isValid():
                 self.setCurrentIndex(next_idx)
                 self.edit(next_idx)
         else:
             super().closeEditor(editor, hint)
 
-    def contextMenuEvent(self, event: QContextMenuEvent):
-        """
-        Overridden to repurpose the context menu event (right-click) to trigger an in-place edit of the label of any
-        neural unit or to toggle the selection state of a unit.
-
-        An in-place label edit is initiated if the right-click is over a table cell containing a unit label. Otherwise,
-        the set of table rows selected is updated as follows:
-         - Ctrl/Command key down: Clear the selection.
-         - Shift key down: If a single row is currently selected, extend the selection to the row under the mouse
-           (contiguous range selection).
-         - No modifier key: Toggle the selection state of the row under the mouse.
-
-        :param event: The event object -- used to obtain the index of the table cell under the mouse.
-        """
-        index = self.indexAt(event.pos())
-        is_ctrl = (event.modifiers() & Qt.KeyboardModifier.ControlModifier) == Qt.KeyboardModifier.ControlModifier
-        is_shift = (event.modifiers() & Qt.KeyboardModifier.ShiftModifier) == Qt.KeyboardModifier.ShiftModifier
-        if (index.column() == _NeuronTableModel.LABEL_COL_IDX) and not (is_ctrl or is_shift):
-            self.setCurrentIndex(index)
-            self.edit(index)
-        elif is_ctrl:
-            self._model.clear_current_selection()
-        elif is_shift:
-            self._model.select_contiguous_range(index.row())
-        else:
-            self._model.toggle_select_row(index.row())
-
     def keyReleaseEvent(self, event: QKeyEvent):
         """
-        Handler implements a simple keyboard interface for changing the identity of the primary neural unit: pressing
-        the Up/Down-arrow key shifts the primary unit focus to the unit in the table row above/below the row that
-        represents the current primary unit (no "wrap-around"). If there are other units in the display list, they are
-        removed.
-        :param event: The key event -- only the Up and Down arrow keys are handled. Any other key is passed on to the
-            base class implementation.
+        Handles response to implement several keyboard shortcuts for the neuron table:
+         - Esc or Space key: Clears the current multi-unit edit selection set, if any.
+         - Up/Down arrow keys: Shifts the primary focus unit to the unit in the table row above/below the row
+           containing the current primary unit (no "wrap-around"). If there is a second or third unit in the current
+           focus list, they are removed. If there is no primary unit, the first unit in the table becomes the primary.
+         - Ctrl(Cmd)-Up/Down: Shifts the secondary focus unit to the unit in the table row above/below the row
+           containing the current secondary unit (no "wrap-around"), but skipping over the current primary unit. If
+           there is no secondary unit, the unit above or below the current primary unit becomes the seconary unit. If
+           there is no primary unit, the first two units become the primary and secondary units.
+
+        :param event: The key event. Any keys not listed above are ignored (passed on to the base class).
         """
+        event.accept()
         inc = 1 if event.key() == Qt.Key.Key_Down else (-1 if event.key() == Qt.Key.Key_Up else 0)
         is_ctrl = (event.modifiers() & Qt.KeyboardModifier.ControlModifier) == Qt.KeyboardModifier.ControlModifier
-        if inc != 0 and len(self._data_manager.neurons) > 0:
+        if inc == 0 and (event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Escape)):
+            self.model.clear_current_selection()
+        elif inc != 0 and len(self._data_manager.neurons) > 0:
             # if Ctrl key depressed, shift secondary unit up/down, leaving primary unit unchanged. If a tertiary unit
             # was selected, it is deselected. If focus list empty, select units in first two rows.
             if is_ctrl:
                 curr_focus = self._data_manager.neurons_with_display_focus
                 if len(curr_focus) == 0:
-                    primary_uid = self._model.row_to_unit(0)
-                    secondary_uid = self._model.row_to_unit(1)
+                    primary_uid = self.model.row_to_unit(0)
+                    secondary_uid = self.model.row_to_unit(1)
                 elif len(curr_focus) == 1:
                     primary_uid = curr_focus[0].uid
-                    secondary_uid = self._model.row_to_unit(self._model.unit_to_row(primary_uid) + inc)
+                    secondary_uid = self.model.row_to_unit(self.model.unit_to_row(primary_uid) + inc)
                 else:
                     primary_uid = curr_focus[0].uid
-                    row_1 = self._model.unit_to_row(primary_uid)
-                    row_2 = self._model.unit_to_row(curr_focus[1].uid) + inc
+                    row_1 = self.model.unit_to_row(primary_uid)
+                    row_2 = self.model.unit_to_row(curr_focus[1].uid) + inc
                     if row_2 == row_1:
                         row_2 = row_2 + inc
-                    secondary_uid = self._model.row_to_unit(row_2)
+                    secondary_uid = self.model.row_to_unit(row_2)
                 if isinstance(primary_uid, str):
                     self._data_manager.update_neurons_with_display_focus([primary_uid, secondary_uid])
-                    row = self._model.unit_to_row(secondary_uid if isinstance(secondary_uid, str) else primary_uid)
-                    self.scrollTo(self._model.createIndex(row, 0))
+                    row = self.model.unit_to_row(secondary_uid if isinstance(secondary_uid, str) else primary_uid)
+                    self.scrollTo(self.model.createIndex(row, 0))
                 return
 
             # if Ctrl key not depressed, shift primary unit up/down and remove any other units from focus list.
             if self._data_manager.primary_neuron is None:
                 row = 0 if (len(self._data_manager.neurons) > 0) else -1
             else:
-                curr_row = self._model.unit_to_row(self._data_manager.primary_neuron.uid)
+                curr_row = self.model.unit_to_row(self._data_manager.primary_neuron.uid)
                 row = (curr_row + inc) if isinstance(curr_row, int) else -1
 
-            uid = self._model.row_to_unit(row)
+            uid = self.model.row_to_unit(row)
             if isinstance(uid, str):
                 self._data_manager.update_neurons_with_display_focus(uid, True)
-                self.scrollTo(self._model.createIndex(row, 0))
+                self.scrollTo(self.model.createIndex(row, 0))
         else:
+            event.ignore()
             super().keyReleaseEvent(event)
 
     @Slot()
@@ -573,22 +618,40 @@ class _NeuronTableView(QTableView):
         the current primary unit (if any) is visible.
         """
         if self._data_manager.primary_neuron is not None:
-            row = self._model.unit_to_row(self._data_manager.primary_neuron.uid)
+            row = self.model.unit_to_row(self._data_manager.primary_neuron.uid)
             if row is not None:
-                self.scrollTo(self._model.createIndex(row, 0))
+                self.scrollTo(self.model.createIndex(row, 0))
 
     @Slot(QModelIndex)
-    def _on_row_clicked(self, index: QModelIndex) -> None:
+    def _on_cell_clicked(self, index: QModelIndex) -> None:
         """
-        Whenever the user left-clicks on any table cell, the neural unit in the corresponding row is added to the
-        current display list, clearing the previous display list UNLESS a modifier key is held down (doesn't matter
-        which key -- contiguous range selection isn't allowed).
+        Handles response to the user left-clicking on a cell in the neuron table, which will depend on what modifier
+        key is depressed:
+         - Click (no modifier): Single-select the primary focus unit.
+         - Ctrl(Cmd)-Click: Toggle-select the secondary/tertiary focus units.
+         - Alt(Opt)-Click: Add or remove unit in clicked row to the multi-unit edit selection set for relabel/delete op.
+           However, if cell is in "Label" column, initiate in-place edit of that unit label.
+         - Shift-Click: Extend multi-unit edit selection set with all units between the clicked unit and the last unit
+           added to the selection set.
+         - Shift+Alt-Click: Clear the edit selection set.
+
         :param index: Locates the table cell that was clicked.
         """
-        uid = self._model.row_to_unit(index.row())
-        clear_previous_selection = (QGuiApplication.keyboardModifiers() == Qt.KeyboardModifier.NoModifier)
+        uid = self.model.row_to_unit(index.row())
+        mod = QGuiApplication.keyboardModifiers()
         if isinstance(uid, str):
-            self._data_manager.update_neurons_with_display_focus(uid, clear_previous_selection)
+            if mod in [Qt.KeyboardModifier.NoModifier, Qt.KeyboardModifier.ControlModifier]:
+                self._data_manager.update_neurons_with_display_focus(uid, mod == Qt.KeyboardModifier.NoModifier)
+            elif mod == Qt.KeyboardModifier.AltModifier:
+                if index.column() == _NeuronTableModel.LABEL_COL_IDX:
+                    self.setCurrentIndex(index)
+                    self.edit(index)
+                else:
+                    self.model.toggle_select_row(index.row())
+            elif mod == Qt.KeyboardModifier.ShiftModifier:
+                self.model.select_contiguous_range(index.row())
+            elif mod == Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier:
+                self.model.clear_current_selection()
 
     @Slot(QPoint)
     def _on_header_right_click(self, pos: QPoint) -> None:
@@ -609,7 +672,7 @@ class _NeuronTableView(QTableView):
         the table header from updating the sort indicator -- so we need to fix it here.
         """
         if col == _NeuronTableModel.SIM_COL_IDX:
-            col, order = self._model.current_sort_column_and_order
+            col, order = self.model.current_sort_column_and_order
             self.horizontalHeader().setSortIndicator(col, order)
 
     def _toggle_table_column_visibility(self, col: int) -> None:
@@ -618,7 +681,7 @@ class _NeuronTableView(QTableView):
         column may not be hidden.
         :param col: The table column index.
         """
-        if col in self._model.hideable_columns():
+        if col in self.model.hideable_columns():
             hidden = self.isColumnHidden(col)
             if hidden:
                 self.showColumn(col)
@@ -634,7 +697,7 @@ class _NeuronTableView(QTableView):
             help_event: QHelpEvent = event
             index = self.indexAt(help_event.pos())
             if index.isValid() and (index.column() == _NeuronTableModel.LABEL_COL_IDX):
-                label = self._model.data(index)
+                label = self.model.data(index)
                 label_w = self.fontMetrics().tightBoundingRect(label).width()
                 cell_w = self.visualRect(index).width()
                 return label_w < cell_w   # eat the event if label fits
@@ -655,8 +718,8 @@ class _NeuronTableView(QTableView):
                 n_found += 1
                 if n_found == len(uids):
                     break
-        self._model.on_unit_labels_changed(uids)
-        self._model.clear_current_selection()   # always clear selection after a (possibly multi-unit) relabel.
+        self.model.on_unit_labels_changed(uids)
+        self.model.clear_current_selection()   # always clear selection after a (possibly multi-unit) relabel.
 
     def reload(self, clear_selection: bool = False) -> None:
         """
@@ -665,7 +728,7 @@ class _NeuronTableView(QTableView):
         :param clear_selection: If True, clear the current selection state. Default is False. Always set this flag if
              the working directory has just changed.
         """
-        self._model.reload_table_data(clear_selection)
+        self.model.reload_table_data(clear_selection)
 
 
 class NeuronView(BaseView):
@@ -688,8 +751,13 @@ class NeuronView(BaseView):
         self._table_view = _NeuronTableView(data_manager, settings)
         """ Table view displaying the neuron table. """
 
-        main_layout = QHBoxLayout()
-        main_layout.addWidget(self._table_view)
+        self._highlight_chk = QCheckBox("Highlight up to 5 units most similar to the focussed unit (blue)")
+        self._highlight_chk.setChecked(False)
+        self._highlight_chk.stateChanged.connect(self._on_highlight_changed)
+
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self._table_view, stretch=1)
+        main_layout.addWidget(self._highlight_chk, alignment=Qt.AlignmentFlag.AlignRight)
         self.view_container.setLayout(main_layout)
 
     def uid_of_unit_below(self, uid: str) -> Optional[str]:
@@ -700,7 +768,12 @@ class NeuronView(BaseView):
         :param uid: The UID of a neural unit
         :return: UID of unit displayed in the row below or above that unit, or None if not found.
         """
-        return self._table_view.model().find_uid_of_neighboring_unit(uid)
+        return self._table_view.model.find_uid_of_neighboring_unit(uid)
+
+    @Slot(int)
+    def _on_highlight_changed(self, _: int) -> None:
+        """ Handler updates the neuron table view whenever user toggles the 'highlight similar units' check box. """
+        self._table_view.model.highlight_similar = self._highlight_chk.isChecked()
 
     def on_working_directory_changed(self) -> None:
         self._table_view.reload(clear_selection=True)
@@ -715,9 +788,18 @@ class NeuronView(BaseView):
         self._table_view.on_unit_labels_changed(uids)
 
     def save_settings(self) -> None:
-        """ Preserves which columns in the neural units table have been hidden by the user. """
+        """
+        Preserves which columns in the neural units table have been hidden by the user, and whether or not to
+        highlight units most simlar to the current primary focus unit.
+        """
         self.settings.setValue('neuronview_hidden_cols', self._table_view.hidden_columns)
+        self.settings.setValue('neuronview_highlight_similar', self._table_view.model.highlight_similar)
 
     def restore_settings(self) -> None:
-        """ Hides select columns in the neural units table IAW user settings. """
+        """
+        IAW user settings: (1) hide select columns in the neural units table; and (2) enable/disable highlighting
+        of the neural units most similar to the current primary focus unit.
+        """
         self._table_view.hidden_columns = self.settings.value('neuronview_hidden_cols', '')
+        highlight: bool = (self.settings.value('neuronview_highlight_similar', defaultValue="false") == "true")
+        self._highlight_chk.setChecked(highlight)  # triggers signal if state changed
