@@ -17,6 +17,8 @@ from xsort.data.files import WorkingDirectory, UserEdit
 class Analyzer(QObject):
     """
     The data model manager object for XSort.
+
+    **NOTE**: This is intended as a singleton, so it's OK that the various signals it defines are class attributes.
     """
     MAX_NUM_FOCUS_NEURONS: int = 3
     """ The maximum number of neural units that can be selected simultaneously for display focus. """
@@ -42,12 +44,15 @@ class Analyzer(QObject):
     focus_neurons_changed: Signal = Signal(bool)
     """
     Signals that the set of neural units currently selected for display/comparison purposes has changed in some way.
-    All views should be refreshed accordingly. **NOTE**: (1) Signal is also sent whenever a unit is added or removed
-    because of a user-initiated delete/merge/split/undo operation -- because the focus list is always changed as well.
-    (2) The boolean argument is True if the change in the focus list causes a in change the set of displayable analog 
-    channels. When the working directory stores more than N = MAX_CHANNEL_TRACES analog channels, only the N channels 
-    in the neighborhood of the primary neuron's primary channel will be available for display.
+    All views should be refreshed accordingly. **NOTE**: (1) Signal will be sent whenever a unit is added or removed
+    because of a user-initiated delete/merge/split/undo operation IF the focus list has changed as well (which is 
+    always the case unless the delete operation did not remove any unit in the focus list. (2) The boolean argument is 
+    True if the change in the focus list causes a change in the set of displayable analog channels. When the working 
+    directory stores more than N = MAX_CHANNEL_TRACES analog channels, only the N channels in the neighborhood of the 
+    primary neuron's primary channel will be available for display.
     """
+    neurons_deleted: Signal = Signal()
+    """ Signals that one or more neural units were deleted WITHOUT changing the current display/focus list. """
     channel_seg_start_changed: Signal = Signal()
     """ 
     Signals that the elapsed starting time (relative to that start of the electrophysiological recording) for all
@@ -538,45 +543,60 @@ class Analyzer(QObject):
             self.neuron_labels_updated.emit([uid for uid in uid_2_old_label.keys()])
         return True
 
-    def can_delete_primary_neuron(self) -> bool:
+    def can_delete_units(self, uids: Set[str]) -> bool:
         """
-        Can the unit currently selected as the 'primary neuron' be deleted? Deletion is permitted ONLY if: (1) there are
-        no other units in the current display focus list; and (2) the unit's internal cache file has already been
-        generated. The latter requirement facilitates quickly and reliably undoing a previous delete operation by simply
-        reloading the unit from that cache file.
-        :return: True only if the above requirements are met.
+        Can the specified set of neural units be deleted? Deletion is permitted ONLY if each unit's internal cache file
+        has already been generated. This facilitates quickly and reliably undoing a previous delete operation by simply
+        reloading each unit from its corresponding cache file.
+        :param uids: The set of UIDs identifying which neural units are to be deleted. Each UID in set must identify an
+            existing neural unit.
+        :return: True if all specified units exist and may be deleted, False otherwise.
         """
-        primary: Optional[Neuron] = self.primary_neuron
-        return (len(self._focus_neurons) == 1) and self._working_directory.unit_cache_file_exists(primary.uid)
+        return (self.is_valid_working_directory and (len(uids) > 0) and (uids <= {n.uid for n in self._neurons}) and
+                all([self._working_directory.unit_cache_file_exists(uid) for uid in iter(uids)]))
 
-    def delete_primary_neuron(self, uid: Optional[str] = None) -> None:
+    def delete_units(self, uids: Set[str], focus_uid: Optional[str] = None) -> None:
         """
-        Delete the current 'primary neuron', ie, the first unit in the current display focus list.
+        Delete the set of neural units specified. An internal metrics cache file must already exist for each unit to be
+        removed, and that file remains after deletion to facilitate restoring each unit.
 
-        Only one unit may be deleted at a time, so no action is taken if the display focus list is empty or contains
-        more than one unit. Deleting a unit does not remove the associated unit cache file (if present) from the current
-        working directory.
-
-        :param uid: The UID of a remaining unit that should become the 'primary neuron' after the deletion. If None or
-            invalid, the display focus list will be empty after the deletion.
+        :param uids: The set of UIDs identifying which neural units are to be deleted. No action taken if any unit in
+            this list cannot be removed.
+        :param focus_uid: The UID of a remaining unit that should become the 'primary focus neuron' after the deletion.
+            If None or invalid, the display focus list will be empty after the deletion.
         """
-        if not self.can_delete_primary_neuron():
-            return
-        deleted_idx = next((i for i in range(len(self._neurons))
-                            if self._neurons[i].uid == self._focus_neurons[0]), None)
-        if deleted_idx is None:
+        if not self.can_delete_units(uids):
             return
 
         # cancel all background tasks before altering the neural unit list
         self._task_manager.cancel_all_tasks(self._progress_dlg)
 
-        u = self._neurons.pop(deleted_idx)
-        if uid in [n.uid for n in self._neurons]:
-            self._focus_neurons[0] = uid
-        else:
+        # remove all specified units
+        i = 0
+        n_removed = 0
+        while (i < len(self._neurons)) and (n_removed < len(uids)):
+            if self._neurons[i].uid in uids:
+                self._neurons.pop(i)
+                n_removed += 1
+            else:
+                i += 1
+
+        # update focus list -- could be that none of the units removed are currently in focus list
+        focus_changed = False
+        for uid in self._focus_neurons.copy():  # can't alter list as we iterate that same list!
+            if uid in uids:
+                self._focus_neurons.remove(uid)
+                focus_changed = True
+        if focus_uid in {n.uid for n in self._neurons}:
             self._focus_neurons.clear()
-        self._working_directory.on_unit_deleted(u.uid)
-        self._on_focus_list_changed()
+            self._focus_neurons.append(focus_uid)
+            focus_changed = True
+
+        self._working_directory.on_units_deleted(uids)
+        if focus_changed:
+            self._on_focus_list_changed()
+        else:
+            self.neurons_deleted.emit()
 
     def can_merge_focus_neurons(self) -> bool:
         """
@@ -765,17 +785,18 @@ class Analyzer(QObject):
             except Exception:
                 return False
         elif edit_rec.operation == UserEdit.DELETE:
-            # TODO: Support undoing a multi-uint delete op...
-            if len(edit_rec.uids_affected) == 1:
-                uid = edit_rec.uids_affected[0]
+            restored: List[Neuron] = list()
+            for uid in edit_rec.uids_affected:
                 u = self._working_directory.load_neural_unit_from_cache(uid)
                 if isinstance(u, Neuron):
-                    # success: make undeleted neuron the one and only neuron in the current display list
-                    self._neurons.append(u)
-                    self._focus_neurons.clear()
-                    self._focus_neurons.append(u.uid)
-                    self._on_focus_list_changed()
-                    return True
+                    restored.append(u)
+            if len(restored) == len(edit_rec.uids_affected):
+                # success: make the first restored neuron the one and only neuron in the current display/focus list
+                self._neurons.extend(restored)
+                self._focus_neurons.clear()
+                self._focus_neurons.append(restored[0].uid)
+                self._on_focus_list_changed()
+                return True
             return False
         elif edit_rec.operation == UserEdit.MERGE:
             merged_uid = edit_rec.uids_created[0]

@@ -216,8 +216,10 @@ class UserEdit:
             uids = sorted(self.uids_affected)
             if len(uids) == 1:
                 desc = f"Deleted unit '{uids[0]}'"
+            elif len(uids) <= 3:
+                desc = "Deleted units: " + ', '.join(uids)
             else:
-                desc = "Deleted units: " + ', '.join(uids[0:3]) + ("..." if len(uids) > 3 else "")
+                desc = f"Deleted {len(uids)} units: " + ', '.join(uids[0:3]) + "..."
         elif self._op == UserEdit.MERGE:
             desc = f"Merged units {self.uids_affected} into unit '{self.uids_created[0]}'"
         else:   # SPLIT
@@ -257,7 +259,6 @@ class UserEdit:
         """ For a re-label operation, the new label assigned to the unit(s); else None. """
         return self._label if self._op == UserEdit.LABEL else None
 
-    # TODO: CONTINUE REVISIONS HERE...
     @staticmethod
     def save_edit_history(working_dir: Path, history: List['UserEdit']) -> Tuple[bool, str]:
         """
@@ -1563,12 +1564,12 @@ class WorkingDirectory:
         edit_rec = UserEdit.create_unit_relabel(uid_to_old_label, curr_label)
         self._edit_history.append(edit_rec)
 
-    def on_unit_deleted(self, uid: str) -> None:
+    def on_units_deleted(self, uids: Set[str]) -> None:
         """
-        Update the working directory's edit history when a single neural unit is deleted.
-        :param uid: UID of deleted unit
+        Update the working directory's edit history when one or more neural units are deleted.
+        :param uids: UIDs of the deleted units
         """
-        edit_rec = UserEdit.create_unit_delete(uid)
+        edit_rec = UserEdit.create_unit_delete(uids)
         self._edit_history.append(edit_rec)
 
     def on_units_merged(self, uid1: str, uid2: str, merged_uid: str) -> None:

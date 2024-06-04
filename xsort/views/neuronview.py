@@ -1,10 +1,10 @@
 from typing import List, Any, Optional, Set, Tuple
 
-from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings, Slot, QObject, QEvent
-from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF, QContextMenuEvent, QKeyEvent, QHelpEvent, \
+from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt, QPoint, QSettings, Slot, QObject, QEvent, Signal
+from PySide6.QtGui import QColor, QAction, QGuiApplication, QFontMetricsF, QKeyEvent, QHelpEvent, \
     QColorConstants
 from PySide6.QtWidgets import QTableView, QHeaderView, QSizePolicy, QMenu, QStyledItemDelegate, QWidget, \
-    QLineEdit, QCompleter, QCheckBox, QVBoxLayout
+    QLineEdit, QCompleter, QCheckBox, QVBoxLayout, QLabel, QHBoxLayout
 
 from xsort.data.analyzer import Analyzer
 from xsort.data.neuron import Neuron
@@ -45,6 +45,9 @@ class _NeuronTableModel(QAbstractTableModel):
     Background cell color (UID column only) highlighting units currently selected for a multi-unit relabel or 
     delete operation.
     """
+
+    edit_selection_set_changed: Signal = Signal()
+    """ Signal emitted whenever the edit selection set changes. """
 
     def __init__(self, data_manager: Analyzer):
         """ Construct an initally empty neurons table model. """
@@ -124,6 +127,7 @@ class _NeuronTableModel(QAbstractTableModel):
         top_left = self.createIndex(row, 0)
         bot_right = self.createIndex(row, self.LABEL_COL_IDX)
         self.dataChanged.emit(top_left, bot_right, Qt.ItemDataRole.BackgroundRole)
+        self.edit_selection_set_changed.emit()
 
     def select_contiguous_range(self, end_row: int) -> None:
         """
@@ -152,6 +156,7 @@ class _NeuronTableModel(QAbstractTableModel):
             top_left = self.createIndex(min(start_row, end_row), self.UID_COL_IDX)
             bot_right = self.createIndex(max(start_row, end_row), self.UID_COL_IDX)
             self.dataChanged.emit(top_left, bot_right, Qt.ItemDataRole.BackgroundRole)
+            self.edit_selection_set_changed.emit()
 
     def clear_current_selection(self) -> None:
         """ Clear the set of currently selected table rows, if any. """
@@ -161,6 +166,12 @@ class _NeuronTableModel(QAbstractTableModel):
             top_left = self.createIndex(0, self.UID_COL_IDX)
             bot_right = self.createIndex(self.rowCount() - 1, self.UID_COL_IDX)
             self.dataChanged.emit(top_left, bot_right, Qt.ItemDataRole.BackgroundRole)
+            self.edit_selection_set_changed.emit()
+
+    @property
+    def units_in_current_selection(self) -> Set[str]:
+        """ UIDs of the neural units that currently comprise the edit selection set in the unit table. """
+        return self._selected_uids.copy()
 
     @property
     def _unit_indices_in_current_selection(self) -> List[int]:
@@ -761,16 +772,26 @@ class NeuronView(BaseView):
 
     def __init__(self, data_manager: Analyzer, settings: QSettings) -> None:
         super().__init__('Neurons', None, data_manager, settings)
-        self._table_view = _NeuronTableView(data_manager, settings)
+        self.table_view = _NeuronTableView(data_manager, settings)
         """ Table view displaying the neuron table. """
 
         self._highlight_chk = QCheckBox("Highlight up to 5 units most similar to the focussed unit (blue)")
+        """ Checkbox toggles highlighting of 5 units most similar to primary focus neuron. """
+
+        self._count_label = QLabel("Count = 0")
+        """ Static label indicating how many units are listed in neural units table. """
+        self._count_label.setVisible(False)
+
         self._highlight_chk.setChecked(False)
         self._highlight_chk.stateChanged.connect(self._on_highlight_changed)
 
         main_layout = QVBoxLayout()
-        main_layout.addWidget(self._table_view, stretch=1)
-        main_layout.addWidget(self._highlight_chk, alignment=Qt.AlignmentFlag.AlignRight)
+        main_layout.addWidget(self.table_view, stretch=1)
+        control_line = QHBoxLayout()
+        control_line.addWidget(self._count_label)
+        control_line.addStretch(1)
+        control_line.addWidget(self._highlight_chk, alignment=Qt.AlignmentFlag.AlignRight)
+        main_layout.addLayout(control_line)
         self.view_container.setLayout(main_layout)
 
     def uid_of_unit_below(self, uid: str) -> Optional[str]:
@@ -781,38 +802,55 @@ class NeuronView(BaseView):
         :param uid: The UID of a neural unit
         :return: UID of unit displayed in the row below or above that unit, or None if not found.
         """
-        return self._table_view.model.find_uid_of_neighboring_unit(uid)
+        return self.table_view.model.find_uid_of_neighboring_unit(uid)
+
+    @property
+    def edit_selection_set(self) -> Set[str]:
+        """ UIDs comprising the multi-unit edit selection set in this view."""
+        return self.table_view.model.units_in_current_selection
 
     @Slot(int)
     def _on_highlight_changed(self, _: int) -> None:
         """ Handler updates the neuron table view whenever user toggles the 'highlight similar units' check box. """
-        self._table_view.model.highlight_similar = self._highlight_chk.isChecked()
+        self.table_view.model.highlight_similar = self._highlight_chk.isChecked()
 
     def on_working_directory_changed(self) -> None:
-        self._table_view.reload(clear_selection=True)
+        self.table_view.reload(clear_selection=True)
+        self._update_count_readout()
 
     def on_neuron_metrics_updated(self, uid: str) -> None:
-        self._table_view.reload()
+        self.table_view.reload()
 
     def on_focus_neurons_changed(self, _: bool) -> None:
-        self._table_view.reload()
+        self.table_view.reload()
+        self._update_count_readout()
 
     def on_neuron_labels_updated(self, uids: List[str]) -> None:
-        self._table_view.on_unit_labels_changed(uids)
+        self.table_view.on_unit_labels_changed(uids)
+
+    def on_units_deleted(self) -> None:
+        """ Reload the table after one or more neural units were deleted, but the current focus list was unaffected. """
+        self.table_view.reload(clear_selection=True)
+        self._update_count_readout()
+
+    def _update_count_readout(self) -> None:
+        n = len(self.data_manager.neurons)
+        self._count_label.setText(f"Count = {n}")
+        self._count_label.setVisible(n > 30)
 
     def save_settings(self) -> None:
         """
         Preserves which columns in the neural units table have been hidden by the user, and whether or not to
         highlight units most simlar to the current primary focus unit.
         """
-        self.settings.setValue('neuronview_hidden_cols', self._table_view.hidden_columns)
-        self.settings.setValue('neuronview_highlight_similar', self._table_view.model.highlight_similar)
+        self.settings.setValue('neuronview_hidden_cols', self.table_view.hidden_columns)
+        self.settings.setValue('neuronview_highlight_similar', self.table_view.model.highlight_similar)
 
     def restore_settings(self) -> None:
         """
         IAW user settings: (1) hide select columns in the neural units table; and (2) enable/disable highlighting
         of the neural units most similar to the current primary focus unit.
         """
-        self._table_view.hidden_columns = self.settings.value('neuronview_hidden_cols', '')
+        self.table_view.hidden_columns = self.settings.value('neuronview_hidden_cols', '')
         highlight: bool = (self.settings.value('neuronview_highlight_similar', defaultValue="false") == "true")
         self._highlight_chk.setChecked(highlight)  # triggers signal if state changed

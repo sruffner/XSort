@@ -183,6 +183,13 @@ class ViewManager(QObject):
         self.data_analyzer.neuron_labels_updated.connect(self.on_neuron_labels_updated)
         self.data_analyzer.split_lasso_region_updated.connect(self._refresh_menus)
 
+        # when some units are deleted WITHOUT changing the current focus list, the only view affected is the
+        # NeuronView.
+        self.data_analyzer.neurons_deleted.connect(self.on_units_deleted)
+
+        # need to know whenever user changes the edit selection set in NeuronView -- for multi-unit delete
+        self._neuron_view.table_view.model.edit_selection_set_changed.connect(self._refresh_menus)
+
         self._main_window.setMinimumSize(800, 600)
         self._restore_from_settings()
         self._main_window.setWindowTitle(self.main_window_title)
@@ -397,6 +404,15 @@ class ViewManager(QObject):
         self._refresh_menus()
 
     @Slot()
+    def on_units_deleted(self) -> None:
+        """
+        Handler called when one or more neural units are deleted without changing the current focus list. The neuron
+        table is updated accordingly, and the edit menus are refreshed to reflect the most recent edit operation.
+        """
+        self._neuron_view.on_units_deleted()
+        self._refresh_menus()
+
+    @Slot()
     def on_channel_seg_start_changed(self) -> None:
         """
         Handler notifies all views when there's a change in the elapsed start time at which all analog channel trace
@@ -595,15 +611,18 @@ class ViewManager(QObject):
 
     def _delete(self) -> None:
         """
-        Handler for the 'Edit|Delete' menu command. It deletes the currently selected neuron, if possible, and
-        moves the selection to a neighboring unit in the neuron list as displayed in the neuron view.
+        Handler for the 'Edit|Delete' menu command. If any units are selected in the neural units table, those units
+        are deleted; otherwise, the primary focus unit is deleted. In the latter case, the primary focus is moved to
+        a neighboring unit in the neuron table (in the current sort order). If no units are selected and the focus list
+        is currently empty, no action is taken.
         """
-        try:
+        selected_uids = self._neuron_view.edit_selection_set
+        if len(selected_uids) > 0:
+            self.data_analyzer.delete_units(selected_uids)
+        elif self.data_analyzer.primary_neuron is not None:
             uid_to_delete = self.data_analyzer.primary_neuron.uid
             uid_neighbor = self._neuron_view.uid_of_unit_below(uid_to_delete)
-            self.data_analyzer.delete_primary_neuron(uid_neighbor)
-        except Exception:
-            pass
+            self.data_analyzer.delete_units({uid_to_delete}, uid_neighbor)
 
     def _merge(self) -> None:
         """ Handler for the 'Edit|Merge menu command; invokes the :class:`Analyzer` method that does the merge. """
@@ -612,6 +631,29 @@ class ViewManager(QObject):
     def _split(self) -> None:
         """ Handler for the 'Edit|Split menu command; invokes the :class:`Analyzer` method that does the split. """
         self.data_analyzer.split_primary_neuron()
+
+    def _refresh_delete_menu_item(self) -> None:
+        """
+        Update the enabled state and item text for the "Delete" action/menu item. If one or more units have the
+        "edit selection" in the neuron table, then those units are selected for deletion; otherwise, the primary focus
+        unit is to be deleted.
+        """
+        selected_uids = self._neuron_view.edit_selection_set
+        n = len(selected_uids)
+        item_text = "&Delete"
+        can_delete = False
+        if n > 0:
+            can_delete = self.data_analyzer.can_delete_units(selected_uids)
+            if can_delete:
+                item_text = f"&Delete selected units" if n > 1 else f"&Delete unit {next(iter(selected_uids))}"
+        elif self.data_analyzer.primary_neuron is not None:
+            uid = self.data_analyzer.primary_neuron.uid
+            can_delete = self.data_analyzer.can_delete_units({uid})
+            if can_delete:
+                item_text = f"&Delete unit {uid}"
+
+        self._delete_action.setText(item_text)
+        self._delete_action.setEnabled(can_delete)
 
     def _refresh_menus(self) -> None:
         """ Update the enabled state and item text for selected menu items, including the Open Recent menu. """
@@ -628,13 +670,7 @@ class ViewManager(QObject):
 
         self._undo_all_action.setEnabled(self.data_analyzer.can_undo_all_edits())
 
-        can_delete = self.data_analyzer.can_delete_primary_neuron()
-        if can_delete:
-            self._delete_action.setText(f"&Delete unit {self.data_analyzer.primary_neuron.uid}")
-            self._delete_action.setEnabled(True)
-        else:
-            self._delete_action.setText(f"&Delete")
-            self._delete_action.setEnabled(False)
+        self._refresh_delete_menu_item()
 
         can_merge = self.data_analyzer.can_merge_focus_neurons()
         if can_merge:

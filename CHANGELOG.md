@@ -31,12 +31,18 @@ red) up and down in the unit table without changing the primary focus unit (blue
 similar to the current primary focus unit. If checked, the 5 units are always listed immediately below the primary unit
 **regardless the sort order** and are highlighted with a light blue background. The state of the checkbox is a user
 preference saved at application exit and restored at startup.
-- _New feature: Multi-unit relabel operation_. When you left-click on a row in the neuron table with the
+- _New feature: Multi-unit relabel and delete operations_. When you left-click on a row in the neuron table with the
 `Alt(Opt)` key depressed, the corresponding unit's selection state is toggled. Units in the _edit selection set_ are 
 highlighted with a dark blue background in the **UID** cell only. You can also add a contiguous range of rows to the
-selection via `Shift-Click`. Then to relabel all of the units in the selection set in one go, edit one of the unit
-labels -- upon entering the new label, all of the units in the set are relabeled accordingly and the selection is
-cleared.
+selection via `Shift-Click`.
+  - To relabel all of the units in the selection set in one go, edit one of the unit labels -- upon entering the new 
+    label, all of the units in the set are relabeled accordingly and the selection is cleared. 
+  - To delete all of the units, choose `Edit > Delete`. 
+  - The multi-unit relabel or delete is executed and undone as a single operation, not N separate operations.
+  - To clear the current edit selection set, hit the `ESC` key, the `Spacebar`, or `Shift-Alt-Click`. 
+- **NOTE**: If the edit selection set is empty, hitting `Edit > Delete` reverts to the original behavior: the current primary focus
+unit (royal blue) is deleted, and the next unit in the table becomes the new primary unit.
+
 
 ## v0.1.6 (05/13/2024)
 - Updated **About** dialog to include version number and release date.
