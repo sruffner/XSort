@@ -50,6 +50,8 @@ version 3.11.4. Contact the developer if you run into any issues running the pro
 - In a terminal console, navigate to the directory holding the wheel file you downloaded, and install 
 the package: `pip install xsort-x.y.z-py3-none-any.whl`.
 - To start the app: `python -m xsort.app`.
+- A command-line no-GUI version of **XSort** is now available that builds the internal cache for a specified working 
+directory. For detailed usage information: `python -m xsort.app ?`.
 - You may run into the following error when starting XSort: `qt.qpa.plugin: Could not load the Qt platform 
 plugin "xcb" in "" even though it was found. This application failed to start because no Qt platform plugin 
 could be initialized. Reinstalling the application may fix this problem. Available platform plugins are: 
@@ -63,7 +65,6 @@ version is 3.12 or later.
 - **XSort** takes advantage of Python's multiprocessing library to speed up the background work it does to build a set 
 of internal cache files (for optimal data retrieval) and to calculate neural unit statistics displayed in its different 
 views. It is highly recommended that you run the program on a multi-core system -- the more cores the better!
-
 
 ## License
 **XSort** was created by [Scott Ruffner](mailto:sruffner@srscicomp.com). It is licensed under the terms of the MIT license.
