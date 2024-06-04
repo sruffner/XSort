@@ -11,7 +11,7 @@ full description of the units table and the views:
 5. **Firing Rate**
 6. **PCA** (Principal Component Analysis)
 7. **Channels**
-8. **Help** (houses this user guide!)
+8. **Help** (houses this guide)
 
 Each of the views may be "floated" as a top-level window, docked to the right or bottom edge of the main application 
 window, or hidden entirely. In a multi-monitor setup, you should be able to move any floating view onto a second screen.
@@ -45,8 +45,8 @@ If there are multiple analog source files or multiple unit source files, then **
 files to use. If the analog source is a flat binary file, you must also specify the number of channels recorded, the 
 sampling rate in Hz, the scale factor converting raw 16-bit samples to microvolts, whether the data is prefiltered, and 
 whether the individual analog channel streams are interleaved in the file. **XSort** saves the directory configuration 
-information to a file (`.xs.directory.txt`) within the directory itself -- so you'll need to provide it the first time 
-you "open" a working directory.
+information to a file (`.xs.directory.txt`) within the directory itself -- so you'll only need to provide it the first 
+time you "open" a working directory.
 
 If the working directory is invalid or if it cannot read the analog or unit data source file, **XSort** will ask you to
 select another directory. Note that, when you launch **XSort** for the first time, you must specify a valid working 
@@ -61,7 +61,9 @@ to be bandpass-filtered. The **XSort** visualizations require expedient access t
 streams and to certain neural unit metrics, particularly a unit's primary channel and spike templates on the 16 channels
 "in the neighborhood" of that channel.
 
-To that end, when **XSort** first opens a working directory, it will build a set of internal cache files:
+To that end, when **XSort** first opens a working directory, it will build a set of internal cache files. All of these
+cache files are stored in the `.xs-cache` subfolder under the working directory (so it is a simple task to manually
+remove the internal cache!):
 - `.xs.ch.<N>`: Contains the bandpass-filtered data stream recorded on analog channel `<N>`. If the analog source is a
   prefiltered flat binary file, channel caching is unnecessary.
 - `.xs.noise`: Contains the estimated noise level on each analog channel.
@@ -69,7 +71,7 @@ To that end, when **XSort** first opens a working directory, it will build a set
 
 Building the internal cache can take several minutes when there are hundreds of analog channels and hundreds of neural 
 units. But once it is complete, **XSort** will "load" the directory very quickly the next time you open it -- so long as
-you do not delete any of these cache files!
+you do not delete the cache!
 
 This internal cache is essential to **XSort** so that it can quickly load short segments of the analog channel data 
 streams at any point along the recorded timeline, quickly display spike templates for any selected unit, and use those
@@ -84,7 +86,8 @@ files, which typically takes less than a second on a reasonably up-to-date syste
 ### Comparing neural units
 Whenever you change the working directory -- and after the cache generation task has finished --, the **Channels** view 
 will show one-second segments from each of the first 16 analog channels and the other views will be essentially 
-blank. These views display statistical graphs for one or more units selected from the units table -- the _display list_.
+blank. These views display statistical graphs for one or more units selected from the units table -- the _display focus
+list_.
 
 When you select a unit in the table, the corresponding row is highlighted, and the various views are gradually updated
 to display per-channel spike templates, an autocorrelogram, firing rate-vs-time histogram, and other statistics for that
@@ -92,7 +95,7 @@ unit. You will notice that some statistics are not available immediately but mus
 user interface is not blocked in this case, but you will see progress messages posted in the status bar, and the 
 various views will be updated once the relevant statistics are ready for display.
 
-For more information on the units table, the display list, and the various views, see the sections **Neural Units 
+For more information on the units table, the display focus list, and the various views, see the sections **Neural Units 
 Table** and **Views** in this user guide
 
 

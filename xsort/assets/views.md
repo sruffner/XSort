@@ -4,10 +4,10 @@
 
 ### Templates
 
-This view displays the mean spike waveforms, or _spike templates_, of each neural unit in the current display list
+This view displays the mean spike waveforms, or _spike templates_, of each neural unit in the current display focus list
 on each of up to 16 analog data channels. The templates are laid out in small subplots labeled with the source 
 channel index. As in all the data views, the waveform trace color matches the highlight color assigned to the unit:
-blue for the first selected unit in the display list -- the _primary unit_ --, red for the second, and yellow for the 
+royal blue for the first unit in the display list -- the _primary focus unit_ --, red for the second, and yellow for the 
 third.
 
 All spike templates are 10 milliseconds in duration, starting 1 ms prior to the spike occurrence time. However, in many
@@ -16,19 +16,19 @@ bottom left of the view to adjust the visible time span from 10 down to as littl
 preference that is saved at application exit and restored the next time **XSort** runs.
 
 Whenever the view is updated, the voltage scale (vertical) is automatically adjusted in accordance with the peak-to-peak
-amplitude of the primary unit's largest spike template. You can manually adjust the scale between +/-50 and +/-1000uV 
+amplitude of the primary unit's largest spike template. You can manually adjust the scale between +/-30 and +/-1000uV 
 using the slider control at the bottom right.
 
 **NOTE**: When there are more than 16 recorded analog channels, **XSort** only computes and caches each neural unit's 
 per-channel spike templates on the 16 channels [P-8 .. P+7], where P is the index of the unit's primary channel. If two 
 different units do not have the same primary channel, their templates are not computed on the same set of channels. By 
 design, this view displays all 16 templates for the primary unit, as well any templates for other units in the display
-list that were computed on a channel among the primary unit's 16 template channel indices. This makes sense -- it's 
-highly unlikely the user will need to compare units with very different template channel sets.
+focus list that were computed on a channel among the primary unit's 16 template channel indices. This makes sense -- 
+it's unlikely the user will need to compare units with very different template channel sets.
 
 ### Correlograms
-This view displays the autocorrelogram (ACG) of the spike train for each unit in the current display list, as well as 
-the crosscorrelogram (CCG) of each unit's spike train with the spike train of a different unit in the display list. If 
+This view displays the autocorrelogram (ACG) of the spike train for each unit in the current focus list, as well as 
+the crosscorrelogram (CCG) of each unit's spike train with the spike train of a different unit in the list. If 
 only one unit is selected for display, only its autocorrelogram is shown. If two (or three) units are selected, the 
 correlograms appear in a 2x2 (or 3x3) array of subplots, with the autocorrelograms on the main diagonal. Note that
 the CCG trace colors are a blend of the colors assigned to the units in the display list (red + blue = magenta, etc).
@@ -48,7 +48,7 @@ Both the visible state of the zero correlation marker and the current correlogra
 saved at application exit and restored the next time **XSort** launches.
 
 ### Interspike Interval Histograms
-This view plots, on the same axes, the interspike interval (ISI) histogram for each unit in the display list. The 
+This view plots, on the same axes, the interspike interval (ISI) histogram for each unit in the display focus list. The 
 histogram is an array of normalized bin counts for ISIs between 0 and 200 milliseconds, with each bin count divided by 
 the maximum observed bin count. As with the correlograms, the ISI histograms are computed once on a background task, 
 but then cached in-memory so they need not be computed again.
@@ -57,7 +57,7 @@ Use the slider at the bottom of the view to adjust the visible histogram span be
 
 ### ACG-vs-Firing Rate
 
-This view renders, for each unit in the display list, a 3D histogram representing the unit's autocorrelogram as a 
+This view renders, for each unit in the display focus list, a 3D histogram representing the unit's autocorrelogram as a 
 function of instantaneous firing rate. This can be thought of as a "3D autocorrelogram" that shows firing regularity
 when the unit is firing at different rates. The histograms are rendered as 10x201 heatmaps, with observed firing rate 
 divided into 10 equal bins along the vertical axis, and time T relative to spike occurrence along the horizontal axis, 
@@ -95,7 +95,7 @@ data recording.
 ### Principal Component Analysis (PCA)
 
 This view renders the results of a principal component analysis (PCA) on the spike clips of each neural unit in the
-current display list. The purpose of the analysis is to "map" each spike in each unit's spike train to a point in a 
+current focus list. The purpose of the analysis is to "map" each spike in each unit's spike train to a point in a 
 two-dimensional space, offering a "scatter plot" to help assess whether the units are truly distinct from each other.
 The **PCA** view renders each unit's scatter plot in the assigned color (blue, red, yellow), provides for downsampling
 of the scatter plots when the unit(s) contains hundreds of thousands of points, and allows the user to define a _split
@@ -132,7 +132,7 @@ matrix representing ALL the individual spike multi-clips for that unit, then mul
 yield the N1x2 projection. Similarly for the other units.
 
 [**NOTE**: From this description of the PCA algorithm used, it should be clear that, whenever the composition of the 
-display list changes, the principal component analysis must be redone from scratch.]
+display focus list changes, the principal component analysis must be redone from scratch.]
 
 PCA is a time-consuming operation that is always performed on a background thread. It can take many seconds to complete,
 especially if the unit spike trains are very long, and can impact the responsiveness of the user interface (whenever you 
@@ -168,12 +168,12 @@ two units, deleting a unit, or undoing those changes.
 ### Channels
 
 This view displays a one-second clip (or shorter) for each of up to 16 analog data channels. When a working directory
-is first opened, traces for the first 16 channels (0-15) are shown. Once a unit is selected for display from the
-neural units table, then the channels displayed are those from the unit's template channel set (channels [P-8 .. P+7],
-where P is the unit's primary channel index). In addition, for each neural unit in the current display list, the view
-superimposes -- on the trace for that unit's _primary channel_ -- 10-millisecond clips indicating the occurrence of 
-spikes from that unit. In keeping with the other views, these spike clips are rendered in the highlight color (blue, 
-red or yellow) assigned to that unit.
+is first opened, traces for the first 16 channels (0-15) are shown. Once a _primary focus unit_ (royal blue) is selected
+in the neural units table, then the channels displayed are those from the unit's template channel set (channels [P-8 ..
+P+7], where P is the unit's primary channel index). In addition, for each neural unit in the current display focus list,
+the view  superimposes -- on the trace for that unit's _primary channel_ -- 10-millisecond clips indicating the 
+occurrence of spikes from that unit. In keeping with the other views, these spike clips are rendered in the highlight 
+color (blue, red or yellow) assigned to that unit.
 
 A slider at the bottom of the view lets the user choose any 1-second segment over the entire analog data recording. The
 companion readouts reflect the elapsed recording time -- in the format **MM:SS.mmm** (minutes, seconds, milliseconds) --

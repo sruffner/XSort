@@ -40,8 +40,8 @@ selection via `Shift-Click`.
   - To delete all of the units, choose `Edit > Delete`. 
   - The multi-unit relabel or delete is executed and undone as a single operation, not N separate operations.
   - To clear the current edit selection set, hit the `ESC` key, the `Spacebar`, or `Shift-Alt-Click`. 
-- **NOTE**: If the edit selection set is empty, hitting `Edit > Delete` reverts to the original behavior: the current primary focus
-unit (royal blue) is deleted, and the next unit in the table becomes the new primary unit.
+- **NOTE**: If the edit selection set is empty, hitting `Edit > Delete` reverts to the original behavior: the current 
+primary focus unit (royal blue) is deleted, and the next unit in the table becomes the new primary unit.
 
 
 ## v0.1.6 (05/13/2024)

@@ -30,8 +30,8 @@ Changes** chapter.
 NOTE: Per-channel spike templates are only computed on the 16 channels "near" a unit's primary channel (**XSort** does 
 not yet support probe geometry information, so "near" means channels [P-8 .. P+7], where P is the primary channel
 index). This is the unit's _template channel set_. The similarity metric for unit A vs B only includes the templates 
-for those channels in the intersection of unit A's template channel set with unit B's. If that intersection is empty,
-then the similarity is 0.
+for those channels in the **_intersection_** of unit A's template channel set with unit B's. If that intersection is 
+empty, then the similarity is 0.
 
 ### Hiding columns and sorting on a given column
 
@@ -42,33 +42,45 @@ immediately. To unhide a colum, right-click again and select any unchecked colum
 Note that **XSort** "remembers" which columns are hidden, storing the column state in the user's settings --
 so the same columns will be hidden the next time you run the program.
 
-To sort the table on any column, simply click on that column's header. Click again to sort in reverse order. The 
-identity of the sort column is not persisted in user settings; **XSort** always sorts on the **UID** column initially.
+To sort the table on any column (except the **Similiarity** column), simply click on that column's header. Click 
+again to sort in reverse order. The identity of the sort column is not persisted in user settings; **XSort** always 
+sorts on the **UID** column initially.
 
-### The current display list
+### The current display focus list
 
-The _display list_ is the subset of units currently selected in the neural units table. Up to 3 units may be selected 
-for display at any one time for comparison purposes, and a highlight color is assigned to each: blue for the first 
-selection, red for the second, and yellow for the third. The same color is used to render the spike templates, 
-correlograms, and other statistics for each unit across the various views.
+The _display focus list_ is the subset of units currently selected for visualization in **XSort**. Up to 3 units may be 
+chosen for display at any one time for comparison purposes, and a highlight color is assigned to each: blue for the 
+first unit in the list -- the **_primary focus unit_** --, red for the **_secondary focus unit_**, and yellow for the 
+**_tertiary focus unit_**. The same color is used to render the spike templates, correlograms, and other statistics for 
+that unit across the various views.
 
-When **XSort** initially loads the content of the current working directory, no units are selected, so most of the views
-contain nothing of interest. To select a unit, simply click anywhere on the corresponding row in the table; the previous
-selection, if any, is cleared. To select multiple units (up to 3) for display, hold down the `Control` key (the 
-`Command` key in MacOS) down while clicking on the relevant rows. You can also use the `Up/Down` arrow keys to change
-the identity of the primary unit without using the mouse.
+When **XSort** initially loads the content of the current working directory, there are no units in the focus list, so 
+most of the views contain nothing of interest. To select the primary focus unit, simply (left-)click anywhere on the 
+corresponding row in the table; the previous selection, if any, is cleared. To select the second and third focus unit,
+hold down the `Ctrl` key (the `Command` key in MacOS) down while clicking on the relevant rows. You can also use the 
+`Up/Down` arrow keys to change the identity of the primary focus unit without using the mouse, or use `Ctrl-Up/Down` to
+change the identity of the secondary focus unit without changing the primary unit.
 
 You will notice that the views are updated -- sometimes after a noticeable delay -- to display the relevant metrics or 
 statistics for the selected unit(s). Some statistics, once computed, are cached in memory and render quickly -- such as 
 the correlograms and spike templates. The principal component analyis, however, must be redone each time the display
-list changes. 
+focus list changes.
 
 Whenever any statistics need to be computed, those calculations happen in the background and the views are updated
-as the background task delivers its results. If a background task is still running and you change the display list again 
+as the background task delivers its results. If a background task is still running and you change the focus list again 
 or actually edit the units table, that task is cancelled and a modal dialog blocks user input until that task stops,
-typically in a few seconds or less.
+typically in a few seconds or less.  (**Hint**: The PCA computations are slow. If you don't need PCA, hide that view and
+**XSort** will not run a background task to perform the analysis.)
 
 While a recording session may include hundreds of analog channels, the **Templates** view only displays unit spike 
 templates on a maximum of 16 channels, and the **Channels** view only displays a maximum of 16 individual analog 
-channel traces. The first selection in the display list, the **_primary unit_**, determines the range of channels 
-selected: the 16 channels in the neighborhood of the unit's primary channel.
+channel traces. The primary focus unit determines the range of channels selected: the 16 channels in the neighborhood of
+that unit's primary channel.
+
+### Highlighting units most similar to the current primary focus unit
+
+The **Similarity** column in the units table indicates how similar each unit is to the current primary focus unit. The
+most similar units may not be directly adjacent to the primary unit. However, if you check the **"Highlight up to 5 most
+similar units..."** box below the table, then **XSort** will list the 5 most similar units immediately below the primary
+unit **regardless the sort order** and are highlight them with a light blue background. The state of the checkbox is a
+user preference saved at application exit and restored at startup.

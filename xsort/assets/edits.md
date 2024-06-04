@@ -8,18 +8,45 @@ data visualizations to help you make these determinations. This section describe
 neural units table.
 
 ### Editing a unit's label
-You may specify a descriptive label for any unit in the units table. To edit the label, simply **right-click** on the
-corresponding cell under the **Label** column in the table and edit the label string "in place". The label may be up to
-25 characters in length (any leading and trailing whitespace is removed) and cannot contain any commas.
+You may specify a descriptive label for any unit in the units table. To edit the label, simply **Alt(Option)-click** on 
+the corresponding cell under the **Label** column in the table and edit the label string "in place". The label may be up
+to 25 characters in length (any leading and trailing whitespace is removed) and cannot contain any commas.
+
+**XSort** provides a simple auto-completion feature when entering unit labels. It maintains a list of previously entered
+labels, which is stored in your user preferences file (`.XSort.ini` in your home directory). As you start typing in the
+label cell, a "suggested" label will appear if what you've typed matches an entry in the suggestion list; hit `Return` 
+to accept the suggestion. You can also hit the `Tab` key to update the unit label and immediately start editing the label
+for the next unit in the table.
 
 ### Delete
-Whenever a single unit (ie, a single row) is selected in the table, the **Edit | Delete** command is enabled. Selecting 
+Whenever the primary focus unit is defined in the units table, the **Edit | Delete** command is enabled. Selecting 
 this command will remove the unit from the table and move the selection to the next unit.
 
 Every unit in the units table has an associated internal cache file in the working directory which stores the unit's
 spike train, computed per-channel spike templates, and other metrics. To facilitate reversing the deletion, the cache 
 file itself is not removed; the unit can be quickly restored by reloading its metrics from that file.
 
+### Relabeling or deleting multiple neural units at one time
+You can select any combination of units for editing purposes by holding down the `Alt(Option)` key while clicking on 
+rows in the units table. The units in the **_edit selection set_** -- which is distinct from the display focus list -- 
+are highlighted with a dark blue background in the UID cell only. `Alt-Click` toggles the selection status of the 
+row/unit clicked. `Shift-Click` will add a contiguous range of rows to the edit selection set. Hitting the `Esc` key,
+the space bar, or `Shift-Alt-Click` will clear the selection.
+
+Once an edit selection is defined, edit the label of any neural unit and that label will also be assigned to each unit
+in the selection. The multi-unit relabeling is added to your edit history as a single operation and may be "undone"
+like any other operation.
+
+When the edit selection set is not empty, the `Edit | Delete` command is enabled and will read "Delete selected units" if
+more than one unit is selected. The selected units are deleted, again as a single undoable operation. This feature can
+be useful when you're eliminating "garbage" units. For example, to remove all units with fewer than 100 spikes, sort the
+table in ascending order by the **#Spikes** column, use` Shift-Click` to select all units with < 100 spikes, then 
+`Ctrl(Command)-X` to delete the selected units.
+
+#### Notes:
+1. `Alt-Click` on the **Label** column will initiate an in-place edit of the unit label rather than toggle the selection 
+status of the unit.
+2. When the edit selection set is empty, the `Edit | Delete` command applies to the primary focus unit, if defined.
 
 ### Merge
 Whenever two units (**not** three) are selected in the units table, the **Edit | Merge** command is available; selecting
@@ -33,23 +60,22 @@ As with the **Delete** command, the internal cache files for the two component u
 directory after a merge. Undoing the merge is then simply a matter of removing the merged unit and restoring the two 
 components by reloading their metrics from the relevant cache files.
 
-
 ### Split
 The **Edit | Split** command splits a single neural unit into two derived units encapsulating disjoint subsets of the
 original unit's spikes. The command is enabled only under very specific conditions:
-1. A single unit is selected in the neural units table.
+1. The display focus list contains only a single unit, the primary focus unit.
 2. The principal component analysis for that unit -- which runs on a background task once the unit is selected -- has
 completed so that the projection of the unit's spikes into PCA "space" is available in the **PCA** view.
 3. A _split region_ has been defined on the PCA view (see the **Views** chapter of this guide).
 
 The split region is a closed polygonal region that essentially divides the unit's spike train into two disjoint sets --
-all those spikes which project inside the split region, and all those that lie outside. When you select **Edit | Split**,
-two derived units are created (again with the "x" suffix in their UIDs) and added to the units table, while the split 
-unit is removed. 
+all those spikes which project inside the split region, and all those that lie outside. When you select 
+**Edit | Split**, two derived units are created (again with the "x" suffix in their UIDs) and added to the units table, 
+while the split unit is removed. 
 
 As with the other operations, the internal cache file for the removed unit is not itself removed. The spike train for
-each of the derived units is immediately written to a cache file, the new units are selected, and a background task
-begins computing the various metrics for each unit.
+each of the derived units is immediately written to a cache file, the new units comprise the current display focus list,
+and a background task begins computing the various metrics for each unit.
 
 ### Undo/Undo All
 
@@ -64,9 +90,9 @@ any prior state. If you need to restore it to its original state before any chan
 
 ### Saving the changes to file
 
-To save the current state of the neural units list to a Python pickle file, use **File | Save as...** and select the
+To save the current state of the neural units table to a Python pickle file, use **File | Save as...** and select the
 destination for the Python pickle file (`.pkl` or `.pickle` extension). **XSort** will block the UI with a modal
-progress dialog while the current contents of the neural list are written to the pickle file. If there are multiple 
+progress dialog while the current contents of the units table are written to the pickle file. If there are multiple 
 units, with several hundred thousand spikes each, this operation could take a noticeable amount of time to finish.
 
 The units are saved as a `List[Dict[str, Any]]`, where each dictionary in the list represents one neural unit
