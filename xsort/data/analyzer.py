@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Union, Optional, Dict, List, Tuple, Any, Set
 
 import numpy as np
-from PySide6.QtCore import QObject, Signal, Slot, QTimer, QPointF
+from PySide6.QtCore import QObject, Signal, Slot, QTimer, QPointF, QCoreApplication
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QPolygonF
 from PySide6.QtWidgets import QMainWindow, QProgressDialog, QFileDialog, QMessageBox
@@ -120,8 +120,11 @@ class Analyzer(QObject):
         self._task_manager.error.connect(self.on_task_failed)
         self._task_manager.data_available.connect(self.on_data_available)
 
-        self._progress_dlg = QProgressDialog("Please wait...", "", 0, 100, self._main_window)
-        """ A modal progress dialog used to block further user input when necessary. """
+        self._progress_dlg = QProgressDialog("Please wait...", "", 0, 0, self._main_window)
+        """ 
+        A modal progress dialog used to block further user input when necessary. It is configured with an indeterminate 
+        progress bar.
+        """
 
         # customize progress dialog: modal, no cancel, no title bar (so you can't close it)
         self._progress_dlg.setMinimumDuration(500)
@@ -389,9 +392,10 @@ class Analyzer(QObject):
             return    # user cancelled
 
         out_path = Path(file_name)
+
         self._progress_dlg.show()
         self._progress_dlg.setLabelText(f"Saving neural units to {out_path.name}....")
-        self._progress_dlg.setValue(30)
+        self._progress_dlg.setValue(0)
 
         emsg = ""
         try:
@@ -459,39 +463,35 @@ class Analyzer(QObject):
         # block user input with our modal progress dialog. For this particular task, progress messages are displayed in
         # the dialog.
         self._progress_dlg.show()
-        self._progress_dlg.setValue(0)
         self._progress_dlg.setLabelText("Building internal cache files as needed...")
 
         # spawn task to build internal cache if necessary and/or retrieve the data we require: first second's worth
         # of each relevant analog channel trace, and metrics for all neural units
         self._task_manager.build_internal_cache(work_dir)
 
-        # block UI while waing on BUILDCACHE task. The task progress handler will update the progress label and bar
-        # irregularly, but we need to call QProgressDialog.setValue() regularly - so we do that here while never
-        # hitting the maximum. NOTE that BUILDCACHE task does not deliver any data.
+        # block UI while waing on BUILDCACHE task. The task progress handler will update the progress dialog label,
+        # but we need to process events frequently to animate the indeterminate progress bar.
         channel_traces: Dict[int, ChannelTraceSegment] = dict()
         try:
             while self._task_manager.busy:
-                time.sleep(0.2)
-                next_value = self._progress_dlg.value() + 1
-                if next_value > 99:
-                    next_value = 0
-                self._progress_dlg.setValue(next_value)
+                time.sleep(0.01)
+                QCoreApplication.processEvents()
 
             # if an error occurs during the BUILDCACHE task, the progress dialog is closed and a modal dialog box
             # will have reported the error. Abort.
             if self._progress_dlg.isHidden():
                 raise Exception("Unable to build internal cache!")
 
-            self._progress_dlg.setValue(95)
             # retrieve first second's worth of samples on each of the first MAX_CHANNEL_TRACES analog channels
             self._progress_dlg.setLabelText("Loading initial channel traces...")
+            QCoreApplication.processEvents()
             for k in range(min(16, work_dir.num_analog_channels())):
                 channel_traces[k] = work_dir.retrieve_cached_channel_trace(k, 0, work_dir.analog_sampling_rate)
 
             # load full unit metrics from cache files - inject metrics to preserve any label changes from applying the
             # edit history!
             self._progress_dlg.setLabelText("Loading neural unit metrics from cache...")
+            QCoreApplication.processEvents()
             for u in neurons:
                 unit = work_dir.load_neural_unit_from_cache(u.uid)
                 if unit is None or unit.primary_channel is None:
@@ -569,6 +569,7 @@ class Analyzer(QObject):
             return
 
         # cancel all background tasks before altering the neural unit list
+        was_computing = self._task_manager.computing_stats
         self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         # remove all specified units
@@ -597,6 +598,10 @@ class Analyzer(QObject):
             self._on_focus_list_changed()
         else:
             self.neurons_deleted.emit()
+            # if a compute stats task was cancelled prematurely by the deletion and the focus list is unchanged by the
+            # deletion, we must relaunch that task!
+            if was_computing:
+                QTimer.singleShot(400, self.compute_statistics_for_focus_list)
 
     def can_merge_focus_neurons(self) -> bool:
         """
@@ -701,7 +706,9 @@ class Analyzer(QObject):
         self._task_manager.cancel_all_tasks(self._progress_dlg)
 
         # do the split. This involves finding which spikes project inside the lasso region in PCA space, which can take
-        # a few seconds if there 100K spikes or more. So we block user input with the modal progress dialog
+        # a few seconds if there 100K spikes or more. So we block user input with the modal progress dialog. In this
+        # scenario we can use a determinate progress bar...
+        self._progress_dlg.setRange(0, 100)
         self._progress_dlg.show()
         self._progress_dlg.setValue(0)
 
@@ -720,7 +727,7 @@ class Analyzer(QObject):
                     inside_indices.append(i)
                 else:
                     outside_indices.append(i)
-                pct = int(95.0 * i / len(proj))
+                pct = int(90.0 * i / len(proj))
                 self._progress_dlg.setValue(pct)
 
             if len(inside_indices) == 0 or len(outside_indices) == 0:
@@ -730,11 +737,11 @@ class Analyzer(QObject):
             inside_spikes = np.take(unit.spike_times, inside_indices)
             inside_spikes.sort()
             split_units.append(Neuron(idx, inside_spikes, suffix='x'))
-            self._progress_dlg.setValue(97)
+            self._progress_dlg.setValue(92)
             outside_spikes = np.take(unit.spike_times, outside_indices)
             outside_spikes.sort()
             split_units.append(Neuron(idx + 1, outside_spikes, suffix='x'))
-            self._progress_dlg.setValue(99)
+            self._progress_dlg.setValue(95)
 
             cached = True
             for u in split_units:
@@ -748,6 +755,8 @@ class Analyzer(QObject):
                 return
         finally:
             self._progress_dlg.close()
+            self._progress_dlg.setLabelText("Please wait...")
+            self._progress_dlg.setRange(0, 0)
 
         # success! Update edit history and neuron list and put focus on the two new units
         self._focus_neurons.clear()
@@ -1008,7 +1017,7 @@ class Analyzer(QObject):
         """
         This slot is the mechanism by which :class:`Analyzer` receives progress updates from a background task managed
         by the :class:`TaskManager`. It forwards a progress message to the view manager, and if the modal progress
-        dialog is currently visible, it updates the dialog label and progress bar accordingly.
+        dialog is currently visible, it updates the dialog label (the progress bar itself is indeterminate).
 
         :param desc: Progress message.
         :param pct: Percent complete. If this lies in [0..100], then "{pct}%" is appended to the progress message.
@@ -1018,8 +1027,6 @@ class Analyzer(QObject):
 
         if self._progress_dlg.isVisible():
             self._progress_dlg.setLabelText(msg)
-            if 0 <= pct <= 100:
-                self._progress_dlg.setValue(pct)
 
     @Slot()
     def on_task_done(self) -> None:

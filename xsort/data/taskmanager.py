@@ -10,7 +10,7 @@ from queue import Queue, Empty
 from threading import Event
 from typing import List, Optional, Dict, Tuple, Any, Set
 
-from PySide6.QtCore import QObject, Signal, QRunnable, Slot, QThreadPool
+from PySide6.QtCore import QObject, Signal, QRunnable, Slot, QThreadPool, QCoreApplication
 from PySide6.QtWidgets import QProgressDialog
 
 from xsort.data.files import WorkingDirectory
@@ -124,6 +124,14 @@ class TaskManager(QObject):
         """ True if any tasks are currently running in the background. """
         return len(self._running_tasks) > 0
 
+    @property
+    def computing_stats(self) -> bool:
+        """ True if a background task that computes unit statisitics in currently running. """
+        for task in self._running_tasks:
+            if (task.task_type == TaskType.COMPUTESTATS) and not task.done:
+                return True
+        return False
+
     def remove_done_tasks(self) -> bool:
         """
         Remove any completed background tasks from the task manager.
@@ -152,7 +160,8 @@ class TaskManager(QObject):
         process signals from the background tasks.
 
         :param progress_dlg: The modal progress dialog to raise while waiting on cancelled background tasks to finish.
-            This dialog is raised while waiting and closed upon return.
+            This dialog is raised while waiting and closed upon return. It is assumed to be configured with an
+            indeterminate progress bar.
         """
         if not self.busy:
             return
@@ -160,13 +169,12 @@ class TaskManager(QObject):
         for task in self._running_tasks:
             task.cancel()
 
+        progress_dlg.show()
         try:
-            i = 0
             while self.busy:
-                progress_dlg.setValue(i)
-                time.sleep(0.05)
-                # in the unlikely event it takes more than 5s for task to stop, reset progress to 90%
-                i = 90 if i == 99 else i + 1
+                time.sleep(0.01)
+                progress_dlg.setValue(0)   # calls QCoreApplication.processEvents(), which is essential!
+                QCoreApplication.processEvents()
         finally:
             progress_dlg.close()
 
@@ -176,7 +184,8 @@ class TaskManager(QObject):
         for the task to finish. No action taken if a compute task is not running.
 
         :param progress_dlg: The modal progress dialog to raise while waiting on the cancelled background task to
-            finish. This dialog is raised while waiting and closed upon return.
+            finish. This dialog is raised while waiting and closed upon return. It is assumed to be configured with an
+            indeterminate progress bar.
         """
         compute_task: Optional[TaskManager._Task] = None
         for task in self._running_tasks:
@@ -187,12 +196,12 @@ class TaskManager(QObject):
             return
 
         compute_task.cancel()
+        progress_dlg.show()
         try:
-            i = 0
             while not compute_task.done:
-                progress_dlg.setValue(i)
-                time.sleep(0.05)
-                i = 90 if i == 99 else i + 1
+                time.sleep(0.01)
+                progress_dlg.setValue(0)   # calls QCoreApplication.processEvents(), which is essential!
+                QCoreApplication.processEvents()
         finally:
             progress_dlg.close()
 
