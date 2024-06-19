@@ -1,6 +1,6 @@
 # Changelog
 
-## v0.1.7 (TBD)
+## v0.1.7 (06/04/2024; revised 06/19/2024
 - Modified _display/focus set_ selection behavior in the neural units table: If the `Ctrl/Command` is held down when a 
 table row is left-clicked, the corresponding unit is now **removed** from the focus set if it was already in that set 
 (unless it is the ONLY unit with the display focus). Otherwise, as before, it is added to the focus set if there is 
@@ -42,6 +42,7 @@ selection via `Shift-Click`.
   - To clear the current edit selection set, hit the `ESC` key, the `Spacebar`, or `Shift-Alt-Click`. 
 - **NOTE**: If the edit selection set is empty, hitting `Edit > Delete` reverts to the original behavior: the current 
 primary focus unit (royal blue) is deleted, and the next unit in the table becomes the new primary unit.
+- (_06/19/2024_) Improved behavior of the "indeterminate" progress bar in modal blocking dialog.
 
 
 ## v0.1.6 (05/13/2024)
